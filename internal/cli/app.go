@@ -33,6 +33,11 @@ type App struct {
 	// Now is the clock, so relative dates are reproducible under test.
 	Now func() time.Time
 
+	// Env reads an environment variable. It is a field rather than a direct
+	// call to os.Getenv so that a test can describe a machine it is not
+	// running on, such as one reached over SSH.
+	Env func(string) string
+
 	// Color enables ANSI styling.
 	Color bool
 }
@@ -49,6 +54,7 @@ func New() *App {
 		Stdin:  os.Stdin,
 		Dir:    dir,
 		Now:    time.Now,
+		Env:    os.Getenv,
 		Color:  useColor(),
 	}
 }
@@ -94,7 +100,7 @@ func init() {
 		cmdEdit, cmdStatus, cmdDue, cmdPriority,
 		cmdTag, cmdUntag, cmdAssign, cmdUnassign,
 		cmdLink, cmdUnlink, cmdMove, cmdRemove, cmdRestore,
-		cmdLog, cmdSync, cmdInfo, cmdWho, cmdUI, cmdHelp,
+		cmdLog, cmdSync, cmdInfo, cmdWho, cmdUI, cmdServe, cmdHelp,
 	}
 	for _, c := range commands {
 		byName[c.name] = c
@@ -106,6 +112,9 @@ func init() {
 
 // Run dispatches one invocation and returns the process exit status.
 func (a *App) Run(args []string) int {
+	if a.Env == nil {
+		a.Env = os.Getenv
+	}
 	if len(args) == 0 {
 		// A bare invocation opens the interactive interface, which is the
 		// usual way to reach for a notes tool.

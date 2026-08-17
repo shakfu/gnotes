@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gnotes</title>
+<link rel="stylesheet" href="app.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+
+<!--
+  Three regions: notebooks, entries, detail. On a narrow screen the detail
+  region becomes an overlay and the sidebar collapses behind a toggle.
+-->
+<header class="bar" id="topbar">
+  <button class="bar__menu" id="menu" aria-label="Show notebooks" aria-expanded="false">
+    <span></span><span></span><span></span>
+  </button>
+
+  <h1 class="bar__project" id="project">gnotes</h1>
+
+  <div class="bar__search">
+    <input id="search" type="search" placeholder="Search notes and tasks" autocomplete="off" spellcheck="false"
+           aria-label="Search notes and tasks">
+    <kbd class="bar__hint">/</kbd>
+  </div>
+
+  <div class="bar__counts" id="counts" aria-live="polite"></div>
+
+  <button class="btn btn--quiet" id="sync" title="Commit the event log to git">Sync</button>
+  <button class="btn btn--quiet btn--icon" id="theme" aria-label="Switch theme" title="Switch theme">◐</button>
+</header>
+
+<div class="shell">
+
+  <!-- Notebooks and tags. -->
+  <nav class="rail" id="rail" aria-label="Notebooks and tags">
+    <div class="rail__group">
+      <div class="rail__head">
+        <span class="eyebrow">Notebooks</span>
+        <button class="rail__add" id="new-notebook" title="New notebook">+</button>
+      </div>
+      <ul class="rail__list" id="notebooks"></ul>
+    </div>
+
+    <div class="rail__group">
+      <span class="eyebrow">Filter</span>
+      <div class="chips" id="filters">
+        <button class="chip" data-filter="kind" data-value="note">notes</button>
+        <button class="chip" data-filter="kind" data-value="task">tasks</button>
+        <button class="chip" data-filter="status" data-value="open">open</button>
+        <button class="chip" data-filter="status" data-value="done">done</button>
+        <button class="chip" data-filter="overdue" data-value="1">overdue</button>
+      </div>
+    </div>
+
+    <div class="rail__group rail__group--grow">
+      <span class="eyebrow">Tags</span>
+      <div class="chips" id="tags"></div>
+    </div>
+
+    <div class="rail__foot">
+      <span class="eyebrow" id="location"></span>
+    </div>
+  </nav>
+
+  <!-- The entry list. -->
+  <main class="list" id="list" aria-label="Entries">
+    <div class="list__head">
+      <span class="eyebrow" id="scope">All entries</span>
+      <div class="list__actions">
+        <label class="sort">
+          <span class="visually-hidden">Sort by</span>
+          <select id="sort">
+            <option value="rank">manual order</option>
+            <option value="updated">recently changed</option>
+            <option value="created">newest</option>
+            <option value="title">title</option>
+            <option value="due">due date</option>
+            <option value="priority">priority</option>
+          </select>
+        </label>
+        <button class="btn" id="new-note">Note</button>
+        <button class="btn btn--accent" id="new-task">Task</button>
+      </div>
+    </div>
+
+    <ol class="rows" id="rows"></ol>
+    <p class="empty" id="empty" hidden></p>
+  </main>
+
+  <!-- One entry in full. -->
+  <aside class="detail" id="detail" aria-label="Entry detail" hidden>
+    <div class="detail__inner" id="detail-inner"></div>
+  </aside>
+
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<!--
+  A dialog for the one thing that needs more than a click: naming a new entry.
+  Native <dialog> so focus trapping and escape come from the browser.
+-->
+<dialog class="ask" id="ask">
+  <form method="dialog" id="ask-form">
+    <label class="eyebrow" id="ask-label" for="ask-input">Title</label>
+    <input id="ask-input" autocomplete="off" spellcheck="false">
+    <menu>
+      <button value="cancel" class="btn btn--quiet" type="submit" formnovalidate>Cancel</button>
+      <button value="ok" class="btn btn--accent" id="ask-ok">Create</button>
+    </menu>
+  </form>
+</dialog>
+
+<script src="app.js" type="module"></script>
+</body>
+</html>

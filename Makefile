@@ -15,6 +15,10 @@ build: ## compile the binary into ./gnotes
 install: ## install into $GOPATH/bin
 	go install -ldflags "$(LDFLAGS)" $(CMD)
 
+.PHONY: build-slim
+build-slim: ## compile without the browser view, saving about 3 MB
+	go build -tags noweb -ldflags "$(LDFLAGS)" -o $(BIN) $(CMD)
+
 .PHONY: test
 test: ## run every test with the race detector
 	go test -race ./...
@@ -39,6 +43,7 @@ bench: ## run the benchmarks
 .PHONY: lint
 lint: ## vet and check formatting
 	go vet ./...
+	go vet -tags noweb ./...
 	@unformatted=$$(gofmt -l . | grep -v '^vendor/' || true); \
 	if [ -n "$$unformatted" ]; then \
 		echo "not gofmt'd:"; echo "$$unformatted"; exit 1; \
