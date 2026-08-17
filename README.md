@@ -166,12 +166,49 @@ gnotes ls --at 2026-08-01                   # the project as it stood then
 gnotes ls --at 3d
 gnotes sync                                 # commit the logs to git
 gnotes sync --push                          # and exchange with origin
+gnotes export | sqlite3 notes.db            # the project as a SQL database
 gnotes serve                                # the browser view
 gnotes serve --no-open                      # just print the address
 gnotes mcp                                  # serve to an agent (clients run this)
 ```
 
 Add `--json` to `ls`, `show` or `search` for machine-readable output.
+
+## SQL
+
+```sh
+gnotes export | sqlite3 notes.db
+```
+
+Renders the whole project as a SQL script: the tree, the tags and links, the
+raw event log, a full-text index, and a history table holding every value each
+field has ever held. Anything that reads SQLite can then read your notes.
+
+```sh
+sqlite3 notes.db "SELECT title, due FROM nodes WHERE status = 'open'"
+duckdb -c "ATTACH 'notes.db' AS n (TYPE sqlite); SELECT * FROM n.events"
+```
+
+This is for the questions the command line cannot ask. Which tags occur
+together, how long tasks take from creation to done, who has been writing and
+when. The history table makes one more possible: the project as it stood at any
+past event, as an index lookup rather than a replay.
+
+```sql
+SELECT node, value AS title FROM node_history
+ WHERE field = 'title'
+   AND from_seq <= 120 AND (to_seq IS NULL OR to_seq > 120);
+```
+
+The script is emitted rather than the database, so gnotes carries no database
+driver: the command costs 65 KB of binary where a driver would have cost
+several megabytes, more than the browser view. The script ends with worked
+queries for each of the above.
+
+The database is derived and disposable. The event logs stay the only source of
+truth, a stale copy is fixed by exporting again, and exporting the same log
+twice produces the same bytes. `--no-history` drops the point-in-time table;
+`--no-fts` drops the index, for a SQLite built without FTS5.
 
 ## The interactive interface
 

@@ -20,9 +20,9 @@ kinds, so a task-only operation aimed at a note is refused rather than quietly
 giving the note a status. Entries can reference each other, and both directions
 of a reference are shown.
 
-**Command line.** 28 commands in all, covering creation, editing, task fields,
-tags, links, moving, deletion and restore, alongside history, sync and the two
-other views. Entries are addressed by a six-character
+**Command line.** 29 commands in all, covering creation, editing, task fields,
+tags, links, moving, deletion and restore, alongside history, sync, export and
+the two other views. Entries are addressed by a six-character
 handle, by title, or by a fragment of one; an ambiguous name lists the
 candidates instead of guessing. Ranked full-text search over titles, bodies and
 tags. `--json` on `ls`, `show` and `search` for scripting.
@@ -52,6 +52,19 @@ this; it is a prefix of the events already on disk.
 paths so that whatever else you have staged or edited is untouched. `--push`
 also pulls from and pushes to `origin`; it is opt-in because the logs live on
 your working branch, and moving that branch is your decision.
+
+**SQL export.** `gnotes export | sqlite3 notes.db` renders the project as a SQL
+script: the tree, the tags and links, the raw event log, a full-text index, and
+a history table recording every value each field has ever held. It exists for
+the questions the command line cannot ask — what was open on a given date, how
+long tasks take, which tags occur together — and for reading the notes from
+anything that speaks SQLite, DuckDB included.
+
+The script is emitted rather than the database, so gnotes needs no database
+driver: the command costs 65 KB of binary against the several megabytes a
+driver would have added. The result is derived and disposable; the event logs
+remain the only source of truth, and exporting the same log twice produces the
+same bytes.
 
 ### Security
 
