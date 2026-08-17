@@ -269,6 +269,10 @@ make bench
 make cover
 ```
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
