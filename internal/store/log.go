@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/shakfu/gnotes/internal/event"
@@ -174,6 +175,33 @@ func parseLog(path string) ([]event.Event, map[event.Action]int, error) {
 	}
 
 	return events, skipped, nil
+}
+
+// Fingerprint summarises the event logs without reading them, so a caller can
+// notice that another process has written.
+//
+// Names, sizes and modification times are enough: the logs are append-only, so
+// any change moves at least one of them. Hashing the contents would be more
+// certain and would cost a full read on every check.
+func Fingerprint(p *Project) string {
+	entries, err := os.ReadDir(p.EventsDir())
+	if err != nil {
+		return ""
+	}
+
+	var parts []string
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != LogExt {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s:%d:%d", e.Name(), info.Size(), info.ModTime().UnixNano()))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "|")
 }
 
 // Append writes events to the actor's log as one contiguous batch.

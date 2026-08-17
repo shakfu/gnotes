@@ -38,6 +38,12 @@ or when a sync brings in someone else's work. The detail pane ends with the
 events that produced the entry, which is the one thing this view can show that
 an ordinary notes application cannot.
 
+**Agent access.** `gnotes mcp` serves the project over the Model Context
+Protocol, so an agent can read and write notes and tasks through eight tools.
+It is a front end like the others rather than a separate path: an agent is
+subject to the same rules a person is, so it cannot put a status on a note or
+delete something irrecoverably.
+
 **Time travel.** `gnotes ls --at 2026-08-01` or `--at 3d` replays the log up to
 a past moment and lists the project as it stood then. Nothing is stored for
 this; it is a prefix of the events already on disk.

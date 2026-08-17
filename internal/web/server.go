@@ -16,9 +16,6 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -97,7 +94,7 @@ func New(s *session.Session, opts Options) (*Server, error) {
 		watchers:     make(map[chan uint64]struct{}),
 		pollInterval: interval,
 	}
-	srv.fingerprint = srv.diskFingerprint()
+	srv.fingerprint = store.Fingerprint(s.Project)
 	srv.version.Store(1)
 	srv.routes()
 
@@ -267,7 +264,7 @@ func (s *Server) watch(stop <-chan struct{}) {
 
 // checkDisk reloads the session if the logs changed underneath it.
 func (s *Server) checkDisk() {
-	current := s.diskFingerprint()
+	current := store.Fingerprint(s.sess.Project)
 
 	s.mu.Lock()
 	changed := current != s.fingerprint
@@ -285,31 +282,6 @@ func (s *Server) checkDisk() {
 	if changed {
 		s.bump()
 	}
-}
-
-// diskFingerprint summarises the log files, so a change made by another
-// process is visible without reading them.
-func (s *Server) diskFingerprint() string {
-	dir := s.sess.Project.EventsDir()
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
-	}
-
-	var parts []string
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != store.LogExt {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("%s:%d:%d", e.Name(), info.Size(), info.ModTime().UnixNano()))
-	}
-	sort.Strings(parts)
-	return strings.Join(parts, "|")
 }
 
 // bump records a change and wakes every connected browser.
@@ -332,7 +304,7 @@ func (s *Server) bump() {
 // touchDisk records the on-disk state after this server wrote, so its own
 // write is not mistaken for an outside one on the next poll.
 func (s *Server) touchDisk() {
-	s.fingerprint = s.diskFingerprint()
+	s.fingerprint = store.Fingerprint(s.sess.Project)
 }
 
 // subscribe registers a channel for change notifications.

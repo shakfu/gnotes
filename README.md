@@ -12,8 +12,8 @@ markdown body and tags. A task has those plus a status, a priority, a due date
 and assignees. They sit side by side in a notebook, in whatever order you put
 them.
 
-Three views over the same project: a command line, an interactive terminal
-interface, and a browser page compiled into the binary. All three write through
+Four ways in: a command line, an interactive terminal interface, a browser page
+compiled into the binary, and an MCP server for agents. All four write through
 the same layer, so none of them can mean something different by an operation,
 and each notices when another writes.
 
@@ -95,6 +95,25 @@ The view costs about 3 MB of binary, almost all of it `net/http`. Build with
 `make build-slim` (`-tags noweb`) to leave it out; the command line and the
 terminal interface are unaffected.
 
+## Agents
+
+```sh
+claude mcp add gnotes -- gnotes mcp
+```
+
+Registers the project with Claude Code over the Model Context Protocol. The
+agent gets eight tools — list, search, get, create, update, delete, restore and
+sync — and the same rules as every other view: task fields are refused on notes,
+an ambiguous reference lists the candidates rather than guessing, and deletion
+is recoverable.
+
+Entries are addressed by the same six-character handle the command line prints,
+so a handle you read in your terminal can be pasted straight to the agent.
+
+`gnotes mcp` speaks the protocol on standard input and output and is not meant
+to be run by hand; a client starts and stops it. Everything on standard output
+is protocol, and diagnostics go to standard error.
+
 ## Commands
 
 Creating and editing:
@@ -149,6 +168,7 @@ gnotes sync                                 # commit the logs to git
 gnotes sync --push                          # and exchange with origin
 gnotes serve                                # the browser view
 gnotes serve --no-open                      # just print the address
+gnotes mcp                                  # serve to an agent (clients run this)
 ```
 
 Add `--json` to `ls`, `show` or `search` for machine-readable output.
@@ -216,8 +236,14 @@ invalidate on sync and merge between machines.
 
 **The browser page keeps no model.** Every change is a request, and the server
 answers with the state to render. Holding a local copy in step with an
-append-only log written by three front ends and by other machines is exactly
-the class of bug that avoids.
+append-only log written by four front ends and by other machines is exactly the
+class of bug that avoids.
+
+**Every front end is a shell over one write path.** The command line, the
+terminal interface, the browser and the agent all call the same session layer,
+which is the only place that mints events, chains their references and resolves
+ranks. A rule added there holds everywhere at once; a rule added in a front end
+would hold in one place and quietly not in the other three.
 
 ### Differences from epiq
 
@@ -242,6 +268,9 @@ the class of bug that avoids.
   build step and no framework, pushed live over server-sent events rather than
   a websocket. The traffic is one-way and tiny, and the browser reconnects on
   its own.
+- **The MCP server is hand-written against the protocol** rather than taken from
+  a framework: JSON-RPC over newline-delimited stdio is a few hundred lines of
+  standard library, and it adds about 0.1 MB to the binary.
 
 ### Performance
 
@@ -253,8 +282,8 @@ Measured on an M-series laptop.
 | canonical sort, 100,000 events | 14 ms |
 | build the search index, 400,000 tokens | 23 ms |
 | decode one event | 1.7 µs, 11 allocations |
-| binary, with the browser view | 7.3 MB |
-| binary, `-tags noweb` | 4.1 MB |
+| binary, everything | 7.4 MB |
+| binary, `-tags noweb` | 4.2 MB |
 
 Author logs are parsed in parallel; the canonical sort works in place; the
 tokenizer hands back substrings of the input rather than allocating per word.
