@@ -38,6 +38,10 @@ type Session struct {
 	// Skipped counts events written by a newer gnotes.
 	Skipped map[event.Action]int
 
+	// Torn names the logs whose last record was incomplete when they were
+	// read. One event was lost from each; see store.Load.
+	Torn []string
+
 	// log is every event known to this session, staged ones included, in
 	// canonical order.
 	log []event.Event
@@ -80,6 +84,7 @@ func (s *Session) Reload() error {
 	}
 	s.log = loaded.Events
 	s.Skipped = loaded.Skipped
+	s.Torn = loaded.Torn
 	s.pending = nil
 	s.State, s.Problems = state.Materialize(s.log)
 	return nil
@@ -106,15 +111,35 @@ func (s *Session) Pending() int { return len(s.pending) }
 func (s *Session) Log() []event.Event { return s.log }
 
 // Commit appends the staged events to the actor's log.
+//
+// A failed append rolls the staging back, so the events of a command that
+// could not be written are never carried into the next one.
 func (s *Session) Commit() error {
 	if len(s.pending) == 0 {
 		return nil
 	}
 	if err := store.Append(s.Project, s.Actor, s.pending); err != nil {
+		s.Rollback()
 		return err
 	}
 	s.pending = nil
 	return nil
+}
+
+// Rollback discards the staged events and rebuilds the tree from what is
+// committed, undoing a command that failed partway through.
+//
+// It re-materializes from the in-memory log rather than re-reading the disk,
+// because a failed command wrote nothing: the committed prefix of the log is
+// already the truth, and re-deriving from it cannot itself fail. Picking up
+// another process's writes is Reload's job.
+func (s *Session) Rollback() {
+	if len(s.pending) == 0 {
+		return
+	}
+	s.log = s.log[:len(s.log)-len(s.pending)]
+	s.pending = nil
+	s.State, s.Problems = state.Materialize(s.log)
 }
 
 // emit stages one event: it mints the id, chains it to the current edge of the

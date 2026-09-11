@@ -272,6 +272,10 @@ func (m *Model) setStatus(format string, args ...any) {
 // than raised, because a full-screen interface that exits on a bad command
 // would lose whatever else was in flight.
 func (m *Model) setError(err error) {
+	// Every failed action and every failed commit lands here, which makes it
+	// the one place that can guarantee a half-staged command is dropped before
+	// the next keystroke commits it.
+	m.sess.Rollback()
 	m.status, m.statusErr = err.Error(), true
 }
 

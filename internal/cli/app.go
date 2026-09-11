@@ -228,6 +228,14 @@ func (a *App) open() (*session.Session, error) {
 		fmt.Fprintf(a.Stderr, "note: skipped events this version does not understand (%s); upgrade gnotes to apply them\n",
 			strings.Join(parts, ", "))
 	}
+
+	// A log whose last record was cut short lost the command that was being
+	// written when the process died. Nothing else is affected, but the loss is
+	// silent unless it is said.
+	if len(s.Torn) > 0 {
+		fmt.Fprintf(a.Stderr, "warning: %s ends in an incomplete record, from a gnotes that was interrupted mid-write; the last event in it was discarded\n",
+			strings.Join(s.Torn, ", "))
+	}
 	return s, nil
 }
 

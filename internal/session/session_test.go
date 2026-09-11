@@ -678,3 +678,96 @@ func TestOpenReportsAMissingProject(t *testing.T) {
 		t.Fatal("Open succeeded outside a project")
 	}
 }
+
+// titled reports whether any node in the tree carries the title.
+func titled(s *state.State, title string) bool {
+	for _, n := range s.Nodes {
+		if n.Title == title {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRollbackDropsAHalfStagedCommand(t *testing.T) {
+	s := newSession(t)
+	nb, err := s.NewNotebook("work")
+	if err != nil {
+		t.Fatalf("NewNotebook: %v", err)
+	}
+	if err := s.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	n, err := s.NewTask(nb.ID, "half staged", "")
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	if err := s.SetDue(n, "the twelfth of never"); err == nil {
+		t.Fatal("an unparseable due date was accepted")
+	}
+
+	s.Rollback()
+
+	if s.Pending() != 0 {
+		t.Fatalf("Pending = %d, want 0", s.Pending())
+	}
+	if titled(s.State, "half staged") {
+		t.Fatal("the rolled back task is still in the tree")
+	}
+
+	if _, err := s.NewNote(nb.ID, "kept", ""); err != nil {
+		t.Fatalf("NewNote: %v", err)
+	}
+	again := reopen(t, s)
+
+	if titled(again.State, "half staged") {
+		t.Fatal("a rolled back event reached disk on the next commit")
+	}
+	if !titled(again.State, "kept") {
+		t.Fatal("the later note was not written")
+	}
+}
+
+func TestCommitFailureDropsTheStagedEvents(t *testing.T) {
+	s := newSession(t)
+	nb, err := s.NewNotebook("work")
+	if err != nil {
+		t.Fatalf("NewNotebook: %v", err)
+	}
+	if err := s.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if _, err := s.NewNote(nb.ID, "unwritable", ""); err != nil {
+		t.Fatalf("NewNote: %v", err)
+	}
+
+	// Append refuses to write for an actor with no name, which fails the
+	// commit without putting anything on disk to clean up.
+	name := s.Actor.Name
+	s.Actor.Name = ""
+	if err := s.Commit(); err == nil {
+		t.Fatal("the commit succeeded with an unconfigured actor")
+	}
+	s.Actor.Name = name
+
+	if s.Pending() != 0 {
+		t.Fatalf("Pending = %d, want 0", s.Pending())
+	}
+	if titled(s.State, "unwritable") {
+		t.Fatal("the failed commit left its node in the tree")
+	}
+
+	if _, err := s.NewNote(nb.ID, "kept", ""); err != nil {
+		t.Fatalf("NewNote: %v", err)
+	}
+	again := reopen(t, s)
+
+	if titled(again.State, "unwritable") {
+		t.Fatal("an event from the failed commit reached disk")
+	}
+	if !titled(again.State, "kept") {
+		t.Fatal("the later note was not written")
+	}
+}

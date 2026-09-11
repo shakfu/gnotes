@@ -309,6 +309,11 @@ func (s *Server) callTool(raw json.RawMessage) (any, error) {
 
 		text, err := entry.run(s, p.Arguments)
 		if err != nil {
+			// A tool that failed partway may have staged events already. The
+			// server outlives the call, so dropping them here is what keeps
+			// them out of the next tool's commit.
+			s.sess.Rollback()
+
 			// A failed operation is a result the model can read and react to,
 			// not a protocol fault.
 			return textResult(err.Error(), true), nil

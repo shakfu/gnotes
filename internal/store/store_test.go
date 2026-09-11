@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -622,5 +623,127 @@ func BenchmarkLoad(b *testing.B) {
 		if _, err := Load(p); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// tornWrite simulates a process that died mid-append: a complete log with the
+// first half of one more record on the end and no final newline.
+func tornWrite(t *testing.T, p *Project, a Actor) string {
+	t.Helper()
+
+	path := filepath.Join(p.EventsDir(), LogName(a))
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open the log: %v", err)
+	}
+	if _, err := f.WriteString(`{"id":"01M0TORNTORNTORNTORN0000","ref":"","act`); err != nil {
+		t.Fatalf("write the torn tail: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close the log: %v", err)
+	}
+	return path
+}
+
+func TestLoadDropsATornFinalRecord(t *testing.T) {
+	p := initProject(t)
+	a := testActor(t, "sa")
+	want := writeEvents(t, p, a, 3, "")
+	tornWrite(t, p, a)
+
+	got, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load refused a project with a torn tail: %v", err)
+	}
+	if len(got.Events) != len(want) {
+		t.Fatalf("loaded %d events, want %d", len(got.Events), len(want))
+	}
+	if len(got.Torn) != 1 || got.Torn[0] != LogName(a) {
+		t.Fatalf("Torn = %v, want [%s]", got.Torn, LogName(a))
+	}
+}
+
+// Reading is tolerant, but the partial record still has to leave the file
+// before the next batch lands behind it: fused together they would form one
+// terminated line, which is malformed rather than torn and so fatal for good.
+func TestAppendDiscardsATornTailBeforeWriting(t *testing.T) {
+	p := initProject(t)
+	a := testActor(t, "sa")
+	first := writeEvents(t, p, a, 3, "")
+	path := tornWrite(t, p, a)
+
+	second := writeEvents(t, p, a, 2, first[len(first)-1].ID)
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the log: %v", err)
+	}
+	if strings.Contains(string(raw), "01M0TORNTORNTORNTORN0000") {
+		t.Fatal("the torn record survived the next append")
+	}
+
+	got, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := len(first) + len(second); len(got.Events) != want {
+		t.Fatalf("loaded %d events, want %d", len(got.Events), want)
+	}
+	if len(got.Torn) != 0 {
+		t.Fatalf("Torn = %v, want none once the tail is gone", got.Torn)
+	}
+}
+
+// A record damaged anywhere but the end is still fatal: the tolerance is for a
+// write that was cut short, not for corruption in general.
+func TestLoadRefusesAMalformedInteriorRecord(t *testing.T) {
+	p := initProject(t)
+	a := testActor(t, "sa")
+	writeEvents(t, p, a, 3, "")
+
+	path := filepath.Join(p.EventsDir(), LogName(a))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the log: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	lines[1] = `{"id":"01M0BADBADBADBADBADB0000","act`
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("rewrite the log: %v", err)
+	}
+
+	if _, err := Load(p); err == nil {
+		t.Fatal("Load accepted a malformed interior record")
+	}
+}
+
+// A write cut exactly on a record boundary leaves a whole event with no
+// newline. Load already keeps it, so the next append must terminate it rather
+// than truncate it, or an event a command reported would disappear.
+func TestAppendKeepsACompleteRecordThatLostItsNewline(t *testing.T) {
+	p := initProject(t)
+	a := testActor(t, "sa")
+	first := writeEvents(t, p, a, 2, "")
+
+	path := filepath.Join(p.EventsDir(), LogName(a))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the log: %v", err)
+	}
+	if err := os.WriteFile(path, bytes.TrimRight(raw, "\n"), 0o644); err != nil {
+		t.Fatalf("rewrite the log: %v", err)
+	}
+
+	second := writeEvents(t, p, a, 1, first[len(first)-1].ID)
+
+	got, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := len(first) + len(second); len(got.Events) != want {
+		t.Fatalf("loaded %d events, want %d", len(got.Events), want)
+	}
+	if len(got.Torn) != 0 {
+		t.Fatalf("Torn = %v, want none", got.Torn)
 	}
 }

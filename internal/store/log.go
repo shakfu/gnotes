@@ -23,6 +23,10 @@ type LoadResult struct {
 	// keyed by action. They were written by a newer gnotes and are left
 	// untouched on disk, so upgrading applies them.
 	Skipped map[event.Action]int
+
+	// Torn names the logs whose last record was incomplete, one event lost
+	// each. See parseLog.
+	Torn []string
 }
 
 // Load reads and merges every author's log.
@@ -42,6 +46,7 @@ func Load(p *Project) (LoadResult, error) {
 	type parsed struct {
 		events  []event.Event
 		skipped map[event.Action]int
+		torn    bool
 		err     error
 	}
 	results := make([]parsed, len(files))
@@ -62,8 +67,8 @@ func Load(p *Project) (LoadResult, error) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			ev, skipped, err := parseLog(path)
-			results[i] = parsed{events: ev, skipped: skipped, err: err}
+			ev, skipped, torn, err := parseLog(path)
+			results[i] = parsed{events: ev, skipped: skipped, torn: torn, err: err}
 		}(i, path)
 	}
 	wg.Wait()
@@ -77,13 +82,16 @@ func Load(p *Project) (LoadResult, error) {
 	}
 
 	out := LoadResult{Events: make([]event.Event, 0, total)}
-	for _, r := range results {
+	for i, r := range results {
 		out.Events = append(out.Events, r.events...)
 		for action, n := range r.skipped {
 			if out.Skipped == nil {
 				out.Skipped = make(map[event.Action]int)
 			}
 			out.Skipped[action] += n
+		}
+		if r.torn {
+			out.Torn = append(out.Torn, filepath.Base(files[i]))
 		}
 	}
 
@@ -125,21 +133,32 @@ func logFiles(dir string) ([]string, error) {
 // to the project's edit history, not its data, so it stays in the low
 // megabytes; one read beats a syscall per buffer, and it lets each line be
 // decoded from a subslice with no copying.
-func parseLog(path string) ([]event.Event, map[event.Action]int, error) {
+//
+// A malformed record is fatal, with one exception: an unterminated last line
+// that does not decode is a torn tail, left by a process that died mid-append.
+// It is reported and dropped rather than refusing the project, because the
+// alternative is that one crash makes every later command fail to open. Only
+// the last line qualifies, and only when the file has no final newline, so a
+// record damaged anywhere else is still refused. A last line that decodes is a
+// whole record that lost only its newline, and is kept. Append settles the
+// tail the same way before it writes again.
+func parseLog(path string) ([]event.Event, map[event.Action]int, bool, error) {
 	author, ok := ParseLogName(filepath.Base(path))
 	if !ok {
-		return nil, nil, fmt.Errorf("event log %s is not named after an author id", filepath.Base(path))
+		return nil, nil, false, fmt.Errorf("event log %s is not named after an author id", filepath.Base(path))
 	}
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, nil, false, fmt.Errorf("read %s: %w", path, err)
 	}
+	unterminated := len(raw) > 0 && raw[len(raw)-1] != '\n'
 
 	// Roughly 150 bytes per line in practice; a close guess avoids regrowing
 	// the slice several times on a long log.
 	events := make([]event.Event, 0, len(raw)/150+1)
 	var skipped map[event.Action]int
+	var torn bool
 
 	for lineNo, rest := 1, raw; len(rest) > 0; lineNo++ {
 		var line []byte
@@ -166,7 +185,11 @@ func parseLog(path string) ([]event.Event, map[event.Action]int, error) {
 				skipped[unknown.Action]++
 				continue
 			}
-			return nil, nil, fmt.Errorf("%s:%d: %w", filepath.Base(path), lineNo, err)
+			if unterminated && rest == nil {
+				torn = true
+				continue
+			}
+			return nil, nil, false, fmt.Errorf("%s:%d: %w", filepath.Base(path), lineNo, err)
 		}
 
 		// The author is carried by the filename, not repeated on every line.
@@ -174,7 +197,7 @@ func parseLog(path string) ([]event.Event, map[event.Action]int, error) {
 		events = append(events, e)
 	}
 
-	return events, skipped, nil
+	return events, skipped, torn, nil
 }
 
 // Fingerprint summarises the event logs without reading them, so a caller can
@@ -227,10 +250,21 @@ func Append(p *Project, actor Actor, events []event.Event) error {
 		return fmt.Errorf("create events directory: %w", err)
 	}
 
+	path := filepath.Join(dir, LogName(actor))
+	terminate, err := settleTail(path)
+	if err != nil {
+		return err
+	}
+
 	// Build the whole batch first. A single write keeps a partially applied
 	// operation off disk: either every event of a command lands or none does.
 	var buf bytes.Buffer
-	buf.Grow(len(events) * 160)
+	buf.Grow(len(events)*160 + 1)
+	if terminate {
+		// Part of the batch rather than a write of its own, so it still
+		// arrives under O_APPEND and cannot split another process's append.
+		buf.WriteByte('\n')
+	}
 	for _, e := range events {
 		line, err := event.Encode(e)
 		if err != nil {
@@ -240,7 +274,6 @@ func Append(p *Project, actor Actor, events []event.Event) error {
 		buf.WriteByte('\n')
 	}
 
-	path := filepath.Join(dir, LogName(actor))
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
@@ -250,12 +283,85 @@ func Append(p *Project, actor Actor, events []event.Event) error {
 		f.Close()
 		return fmt.Errorf("append to %s: %w", path, err)
 	}
-	// Durability is git's job here, not ours: the log is committed and pushed,
-	// and a torn tail from a crashed process is recovered by the same sync
-	// that recovers from a lost machine. Paying an fsync per command would
-	// cost more than it protects.
+	// No fsync. A command that returns is durable against a crashed gnotes,
+	// not against a power cut: the write has reached the page cache, and what
+	// protects the log across a lost machine is the git sync, not the disk
+	// barrier. Paying an fsync per command would cost more than it protects.
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", path, err)
 	}
 	return nil
+}
+
+// settleTail deals with a log whose last line has no newline, so that the next
+// batch does not land behind it and fuse to it. A fused line is malformed in
+// the interior of the file, which Load refuses for good, where an unterminated
+// last line is something it can still work with.
+//
+// It answers the question the same way parseLog does. A tail that decodes is a
+// whole record that lost only its newline; the caller writes that newline
+// ahead of the batch and the record survives. A tail that does not decode is
+// half a record and is truncated away.
+//
+// The cost on the normal path is a stat and a one-byte read. Truncating only
+// while the file is still the size it was measured at keeps this from cutting
+// off a concurrent append by the same author from another process; if one is
+// in flight the repair is left for the next command.
+func settleTail(path string) (terminate bool, err error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat %s: %w", path, err)
+	}
+	size := info.Size()
+	if size == 0 {
+		return false, nil
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	var last [1]byte
+	if _, err := f.ReadAt(last[:], size-1); err != nil {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	if last[0] == '\n' {
+		return false, nil
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	cut := int64(bytes.LastIndexByte(raw, '\n') + 1)
+	if decodable(bytes.TrimSpace(raw[cut:])) {
+		return true, nil
+	}
+
+	if again, err := os.Stat(path); err != nil || again.Size() != size {
+		return false, nil
+	}
+	if err := os.Truncate(path, cut); err != nil {
+		return false, fmt.Errorf("discard the torn tail of %s: %w", path, err)
+	}
+	return false, nil
+}
+
+// decodable reports whether a line is a whole record. An action this build does
+// not implement still counts: the record is complete, only its meaning is not
+// available here.
+func decodable(line []byte) bool {
+	if len(line) == 0 {
+		return false
+	}
+	if _, err := event.Decode(line); err != nil {
+		var unknown *event.ErrUnknownAction
+		return errors.As(err, &unknown)
+	}
+	return true
 }

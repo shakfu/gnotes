@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -357,5 +358,58 @@ func TestTwoClonesMergeWithoutConflict(t *testing.T) {
 	}
 	if len(authors) != 3 {
 		t.Fatalf("got %d authors, want 3 distinct log files merged", len(authors))
+	}
+}
+
+// hook installs a pre-commit hook with the given exit status and returns the
+// path it touches when it runs.
+func hook(t *testing.T, root string, status int) string {
+	t.Helper()
+
+	marker := filepath.Join(t.TempDir(), "ran")
+	dir := filepath.Join(root, ".git", "hooks")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\ntouch " + marker + "\nexit " + strconv.Itoa(status) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "pre-commit"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return marker
+}
+
+// A notes commit is a commit in the user's repository. Skipping their hooks
+// would step around signing, audit and policy checks without saying so.
+func TestCommitRunsTheRepositoryHooks(t *testing.T) {
+	root, p := newRepo(t)
+	writeEvent(t, p)
+	marker := hook(t, root, 0)
+
+	r, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Commit("notes"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("the pre-commit hook did not run")
+	}
+}
+
+func TestCommitFailsWhenAHookRefuses(t *testing.T) {
+	root, p := newRepo(t)
+	writeEvent(t, p)
+	hook(t, root, 1)
+
+	r, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Commit("notes"); err == nil {
+		t.Fatal("Commit succeeded despite a refusing pre-commit hook")
+	}
+	if out := git(t, root, "log", "--oneline"); strings.Contains(out, "notes") {
+		t.Fatalf("the refused commit was recorded:\n%s", out)
 	}
 }

@@ -2,7 +2,9 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -434,8 +436,9 @@ func (s *Server) mutate(w http.ResponseWriter, action func() (any, error)) {
 	result, err := action()
 	if err != nil {
 		// Nothing reached disk, but the in-memory tree may hold events staged
-		// before the failure, so it is reloaded rather than left half-applied.
-		_ = s.sess.Reload()
+		// before the failure, so the staging is dropped rather than left to be
+		// written by whichever request commits next.
+		s.sess.Rollback()
 		s.mu.Unlock()
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -505,10 +508,16 @@ func (s *Server) handleNewNode(w http.ResponseWriter, r *http.Request) {
 
 		var n *state.Node
 		var err error
-		if req.Kind == "task" {
+		switch req.Kind {
+		case "task":
 			n, err = s.sess.NewTask(notebook, req.Title, req.Body)
-		} else {
+		case "note", "":
 			n, err = s.sess.NewNote(notebook, req.Title, req.Body)
+		default:
+			// Guessing would answer a stale or misspelled request with a
+			// record of the wrong kind and a 200. Notebooks have their own
+			// endpoint, so "notebook" is wrong here too.
+			return nil, fmt.Errorf("unknown kind %q; use note or task", req.Kind)
 		}
 		if err != nil {
 			return nil, err
@@ -675,8 +684,10 @@ func (s *Server) handleMoveNode(w http.ResponseWriter, r *http.Request) {
 			return nil, err
 		}
 
-		pos := rank.End()
+		var pos rank.Position
 		switch req.Position {
+		case "end", "bottom", "":
+			pos = rank.End()
 		case "start", "top":
 			pos = rank.Start()
 		case "before":
@@ -691,6 +702,8 @@ func (s *Server) handleMoveNode(w http.ResponseWriter, r *http.Request) {
 				return nil, err
 			}
 			pos = rank.After(sib.ID)
+		default:
+			return nil, fmt.Errorf("unknown position %q; use start, end, before or after", req.Position)
 		}
 
 		if err := s.sess.Move(n, req.Notebook, pos); err != nil {
@@ -783,6 +796,11 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 
 // decode reads a JSON request body. An empty body is accepted as an empty
 // object, so a request with no options need not send one.
+//
+// The body must be one object and nothing else. A decoder stops at the end of
+// the first value it reads, so without the second read a body carrying two
+// objects, or an object followed by junk, would be accepted as the first one
+// alone and a client or proxy framing its requests wrongly would look correct.
 func decode(r *http.Request, into any) error {
 	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<22))
 	dec.DisallowUnknownFields()
@@ -792,6 +810,9 @@ func decode(r *http.Request, into any) error {
 			return nil
 		}
 		return fmt.Errorf("malformed request: %w", err)
+	}
+	if err := dec.Decode(&json.RawMessage{}); err != io.EOF {
+		return errors.New("malformed request: trailing data after the JSON body")
 	}
 	return nil
 }

@@ -114,8 +114,29 @@ func (e *encoder) line(format string, args ...any) {
 	}
 }
 
-func (e *encoder) blank()                             { e.line("") }
-func (e *encoder) comment(format string, args ...any) { e.line("-- " + fmt.Sprintf(format, args...)) }
+func (e *encoder) blank() { e.line("") }
+
+// comment writes one `--` line.
+//
+// The text is flattened first. A comment runs to the end of the line, so a
+// newline in a value interpolated here -- the project name is read from
+// .gnotes/config.json and is whatever the repository says it is -- would end
+// the comment and leave the rest of the value as a statement for sqlite3 to
+// execute.
+func (e *encoder) comment(format string, args ...any) {
+	e.line("-- " + flatten(fmt.Sprintf(format, args...)))
+}
+
+// flatten replaces control characters with spaces, tab excepted because the
+// emitted example queries are indented with it.
+func flatten(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r != '\t' && (r < 0x20 || r == 0x7f) {
+			return ' '
+		}
+		return r
+	}, s)
+}
 func (e *encoder) section(title string) {
 	e.blank()
 	e.line("-- %s", strings.Repeat("-", 68))

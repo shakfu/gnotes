@@ -523,3 +523,37 @@ func query(t *testing.T, db, sql string) string {
 	}
 	return strings.TrimRight(string(out), "\n")
 }
+
+// A comment runs to the end of the line, so a newline in a value written into
+// one escapes into executable SQL. The project name comes from the repository's
+// config file, which makes it the reachable path.
+func TestCommentMetadataCannotEscapeIntoStatements(t *testing.T) {
+	st, log := project(t)
+
+	opt := fullOptions()
+	opt.Project = "safe\nDROP TABLE nodes;--"
+	script := export(t, st, log, opt)
+
+	header := script[:strings.Index(script, "PRAGMA foreign_keys")]
+	if !strings.Contains(header, "-- project: safe DROP TABLE nodes;--") {
+		t.Errorf("the name was not flattened into its comment:\n%s", header)
+	}
+	for _, line := range strings.Split(header, "\n") {
+		if line != "" && !strings.HasPrefix(line, "--") {
+			t.Fatalf("the name produced a line outside the comment: %q", line)
+		}
+	}
+
+	// The load is the real assertion: a DROP that reached the parser would
+	// take the table with it, and -bail would stop on the count that follows.
+	db := loadIntoSQLite(t, script)
+	if got := query(t, db, "SELECT count(*) FROM nodes;"); got != "5" {
+		t.Errorf("nodes: got %s, want 5", got)
+	}
+
+	// The name is still recorded verbatim, because meta holds it as a literal
+	// rather than as comment text.
+	if got := query(t, db, "SELECT v FROM meta WHERE k = 'project';"); got != opt.Project {
+		t.Errorf("project meta: got %q, want %q", got, opt.Project)
+	}
+}

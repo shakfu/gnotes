@@ -733,3 +733,40 @@ func TestSequentialRequestsOnOneConnection(t *testing.T) {
 		t.Fatalf("the entry created earlier in the session is not listed: %v", last)
 	}
 }
+
+func TestAFailedToolDoesNotLeakIntoTheNextCall(t *testing.T) {
+	f := newFixture(t)
+
+	// The task is staged before the priority is parsed, so this fails with an
+	// event already in the session.
+	text, isError := f.call("gnotes_create", map[string]any{
+		"kind": "task", "title": "leaked", "notebook": f.work, "priority": "screaming",
+	})
+	if !isError {
+		t.Fatalf("an unknown priority was accepted: %s", text)
+	}
+
+	f.mustCall("gnotes_create", map[string]any{
+		"kind": "note", "title": "kept", "notebook": f.work,
+	})
+
+	fresh, err := session.OpenProject(f.sess.Project, f.sess.Actor)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	var leaked, kept bool
+	for _, n := range fresh.State.Nodes {
+		switch n.Title {
+		case "leaked":
+			leaked = true
+		case "kept":
+			kept = true
+		}
+	}
+	if leaked {
+		t.Fatal("the failed tool's node was written by the next tool's commit")
+	}
+	if !kept {
+		t.Fatal("the later note was not written")
+	}
+}

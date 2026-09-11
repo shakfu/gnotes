@@ -117,7 +117,11 @@ func (r *Repo) Commit(message string) (bool, error) {
 		return false, fmt.Errorf("stage the event logs: %w", err)
 	}
 
-	commitArgs := append([]string{"commit", "--no-verify", "-m", message, "--"}, r.Paths...)
+	// Hooks run. This is a commit in the user's repository like any other, and
+	// a pre-commit hook that enforces signing or an audit trail is exactly the
+	// policy a notes commit should not be the one exception to. A hook that
+	// refuses fails the sync with git's own message.
+	commitArgs := append([]string{"commit", "-m", message, "--"}, r.Paths...)
 	if _, err := run(r.Root, commitArgs...); err != nil {
 		return false, fmt.Errorf("commit the event logs: %w", err)
 	}

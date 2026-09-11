@@ -53,6 +53,10 @@ paths so that whatever else you have staged or edited is untouched. `--push`
 also pulls from and pushes to `origin`; it is opt-in because the logs live on
 your working branch, and moving that branch is your decision.
 
+The commit runs your hooks. A repository that requires signing or an audit
+trail should not have notes as its one exception, so a hook that refuses fails
+the sync with git's own message.
+
 **SQL export.** `gnotes export | sqlite3 notes.db` renders the project as a SQL
 script: the tree, the tags and links, the raw event log, a full-text index, and
 a history table recording every value each field has ever held. It exists for
@@ -91,7 +95,7 @@ exists in such a build to explain that it was left out.
 The event log is at schema version 1: one JSON object per line, in
 `.gnotes/events/<author-id>.<author-name>.jsonl`, appended and never rewritten.
 
-Two properties are worth knowing before the format settles:
+Three properties are worth knowing before the format settles:
 
 - **Unknown actions are skipped, not fatal.** A log written by a newer gnotes
   still opens in an older one, which steps over what it does not understand and
@@ -99,3 +103,13 @@ Two properties are worth knowing before the format settles:
 - **The version field is the compatibility gate.** It will only be raised for a
   change an older build cannot read. Additive changes take the unknown-action
   path instead.
+- **An interrupted write costs one command, not the project.** A process killed
+  mid-append leaves a last line with no closing newline. If it is a whole
+  record it is kept and the next append terminates it; if it is half a record
+  it is reported, dropped, and removed before the next append lands behind it.
+  A record malformed anywhere but the end is still fatal, because that is
+  corruption rather than a write that was cut short.
+
+A command that returns has reached the page cache, not the disk. There is no
+fsync per append: what protects the log across a lost machine is `gnotes sync`,
+not a disk barrier.

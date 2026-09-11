@@ -915,3 +915,85 @@ func TestSameOriginHelper(t *testing.T) {
 		}
 	}
 }
+
+// A kind the server does not know is a stale or misspelled client, not a note.
+// Answering it with a note and a 200 hides the mistake and writes the wrong
+// record; the MCP surface has always rejected it.
+func TestNewNodeRejectsUnknownKinds(t *testing.T) {
+	f := newFixture(t)
+
+	for _, kind := range []string{"notebook", "widget", "Task"} {
+		res := f.do("POST", "/api/node", map[string]any{
+			"kind": kind, "title": "wrong kind", "notebook": f.work,
+		})
+		res.Body.Close()
+		if res.StatusCode != http.StatusBadRequest {
+			t.Errorf("kind %q: status = %s, want 400", kind, res.Status)
+		}
+	}
+
+	// An absent kind still means a note, which is what the page relies on.
+	f.post("/api/node", map[string]any{"title": "no kind", "notebook": f.work})
+
+	got := entries(f.get("/api/state?notebook=" + f.work))
+	if len(got) != 1 || got[0] != "no kind" {
+		t.Fatalf("got %v, want only the node created without a kind", got)
+	}
+}
+
+func TestMoveRejectsUnknownPositions(t *testing.T) {
+	f := newFixture(t)
+	id := f.newTask("somewhere")
+
+	res := f.do("POST", "/api/node/"+id+"/move", map[string]any{"position": "middle"})
+	res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %s, want 400", res.Status)
+	}
+}
+
+// A decoder stops at the end of the first value, so without the trailing check
+// a doubled or padded body would be read as its first object alone.
+func TestDecodeRejectsTrailingData(t *testing.T) {
+	f := newFixture(t)
+
+	bodies := map[string]string{
+		"second object": `{"title":"one","notebook":"` + f.work + `"}{"title":"two"}`,
+		"trailing text": `{"title":"one","notebook":"` + f.work + `"} rubbish`,
+	}
+	for name, body := range bodies {
+		req, err := http.NewRequest("POST", f.http.URL+"/api/node", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer test-token")
+		req.Header.Set("Content-Type", "application/json")
+
+		res, err := f.http.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %s, want 400", name, res.Status)
+		}
+	}
+
+	// Trailing whitespace is framing, not data.
+	req, err := http.NewRequest("POST", f.http.URL+"/api/node",
+		strings.NewReader(`{"title":"spaced","notebook":"`+f.work+`"}`+"\n\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := f.http.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("trailing whitespace: status = %s, want 200", res.Status)
+	}
+}
