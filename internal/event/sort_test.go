@@ -263,7 +263,7 @@ func TestEdgeRef(t *testing.T) {
 func TestSplitAtPartitionsByTime(t *testing.T) {
 	c := chain("A", "", 100, 5) // timestamps 100..104
 
-	before, after := SplitAt(c, 102)
+	before, after := SplitAt(c, 102, farFuture)
 
 	if len(before) != 3 || len(after) != 2 {
 		t.Fatalf("split = %d before, %d after; want 3 and 2", len(before), len(after))
@@ -281,7 +281,7 @@ func TestSplitAtHoldsBackDescendantsOfExcludedEvents(t *testing.T) {
 	late := Event{ID: mkID(900, "A"), Ref: early.ID}
 	skewed := Event{ID: mkID(200, "A"), Ref: late.ID}
 
-	before, after := SplitAt(Sort([]Event{early, late, skewed}), 500)
+	before, after := SplitAt(Sort([]Event{early, late, skewed}), 500, farFuture)
 
 	if len(before) != 1 || before[0].ID != early.ID {
 		t.Fatalf("before = %v, want only the early event", ids(before))
@@ -297,13 +297,36 @@ func TestSplitAtHoldsBackDescendantsOfExcludedEvents(t *testing.T) {
 	t.Fatal("the skewed descendant was replayed without its ancestor")
 }
 
+// farFuture is a reader's clock later than every timestamp in these tests, so
+// no event counts as dated in the future.
+const farFuture = 1 << 46
+
+// An event dated after the reader's clock was dated by a wrong clock. It must
+// not hold back the events written after it, which would hide them from any
+// cutoff until that date arrived.
+func TestSplitAtDoesNotLetAFutureDateHideLaterEvents(t *testing.T) {
+	root := Event{ID: mkID(100, "A")}
+	future := Event{ID: mkID(90000, "B"), Ref: root.ID} // a clock far ahead
+	after := Event{ID: mkID(300, "A"), Ref: future.ID}  // written soon after, correctly dated
+
+	before, held := SplitAt(Sort([]Event{root, future, after}), 500, 1000)
+	if len(before) != 3 || len(held) != 0 {
+		t.Fatalf("before = %v, held = %v; want all three by the cutoff", ids(before), ids(held))
+	}
+
+	// Before the correctly dated event, the future one is still held back.
+	if before, _ := SplitAt(Sort([]Event{root, future, after}), 200, 1000); len(before) != 1 {
+		t.Fatalf("before = %v, want only the root", ids(before))
+	}
+}
+
 func TestSplitAtBoundaries(t *testing.T) {
 	c := chain("A", "", 100, 3)
 
-	if before, _ := SplitAt(c, 0); len(before) != 0 {
+	if before, _ := SplitAt(c, 0, farFuture); len(before) != 0 {
 		t.Fatalf("cutoff before everything kept %d events", len(before))
 	}
-	if _, after := SplitAt(c, 1<<40); len(after) != 0 {
+	if _, after := SplitAt(c, 1<<40, farFuture); len(after) != 0 {
 		t.Fatalf("cutoff after everything held back %d events", len(after))
 	}
 }
@@ -311,7 +334,7 @@ func TestSplitAtBoundaries(t *testing.T) {
 // An id that cannot be dated cannot be shown as part of a past state.
 func TestSplitAtHoldsBackUndatableEvents(t *testing.T) {
 	bad := Event{ID: "not-a-ulid"}
-	before, after := SplitAt([]Event{bad}, 1<<40)
+	before, after := SplitAt([]Event{bad}, 1<<40, farFuture)
 
 	if len(before) != 0 || len(after) != 1 {
 		t.Fatalf("undatable event was not held back: %d before, %d after", len(before), len(after))

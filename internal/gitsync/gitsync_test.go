@@ -57,9 +57,14 @@ func newRepo(t *testing.T) (root string, p *store.Project) {
 // writeEvent appends one event so the logs have something to commit.
 func writeEvent(t *testing.T, p *store.Project) {
 	t.Helper()
-	a := store.Actor{ID: ulid.NewGenerator().New(), Name: "sa"}
+	writeEventAs(t, p, store.Actor{ID: ulid.NewGenerator().New(), Name: "sa"})
+}
+
+// writeEventAs appends one event to a given author's log.
+func writeEventAs(t *testing.T, p *store.Project, a store.Actor) {
+	t.Helper()
 	e := event.Event{ID: ulid.NewGenerator().New(), Action: event.AddNote, Payload: event.Payload{ID: "n", Title: "t"}}
-	if err := store.Append(p, a, []event.Event{e}); err != nil {
+	if _, err := store.Append(p, a, []event.Event{e}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -237,7 +242,7 @@ func TestSyncWithoutRemoteCommitsLocally(t *testing.T) {
 	_, p := newRepo(t)
 	writeEvent(t, p)
 
-	res, err := Sync(p, "gnotes: sync", false)
+	res, err := Sync(p, "gnotes: sync", Options{})
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -272,7 +277,7 @@ func TestSyncIntoARepositoryWithNoCommits(t *testing.T) {
 	}
 	writeEvent(t, p)
 
-	res, err := Sync(p, "gnotes: first", false)
+	res, err := Sync(p, "gnotes: first", Options{})
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -288,7 +293,7 @@ func TestSyncReportsAMissingRemote(t *testing.T) {
 	_, p := newRepo(t)
 	writeEvent(t, p)
 
-	if _, err := Sync(p, "gnotes: sync", true); !errors.Is(err, ErrNoRemote) {
+	if _, err := Sync(p, "gnotes: sync", Options{Push: true}); !errors.Is(err, ErrNoRemote) {
 		t.Fatalf("Sync = %v, want ErrNoRemote", err)
 	}
 }
@@ -310,7 +315,7 @@ func TestTwoClonesMergeWithoutConflict(t *testing.T) {
 
 	// The first sync meets an empty remote: there is nothing to pull, only to
 	// push.
-	res, err := Sync(seedProject, "gnotes: seed", true)
+	res, err := Sync(seedProject, "gnotes: seed", Options{Push: true})
 	if err != nil {
 		t.Fatalf("seed sync: %v", err)
 	}
@@ -333,14 +338,14 @@ func TestTwoClonesMergeWithoutConflict(t *testing.T) {
 		t.Fatalf("discover in clone: %v", err)
 	}
 	writeEvent(t, cloneProject)
-	if _, err := Sync(cloneProject, "gnotes: from clone", true); err != nil {
+	if _, err := Sync(cloneProject, "gnotes: from clone", Options{Push: true}); err != nil {
 		t.Fatalf("clone sync: %v", err)
 	}
 
 	// The seed pulls the clone's work back. Different author files means the
 	// merge is a union of paths, not a textual conflict.
 	writeEvent(t, seedProject)
-	if _, err := Sync(seedProject, "gnotes: more from seed", true); err != nil {
+	if _, err := Sync(seedProject, "gnotes: more from seed", Options{Push: true}); err != nil {
 		t.Fatalf("second seed sync: %v", err)
 	}
 
@@ -411,5 +416,125 @@ func TestCommitFailsWhenAHookRefuses(t *testing.T) {
 	}
 	if out := git(t, root, "log", "--oneline"); strings.Contains(out, "notes") {
 		t.Fatalf("the refused commit was recorded:\n%s", out)
+	}
+}
+
+// cloneOf makes a second working tree of origin with its own committer.
+func cloneOf(t *testing.T, origin string) (string, *store.Project) {
+	t.Helper()
+	clone := t.TempDir()
+	git(t, clone, "clone", origin, ".")
+	git(t, clone, "config", "user.email", "other@example.com")
+	git(t, clone, "config", "user.name", "Other")
+	git(t, clone, "config", "commit.gpgsign", "false")
+	p, err := store.Discover(clone)
+	if err != nil {
+		t.Fatalf("discover in clone: %v", err)
+	}
+	return clone, p
+}
+
+// One person on two machines appends to the same log file from both. git's
+// line merge would call that a conflict; the union attribute must not.
+func TestSameAuthorOnTwoClonesMergesWithoutConflict(t *testing.T) {
+	origin := t.TempDir()
+	seed, seedProject := newRepo(t)
+	git(t, origin, "init", "--bare", "--initial-branch=main")
+	git(t, seed, "remote", "add", "origin", origin)
+
+	me := store.Actor{ID: ulid.NewGenerator().New(), Name: "sa"}
+	writeEventAs(t, seedProject, me)
+	if _, err := Sync(seedProject, "gnotes: seed", Options{Push: true}); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+
+	_, cloneProject := cloneOf(t, origin)
+
+	// Both machines write offline, then both sync.
+	writeEventAs(t, cloneProject, me)
+	writeEventAs(t, seedProject, me)
+	if _, err := Sync(cloneProject, "gnotes: laptop", Options{Push: true}); err != nil {
+		t.Fatalf("clone sync: %v", err)
+	}
+	if _, err := Sync(seedProject, "gnotes: desktop", Options{Push: true, Unattended: true}); err != nil {
+		t.Fatalf("seed sync after both wrote: %v", err)
+	}
+
+	loaded, err := store.Load(seedProject)
+	if err != nil {
+		t.Fatalf("Load after merge: %v", err)
+	}
+	if len(loaded.Events) != 3 {
+		t.Fatalf("merged log has %d events, want 3", len(loaded.Events))
+	}
+}
+
+// A project made before the attributes existed gets them on its next sync.
+func TestSyncAddsTheMergeAttributes(t *testing.T) {
+	root, p := newRepo(t)
+	path := filepath.Join(p.EventsDir(), store.AttributesFile)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	writeEvent(t, p)
+
+	if _, err := Sync(p, "gnotes: sync", Options{}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(raw), "merge=union") {
+		t.Fatalf("attributes = %q, %v", raw, err)
+	}
+	if !strings.Contains(git(t, root, "show", "--stat", "--pretty=", "HEAD"), store.AttributesFile) {
+		t.Fatal("the attributes were not committed with the logs")
+	}
+}
+
+// On a detached HEAD there is no branch to push. The short commit id must not
+// be passed to git as if it were one.
+func TestPushRefusesADetachedHead(t *testing.T) {
+	origin := t.TempDir()
+	root, p := newRepo(t)
+	git(t, origin, "init", "--bare", "--initial-branch=main")
+	git(t, root, "remote", "add", "origin", origin)
+	git(t, root, "checkout", "--detach")
+	writeEvent(t, p)
+
+	res, err := Sync(p, "gnotes: sync", Options{Push: true})
+	if err == nil || !strings.Contains(err.Error(), "detached") {
+		t.Fatalf("Sync = %v, want a detached HEAD error", err)
+	}
+	if !res.Committed {
+		t.Fatal("the result does not report the commit that landed before the error")
+	}
+}
+
+// A GIT_DIR inherited from a hook must not send commands to another repository.
+func TestInheritedGitDirIsIgnored(t *testing.T) {
+	_, p := newRepo(t)
+	other := t.TempDir()
+	git(t, other, "init", "--initial-branch=main")
+	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+
+	writeEvent(t, p)
+	res, err := Sync(p, "gnotes: sync", Options{})
+	if err != nil || !res.Committed {
+		t.Fatalf("Sync = %+v, %v", res, err)
+	}
+	cmd := exec.Command("git", "log", "--oneline")
+	cmd.Dir = other
+	cmd.Env = repoEnv(os.Environ())
+	if out, _ := cmd.CombinedOutput(); strings.Contains(string(out), "gnotes: sync") {
+		t.Fatal("the commit landed in the repository named by GIT_DIR")
+	}
+}
+
+// Logs relocated outside the repository cannot be versioned, and syncing only
+// the project file would report success while saving nothing.
+func TestLogsOutsideTheRepositoryAreAnError(t *testing.T) {
+	_, p := newRepo(t)
+	p.Config.EventsRoot = t.TempDir()
+	if _, err := Open(p); err == nil || !strings.Contains(err.Error(), "outside the git repository") {
+		t.Fatalf("Open = %v, want the logs reported outside the repository", err)
 	}
 }

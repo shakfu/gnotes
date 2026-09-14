@@ -112,6 +112,12 @@ func (s *State) Apply(e *event.Event) error {
 	return nil
 }
 
+// ApplyUnsorted is Apply without reordering siblings. It is for a caller that
+// replays a whole log one event at a time and needs the tree's contents between
+// events but not its order; sorting after every event would make that replay
+// quadratic in the size of a notebook.
+func (s *State) ApplyUnsorted(e *event.Event) error { return s.apply(e) }
+
 // markDirty records that a parent's children need reordering.
 func (s *State) markDirty(parent string) {
 	if parent != "" {
@@ -174,7 +180,7 @@ func (s *State) apply(e *event.Event) error {
 		return s.addNode(e, at, KindTask, p.Parent, p.Title)
 
 	case event.EditTitle:
-		n, err := s.live(p.ID)
+		n, err := s.node(p.ID)
 		if err != nil {
 			return err
 		}
@@ -190,7 +196,7 @@ func (s *State) apply(e *event.Event) error {
 		return nil
 
 	case event.EditBody:
-		n, err := s.live(p.ID)
+		n, err := s.node(p.ID)
 		if err != nil {
 			return err
 		}
@@ -216,7 +222,7 @@ func (s *State) apply(e *event.Event) error {
 			// Two people deleting the same node is agreement, not a conflict.
 			return nil
 		}
-		s.setDeleted(n, true)
+		s.setDeleted(n, true, e.ID)
 		s.touch(n, e, at)
 		return nil
 
@@ -233,7 +239,7 @@ func (s *State) apply(e *event.Event) error {
 		if parent, ok := s.Nodes[n.Parent]; ok && parent.Deleted {
 			return fmt.Errorf("its %s was deleted; restore that first", parent.Kind)
 		}
-		s.setDeleted(n, false)
+		s.setDeleted(n, false, n.deletedBy)
 		s.touch(n, e, at)
 		return nil
 
@@ -261,7 +267,7 @@ func (s *State) apply(e *event.Event) error {
 		return nil
 
 	case event.AddTag:
-		n, err := s.live(p.ID)
+		n, err := s.node(p.ID)
 		if err != nil {
 			return err
 		}
@@ -274,12 +280,14 @@ func (s *State) apply(e *event.Event) error {
 		}
 		n.Tags = append(n.Tags, tag)
 		sort.Strings(n.Tags)
-		s.tags[tag]++
+		if !n.Deleted {
+			s.tags[tag]++
+		}
 		s.touch(n, e, at)
 		return nil
 
 	case event.RemoveTag:
-		n, err := s.live(p.ID)
+		n, err := s.node(p.ID)
 		if err != nil {
 			return err
 		}
@@ -289,7 +297,9 @@ func (s *State) apply(e *event.Event) error {
 			return nil
 		}
 		n.Tags = slices.Delete(n.Tags, i, i+1)
-		s.dropTag(tag)
+		if !n.Deleted {
+			s.dropTag(tag)
+		}
 		s.touch(n, e, at)
 		return nil
 
@@ -365,7 +375,7 @@ func (s *State) apply(e *event.Event) error {
 		return nil
 
 	case event.LinkNode:
-		n, err := s.live(p.ID)
+		n, err := s.node(p.ID)
 		if err != nil {
 			return err
 		}
@@ -387,7 +397,7 @@ func (s *State) apply(e *event.Event) error {
 		return nil
 
 	case event.UnlinkNode:
-		n, err := s.live(p.ID)
+		n, err := s.node(p.ID)
 		if err != nil {
 			return err
 		}
@@ -454,6 +464,13 @@ func (s *State) addNode(e *event.Event, at time.Time, kind Kind, parent, title s
 		CreatedBy: e.UserID,
 		UpdatedBy: e.UserID,
 	}
+	// A node created in a notebook that someone else deleted in the meantime
+	// arrives deleted along with it, so restoring the notebook brings it back.
+	// Refusing it would lose the entry for good, and whether it was refused
+	// would depend on which of the two branches happened to sort first.
+	if container := s.Nodes[parent]; container != nil && container.Deleted {
+		n.Deleted, n.deletedBy = true, container.deletedBy
+	}
 	s.Nodes[n.ID] = n
 	if parent != "" {
 		s.children[parent] = append(s.children[parent], n.ID)
@@ -479,9 +496,6 @@ func (s *State) checkContainment(kind Kind, parent string) error {
 	container, err := s.node(parent)
 	if err != nil {
 		return fmt.Errorf("parent: %w", err)
-	}
-	if container.Deleted {
-		return fmt.Errorf("its %s was deleted", container.Kind)
 	}
 
 	switch kind {
@@ -518,6 +532,9 @@ func (s *State) move(e *event.Event, at time.Time) error {
 	if target != n.Parent {
 		if err := s.checkContainment(n.Kind, target); err != nil {
 			return err
+		}
+		if container := s.Nodes[target]; container.Deleted {
+			return fmt.Errorf("its %s was deleted", container.Kind)
 		}
 		// With a single level of notebooks a node cannot become its own
 		// ancestor, but the check is cheap and would be the difference between
@@ -560,14 +577,25 @@ func (s *State) unlinkChild(parent, child string) {
 	}
 }
 
-// setDeleted marks a node and everything beneath it, keeping the tag counts in
-// step. Deleting a notebook has to take its notes and tasks with it, or they
-// would survive as live nodes with no reachable parent.
-func (s *State) setDeleted(n *Node, deleted bool) {
-	if n.Deleted == deleted {
-		return
+// setDeleted tombstones or restores a node and its subtree, keeping the tag
+// counts in step. Deleting a notebook has to take its notes and tasks with it,
+// or they would survive as live nodes with no reachable parent.
+//
+// cause is the delete event responsible. Deleting skips nodes that are already
+// deleted, so they keep their own cause; restoring only touches nodes with the
+// matching cause, so it undoes exactly what that delete did.
+func (s *State) setDeleted(n *Node, deleted bool, cause string) {
+	if deleted {
+		if n.Deleted {
+			return
+		}
+		n.Deleted, n.deletedBy = true, cause
+	} else {
+		if !n.Deleted || n.deletedBy != cause {
+			return
+		}
+		n.Deleted, n.deletedBy = false, ""
 	}
-	n.Deleted = deleted
 
 	for _, tag := range n.Tags {
 		if deleted {
@@ -578,7 +606,7 @@ func (s *State) setDeleted(n *Node, deleted bool) {
 	}
 	for _, id := range s.children[n.ID] {
 		if child, ok := s.Nodes[id]; ok {
-			s.setDeleted(child, deleted)
+			s.setDeleted(child, deleted, cause)
 		}
 	}
 }
@@ -630,11 +658,14 @@ func (s *State) live(id string) (*Node, error) {
 	return n, nil
 }
 
-// task returns a live node that is a task, rejecting task-only operations
-// aimed at a note. This is the check that makes notes and tasks genuinely
-// distinct kinds rather than one kind with optional fields.
+// task returns a node that is a task, deleted or not, rejecting task-only
+// operations aimed at a note. This is the check that makes notes and tasks
+// genuinely distinct kinds rather than one kind with optional fields.
+//
+// A deleted task still takes the change: the edit was made concurrently with
+// the delete, and a later restore should show it.
 func (s *State) task(id string) (*Node, error) {
-	n, err := s.live(id)
+	n, err := s.node(id)
 	if err != nil {
 		return nil, err
 	}

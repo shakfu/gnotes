@@ -8,6 +8,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shakfu/gnotes/internal/event"
+	"github.com/shakfu/gnotes/internal/store"
+	"github.com/shakfu/gnotes/internal/ulid"
 )
 
 // fixture drives the whole command line in-process: no subprocess, no
@@ -648,7 +652,351 @@ func TestParseWhen(t *testing.T) {
 		}
 	}
 
-	if _, err := parseWhen("whenever", now); err == nil {
-		t.Error("parseWhen accepted nonsense")
+	for _, bad := range []string{"whenever", "1.5d", "99999999999999999d", "-3d", "friday", "2026-09-01"} {
+		if got, err := parseWhen(bad, now); err == nil {
+			t.Errorf("parseWhen(%q) = %v, want an error", bad, got)
+		}
+	}
+
+	// A date without a zone is the start of that day where the user is.
+	pdt := time.FixedZone("PDT", -7*3600)
+	got, err := parseWhen("2026-08-01", now.In(pdt))
+	if err != nil || !got.Equal(time.Date(2026, 8, 1, 0, 0, 0, 0, pdt)) {
+		t.Errorf("parseWhen(2026-08-01) in PDT = %v, %v; want local midnight", got, err)
+	}
+}
+
+// showJSON returns one entry as the --json output decodes it.
+func (f *fixture) showJSON(ref string) map[string]any {
+	f.t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal([]byte(f.mustRun("show", ref, "--json")), &out); err != nil {
+		f.t.Fatalf("decode show --json: %v", err)
+	}
+	return out
+}
+
+// An unquoted multi-word reference names the whole title, not its first word.
+// Taking only the first word marked or deleted a different entry.
+func TestMultiWordReferencesAreNotCutToTheFirstWord(t *testing.T) {
+	f := newFixture(t)
+	f.mustRun("task", "fix the lexer")
+	f.mustRun("task", "the plan")
+
+	f.mustRun("done", "the", "lexer")
+	if f.showJSON("the plan")["status"] == "done" {
+		t.Fatal("done the lexer marked the plan done")
+	}
+	if f.showJSON("fix the lexer")["status"] != "done" {
+		t.Fatal("done the lexer did not mark fix the lexer")
+	}
+
+	f.mustRun("status", "the", "plan", "doing")
+	if f.showJSON("the plan")["status"] != "doing" {
+		t.Fatal("status with a multi-word reference did not apply")
+	}
+
+	f.mustRun("prio", "the", "plan", "high")
+	f.mustRun("due", "the", "plan", "friday")
+	f.mustRun("rm", "the", "plan")
+	if _, _, code := f.run("show", "fix the lexer"); code != 0 {
+		t.Fatal("rm the plan deleted fix the lexer")
+	}
+	f.mustRun("restore", "the", "plan")
+}
+
+// When the words split into a reference and values in more than one valid
+// way, the command refuses rather than picking one.
+func TestAmbiguousSplitsAreRefused(t *testing.T) {
+	f := newFixture(t)
+	f.mustRun("task", "fix the lexer")
+
+	_, stderr, code := f.run("tag", "fix", "the", "lexer", "bug")
+	if code == 0 || !strings.Contains(stderr, "more than one way") {
+		t.Fatalf("exit %d, stderr %q; want the split refused", code, stderr)
+	}
+	if tags, _ := f.showJSON("fix the lexer")["tags"].([]any); len(tags) != 0 {
+		t.Fatalf("tags = %v, want none written", tags)
+	}
+
+	// Quoted, it is unambiguous.
+	f.mustRun("tag", "fix the lexer", "bug")
+
+	// Two references, each several words, split the one way both resolve.
+	f.mustRun("note", "design sketch")
+	f.mustRun("link", "fix", "the", "lexer", "design", "sketch")
+	if links, _ := f.showJSON("fix the lexer")["links"].([]any); len(links) != 1 {
+		t.Fatalf("links = %v, want the design sketch", links)
+	}
+}
+
+// A title arriving through another author's synced log is untrusted. Printing
+// it must not pass terminal escape sequences or newlines through.
+func TestSyncedControlCharactersAreNotPrinted(t *testing.T) {
+	f := newFixture(t)
+	f.mustRun("note", "harmless", "-t", "x", "-m", "body")
+	id := f.showJSON("harmless")["id"].(string)
+
+	p, err := store.Discover(f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mallory := store.Actor{ID: ulid.NewGenerator().New(), Name: "mallory"}
+	g := ulid.NewGenerator()
+	evil := "evil\x1b]0;PWNED\x07\x1b[2J\nforged row"
+	events := []event.Event{
+		{ID: g.New(), Action: event.EditTitle, Payload: event.Payload{ID: id, Title: evil}},
+		{ID: g.New(), Action: event.EditBody, Payload: event.Payload{ID: id, Body: "line\x1b[2J\nnext"}},
+	}
+	events[1].Ref = events[0].ID
+	if _, err := store.Append(p, mallory, events); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range [][]string{{"ls"}, {"show", id[len(id)-6:]}, {"log"}, {"search", "evil"}} {
+		out := f.mustRun(args...)
+		if strings.ContainsAny(out, "\x1b\x07") {
+			t.Errorf("gnotes %s printed a control character: %q", strings.Join(args, " "), out)
+		}
+		if strings.Contains(out, "\nforged row") {
+			t.Errorf("gnotes %s let a title break its line: %q", strings.Join(args, " "), out)
+		}
+	}
+}
+
+// "--" ends flag parsing, so a title beginning with a dash is a title.
+func TestDoubleDashPassesADashedTitle(t *testing.T) {
+	f := newFixture(t)
+	f.mustRun("note", "--", "-x marks the spot")
+	if f.showJSON("marks the spot")["title"] != "-x marks the spot" {
+		t.Fatal("the dashed title was not kept")
+	}
+}
+
+func TestEditCanClearABody(t *testing.T) {
+	f := newFixture(t)
+	f.mustRun("note", "cleared", "-m", "something")
+	t.Setenv("EDITOR", "false")
+	f.mustRun("edit", "cleared", "-m", "")
+	if body, _ := f.showJSON("cleared")["body"].(string); body != "" {
+		t.Fatalf("body = %q, want it cleared", body)
+	}
+	if _, _, code := f.run("edit", "cleared", "--title", ""); code == 0 {
+		t.Fatal("an empty title was accepted")
+	}
+}
+
+// A refused init must not have changed the global identity first.
+func TestRefusedInitLeavesTheIdentityAlone(t *testing.T) {
+	f := newFixture(t)
+	if _, _, code := f.run("init", "--user", "someone else"); code == 0 {
+		t.Fatal("init in an initialised project succeeded")
+	}
+	actor, err := store.LoadUser()
+	if err != nil || actor.Name != "sa" {
+		t.Fatalf("identity = %q, %v; want it unchanged", actor.Name, err)
+	}
+}
+
+// A teammate on a fresh clone has the project but no identity. Init sets the
+// identity and succeeds.
+func TestInitOnAFreshCloneOnlySetsTheIdentity(t *testing.T) {
+	f := newFixture(t)
+	t.Setenv("GNOTES_HOME", t.TempDir())
+
+	stdout, stderr, code := f.run("init", "--user", "bob")
+	if code != 0 {
+		t.Fatalf("exit %d: %s%s", code, stdout, stderr)
+	}
+	if actor, _ := store.LoadUser(); actor.Name != "bob" {
+		t.Fatalf("identity = %q, want bob", actor.Name)
+	}
+}
+
+// A project inside another project's directory would shadow it for every
+// command run below.
+func TestInitRefusesToNestAProject(t *testing.T) {
+	f := newFixture(t)
+	sub := filepath.Join(f.dir, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.dir = sub
+	if _, stderr, code := f.run("init", "inner"); code == 0 || !strings.Contains(stderr, "already covers") {
+		t.Fatalf("exit %d, stderr %q; want the nested init refused", code, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(sub, ".gnotes")); err == nil {
+		t.Fatal("a nested project was created")
+	}
+}
+
+func TestHelpFlagsAndUsageErrors(t *testing.T) {
+	f := newFixture(t)
+
+	stdout, _, code := f.run("tag", "x", "--help")
+	if code != 0 || !strings.Contains(stdout, "usage: gnotes tag") {
+		t.Fatalf("tag --help: exit %d, stdout %q", code, stdout)
+	}
+	if _, stderr, code := f.run("ls", "--bogus"); code != 2 || !strings.Contains(stderr, "bogus") {
+		t.Fatalf("ls --bogus: exit %d, stderr %q; want 2 and the flag named", code, stderr)
+	}
+	if _, _, code := f.run("help", "nosuch"); code != 2 {
+		t.Fatalf("help nosuch: exit %d, want 2 like an unknown command", code)
+	}
+}
+
+func TestTyposGetASuggestion(t *testing.T) {
+	for typed, want := range map[string]string{"shwo": "show", "sycn": "sync", "tga": "tag"} {
+		if got := closest(typed); got != want {
+			t.Errorf("closest(%q) = %q, want %q", typed, got, want)
+		}
+	}
+}
+
+func TestStdinMustBeUTF8(t *testing.T) {
+	f := newFixture(t)
+	if _, stderr, code := f.runIn("bad \xff byte", "note", "binary", "--stdin"); code == 0 || !strings.Contains(stderr, "UTF-8") {
+		t.Fatalf("exit %d, stderr %q; want non-UTF-8 input refused", code, stderr)
+	}
+}
+
+func TestMovePlacementIsValidated(t *testing.T) {
+	f := newFixture(t)
+	f.mustRun("nb", "work")
+	f.mustRun("nb", "home")
+	f.mustRun("note", "here", "-b", "work")
+	f.mustRun("note", "there", "-b", "home")
+
+	for _, args := range [][]string{
+		{"mv", "here"},                             // nowhere to go
+		{"mv", "here", "--top", "--bottom"},        // two placements
+		{"mv", "here", "--before", "there"},        // a sibling elsewhere
+		{"mv", "here", "work", "--after", "there"}, // still elsewhere
+	} {
+		if _, _, code := f.run(args...); code == 0 {
+			t.Errorf("gnotes %s succeeded", strings.Join(args, " "))
+		}
+	}
+	f.mustRun("mv", "here", "home", "--before", "there")
+}
+
+func TestListingsShowAssigneesAndJSONHasStableArrays(t *testing.T) {
+	f := newFixture(t)
+	f.mustRun("task", "owned", "-a", "me")
+	if out := f.mustRun("ls"); !strings.Contains(out, "@sa") {
+		t.Fatalf("ls does not show the assignee:\n%s", out)
+	}
+
+	f.mustRun("note", "bare")
+	got := f.showJSON("bare")
+	for _, key := range []string{"tags", "links", "assignees"} {
+		if _, ok := got[key].([]any); !ok {
+			t.Errorf("%s = %v, want an array", key, got[key])
+		}
+	}
+	if got["notebookId"] == "" || got["notebookId"] == nil {
+		t.Error("notebookId is missing")
+	}
+}
+
+func TestAssigningTwiceAndDuplicateNotebooks(t *testing.T) {
+	f := newFixture(t)
+	f.mustRun("task", "owned")
+	f.mustRun("assign", "owned", "me")
+	before := strings.Count(f.mustRun("log"), "add.assignee")
+	f.mustRun("assign", "owned", "me")
+	if after := strings.Count(f.mustRun("log"), "add.assignee"); after != before {
+		t.Fatalf("assigning again wrote another event (%d -> %d)", before, after)
+	}
+
+	f.mustRun("nb", "work")
+	if _, _, code := f.run("nb", "Work"); code == 0 {
+		t.Fatal("a second notebook named Work was created")
+	}
+	if _, _, code := f.run("assign", "owned", ulid.NewGenerator().New()); code == 0 {
+		t.Fatal("an id belonging to nobody was accepted as an assignee")
+	}
+}
+
+// Overdue in a time-travelled listing is judged at the cutoff.
+func TestOverdueAtACutoff(t *testing.T) {
+	f := newFixture(t)
+	f.mustRun("task", "deadline", "-d", "2026-08-20")
+	f.now = f.now.AddDate(0, 0, 10)
+	if out := f.mustRun("ls", "--at", "2026-08-19"); strings.Contains(out, "due:2026-08-20!") {
+		t.Fatalf("a task due the next day was shown overdue at the cutoff:\n%s", out)
+	}
+}
+
+// Global notes are reached only with a leading -g, wherever the command runs.
+func TestGlobalNotesNeedTheFlag(t *testing.T) {
+	f := newFixture(t)
+	global := filepath.Join(t.TempDir(), "notes")
+
+	out := f.mustRun("-g", "init", global)
+	if !strings.Contains(out, "global notes: "+global) || !strings.Contains(out, "gnotes -g note") {
+		t.Fatalf("-g init did not report the location:\n%s", out)
+	}
+	f.mustRun("-g", "note", "global entry")
+
+	if out := f.mustRun("ls"); strings.Contains(out, "global entry") {
+		t.Fatalf("the project listing shows a global note:\n%s", out)
+	}
+	if out := f.mustRun("-g", "ls"); !strings.Contains(out, "global entry") {
+		t.Fatalf("-g ls misses the global note:\n%s", out)
+	}
+
+	// Outside any project, a command without -g still refuses.
+	f.dir = t.TempDir()
+	if _, stderr, code := f.run("ls"); code == 0 || !strings.Contains(stderr, "gnotes init") {
+		t.Fatalf("ls outside a project: exit %d, stderr %q; want the usual refusal", code, stderr)
+	}
+	if out := f.mustRun("-g", "ls"); !strings.Contains(out, "global entry") {
+		t.Fatalf("-g ls outside a project misses the global note:\n%s", out)
+	}
+}
+
+func TestGlobalInitTwiceReportsTheLocation(t *testing.T) {
+	f := newFixture(t)
+	global := filepath.Join(t.TempDir(), "notes")
+	f.mustRun("-g", "init", global)
+
+	out := f.mustRun("-g", "init", filepath.Join(t.TempDir(), "elsewhere"))
+	if !strings.Contains(out, "global notes location already exists: "+global) {
+		t.Fatalf("second -g init:\n%s", out)
+	}
+}
+
+func TestGlobalInitDefaultsToHomeNotes(t *testing.T) {
+	f := newFixture(t)
+	t.Setenv("HOME", t.TempDir())
+	home, _ := os.UserHomeDir()
+
+	f.mustRun("-g", "init")
+	if _, err := os.Stat(filepath.Join(home, "notes", ".gnotes", "project.json")); err != nil {
+		t.Fatalf("no global project in ~/notes: %v", err)
+	}
+	if out := f.mustRun("-g", "info"); !strings.Contains(out, "global") {
+		t.Fatalf("the global project is not named global:\n%s", out)
+	}
+}
+
+// A clone of the global notes from another machine is used as it is.
+func TestGlobalInitAdoptsAnExistingProject(t *testing.T) {
+	f := newFixture(t)
+	f.mustRun("note", "already here")
+	project := f.dir
+
+	f.dir = t.TempDir()
+	f.mustRun("-g", "init", project)
+	if out := f.mustRun("-g", "ls"); !strings.Contains(out, "already here") {
+		t.Fatalf("-g ls does not show the adopted project:\n%s", out)
+	}
+}
+
+func TestGlobalWithoutSetupSaysHow(t *testing.T) {
+	f := newFixture(t)
+	if _, stderr, code := f.run("-g", "ls"); code == 0 || !strings.Contains(stderr, "gnotes -g init") {
+		t.Fatalf("exit %d, stderr %q; want a pointer to -g init", code, stderr)
 	}
 }

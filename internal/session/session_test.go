@@ -1,10 +1,13 @@
 package session
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/shakfu/gnotes/internal/event"
 	"github.com/shakfu/gnotes/internal/rank"
 	"github.com/shakfu/gnotes/internal/state"
 	"github.com/shakfu/gnotes/internal/store"
@@ -417,23 +420,26 @@ func TestRankExhaustionTriggersARecordedRebalance(t *testing.T) {
 	s := newSession(t)
 	nb, _ := s.NewNotebook("work")
 
-	first, err := s.NewNote(nb.ID, "anchor", "")
+	first, err := s.NewNote(nb.ID, "first", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	last, err := s.NewNote(nb.ID, "last", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Repeatedly insert at the very start, which halves the available space
-	// each time.
-	target := first
+	// Repeatedly insert straight after the first entry, which halves the gap
+	// between it and its neighbour each time. Appends and prepends step instead
+	// and would never run out.
 	for i := 0; i < 120; i++ {
 		n, err := s.NewNote(nb.ID, "note", "")
 		if err != nil {
 			t.Fatalf("insert %d: %v", i, err)
 		}
-		if err := s.Move(n, "", rank.Before(target.ID)); err != nil {
+		if err := s.Move(n, "", rank.After(first.ID)); err != nil {
 			t.Fatalf("move %d: %v", i, err)
 		}
-		target = n
 	}
 
 	rebalances := 0
@@ -449,15 +455,66 @@ func TestRankExhaustionTriggersARecordedRebalance(t *testing.T) {
 	// The order must survive the rebalance and the round trip.
 	again := reopen(t, s)
 	kids := again.State.Children(nb.ID)
-	if len(kids) != 121 {
-		t.Fatalf("got %d children, want 121", len(kids))
+	if len(kids) != 122 {
+		t.Fatalf("got %d children, want 122", len(kids))
 	}
-	if kids[len(kids)-1].ID != first.ID {
-		t.Fatal("the anchor is no longer last after rebalancing")
+	if kids[0].ID != first.ID || kids[len(kids)-1].ID != last.ID {
+		t.Fatal("the first and last entries moved during rebalancing")
 	}
 	for i := 1; i < len(kids); i++ {
 		if kids[i-1].Rank >= kids[i].Rank {
 			t.Fatalf("ranks not ascending at %d", i)
+		}
+	}
+}
+
+// Appending is the default placement and must not rewrite the notebook's ranks
+// as it grows.
+func TestAppendingDoesNotRebalance(t *testing.T) {
+	s := newSession(t)
+	s.NewNotebook("work")
+	for i := 0; i < 1000; i++ {
+		if _, err := s.NewNote("work", "n", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, e := range s.Log() {
+		if e.Action == "rebalance.children" {
+			t.Fatal("1000 appends triggered a rebalance")
+		}
+	}
+}
+
+// A malformed rank from another log must not block every insert under its
+// parent.
+func TestAMalformedSiblingRankIsRebalancedAway(t *testing.T) {
+	s := newSession(t)
+	nb, _ := s.NewNotebook("work")
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	bad := event.Event{ID: ulid.NewGenerator().New(), Ref: event.EdgeRef(s.Log()), Action: event.AddNote,
+		Payload: event.Payload{ID: ulid.NewGenerator().New(), Parent: nb.ID, Title: "foreign", Rank: "NOT-A-RANK-zzzzzzzzzzzzzz"}}
+	if _, err := store.Append(s.Project, store.Actor{ID: ulid.NewGenerator().New(), Name: "bob"}, []event.Event{bad}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reload(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, pos := range []rank.Position{rank.End(), rank.Start()} {
+		n, err := s.NewNote("work", "mine", "")
+		if err != nil {
+			t.Fatalf("insert next to a malformed rank: %v", err)
+		}
+		if err := s.Move(n, "", pos); err != nil {
+			t.Fatalf("move to %v: %v", pos.At, err)
+		}
+	}
+	for _, kid := range s.State.Children(nb.ID) {
+		if !rank.Valid(kid.Rank) {
+			t.Fatalf("%q still has malformed rank %q", kid.Title, kid.Rank)
 		}
 	}
 }
@@ -590,8 +647,8 @@ func TestTwoAuthorsMergeWithoutConflict(t *testing.T) {
 	}
 }
 
-// A machine whose clock is behind must still write ids that sort after what is
-// already in the log, or replay order would change under it.
+// A machine whose clock is a little behind must still write ids that sort after
+// what is already in the log, so dates read in order.
 func TestALaggingClockStillAppendsInOrder(t *testing.T) {
 	s := newSession(t)
 	if _, err := s.NewNotebook("work"); err != nil {
@@ -605,7 +662,7 @@ func TestALaggingClockStillAppendsInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	behind.SetClock(func() time.Time { return time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC) })
+	behind.SetClock(func() time.Time { return testClock().Add(-time.Minute) })
 
 	last := behind.Log()[len(behind.Log())-1].ID
 	if _, err := behind.NewNotebook("later"); err != nil {
@@ -769,5 +826,253 @@ func TestCommitFailureDropsTheStagedEvents(t *testing.T) {
 	}
 	if !titled(again.State, "kept") {
 		t.Fatal("the later note was not written")
+	}
+}
+
+// secondAuthor opens the same project as someone else, the way another
+// process or another machine's synced log would appear.
+func secondAuthor(t *testing.T, s *Session, name string) *Session {
+	t.Helper()
+	other, err := OpenProject(s.Project, store.Actor{ID: ulid.NewGenerator().New(), Name: name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.SetClock(testClock)
+	return other
+}
+
+func TestOwnCommitIsNotAnOutsideChange(t *testing.T) {
+	s := newSession(t)
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.NewNotebook("work"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if s.Changed() {
+		t.Fatal("the session's own append was reported as an outside change")
+	}
+}
+
+func TestRefreshPicksUpAnOutsideWrite(t *testing.T) {
+	s := newSession(t)
+	s.NewNotebook("work")
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	bob := secondAuthor(t, s, "bob")
+	if _, err := bob.NewNote("work", "from bob", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := bob.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := s.Refresh()
+	if err != nil || !reloaded {
+		t.Fatalf("Refresh = %v, %v; want a reload", reloaded, err)
+	}
+	if !titled(s.State, "from bob") {
+		t.Fatal("the outside write is missing after Refresh")
+	}
+	if again, _ := s.Refresh(); again {
+		t.Fatal("a second Refresh reloaded with nothing new on disk")
+	}
+}
+
+// An outside write that lands before this session's own commit must not be
+// absorbed as if the session had written it.
+func TestOutsideWriteBeforeOwnCommitIsNotAbsorbed(t *testing.T) {
+	s := newSession(t)
+	s.NewNotebook("work")
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	bob := secondAuthor(t, s, "bob")
+	bob.NewNote("work", "from bob", "")
+	if err := bob.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.NewNote("work", "mine", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Changed() {
+		t.Fatal("bob's write was absorbed by this session's commit")
+	}
+	if _, err := s.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if !titled(s.State, "from bob") || !titled(s.State, "mine") {
+		t.Fatal("want both notes after Refresh")
+	}
+}
+
+// Another process of the same author appends to the same file.
+func TestSameAuthorOtherProcessIsNotAbsorbed(t *testing.T) {
+	s := newSession(t)
+	s.NewNotebook("work")
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	twin, err := OpenProject(s.Project, s.Actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	twin.SetClock(testClock)
+	twin.NewNote("work", "from the other process", "")
+	if err := twin.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	s.NewNote("work", "mine", "")
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Changed() {
+		t.Fatal("the other process's append to the same log was absorbed")
+	}
+}
+
+func TestFailedReloadIsRetried(t *testing.T) {
+	s := newSession(t)
+	s.NewNotebook("work")
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	bad := filepath.Join(s.Project.EventsDir(), ulid.NewGenerator().New()+".mallory.jsonl")
+	if err := os.WriteFile(bad, []byte("not json\n{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Refresh(); err == nil {
+		t.Fatal("Refresh read a corrupt log without error")
+	}
+	if !s.Changed() {
+		t.Fatal("a failed reload marked the session up to date")
+	}
+
+	if err := os.Remove(bad); err != nil {
+		t.Fatal(err)
+	}
+	bob := secondAuthor(t, s, "bob")
+	bob.NewNote("work", "after the repair", "")
+	if err := bob.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Refresh(); err != nil {
+		t.Fatalf("Refresh after the repair: %v", err)
+	}
+	if !titled(s.State, "after the repair") {
+		t.Fatal("the retry did not load the repaired project")
+	}
+}
+
+func TestOneLineFieldsRefuseControlCharacters(t *testing.T) {
+	s := newSession(t)
+	nb, err := s.NewNotebook("work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, title := range []string{"two\nlines", "evil\x1b[2J", "bell\x07"} {
+		if _, err := s.NewNote("work", title, ""); err == nil {
+			t.Errorf("NewNote accepted %q", title)
+		}
+		if _, err := s.NewNotebook(title); err == nil {
+			t.Errorf("NewNotebook accepted %q", title)
+		}
+		if err := s.SetTitle(nb, title); err == nil {
+			t.Errorf("SetTitle accepted %q", title)
+		}
+	}
+	note, err := s.NewNote("work", "fine", "a body\nmay have lines\x09and tabs")
+	if err != nil {
+		t.Fatalf("a multi-line body was refused: %v", err)
+	}
+	if err := s.AddTag(note, "bad\x1btag"); err == nil {
+		t.Error("AddTag accepted an escape character")
+	}
+}
+
+// Setting the same relative due date twice writes one event. The typed word
+// resolves to local midnight, which never equalled the stored UTC date.
+func TestSetDueTwiceWithARelativeWordIsANoOp(t *testing.T) {
+	s := newSession(t)
+	s.SetClock(func() time.Time { return time.Date(2026, 8, 17, 9, 0, 0, 0, time.FixedZone("PDT", -7*3600)) })
+	s.NewNotebook("work")
+	task, err := s.NewTask("work", "t", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetDue(task, "friday"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(s.Log())
+	if err := s.SetDue(task, "friday"); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Log()) != before {
+		t.Fatal("setting the same due date again wrote an event")
+	}
+}
+
+func TestUnlinkingAMissingLinkWritesNothing(t *testing.T) {
+	s := newSession(t)
+	s.NewNotebook("work")
+	a, _ := s.NewNote("work", "a", "")
+	b, _ := s.NewNote("work", "b", "")
+	before := len(s.Log())
+	if err := s.Unlink(a, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Log()) != before {
+		t.Fatal("removing a link that does not exist wrote an event")
+	}
+}
+
+// One machine with a clock years ahead must not date everyone's later events in
+// its future, which would hide them from time travel for good.
+func TestAFutureClockDoesNotDragLaterEventsWithIt(t *testing.T) {
+	s := newSession(t)
+	s.NewNotebook("work")
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	ahead := secondAuthor(t, s, "bob")
+	ahead.SetClock(func() time.Time { return testClock().AddDate(5, 0, 0) })
+	if _, err := ahead.NewNote("work", "from the future", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := ahead.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.NewNote("work", "written now", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limit := testClock().Add(ClockTolerance); n.Created.After(limit) {
+		t.Fatalf("created %v, want no later than %v", n.Created, limit)
+	}
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	past, _ := s.At(testClock().Add(time.Hour).UnixMilli())
+	if past.Get(n.ID) == nil {
+		t.Fatal("the note written now is hidden from a cutoff an hour from now")
 	}
 }

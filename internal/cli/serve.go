@@ -10,6 +10,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os/exec"
 	"runtime"
 
@@ -44,11 +45,11 @@ display. The address is printed either way, and --open forces the attempt.
 	run: func(a *App, args []string) error {
 		fs := a.flags("serve")
 		addr := fs.String("addr", "127.0.0.1:0", "address to listen on")
-		token := fs.String("token", "", "use this access token instead of a generated one")
+		token := fs.String("token", a.Env("GNOTES_TOKEN"), "use this access token instead of a generated one; $GNOTES_TOKEN keeps it out of the shell history")
 		noOpen := fs.Bool("no-open", false, "print the address without opening a browser")
 		forceOpen := fs.Bool("open", false, "open a browser even where one is not expected")
 		if err := parse(fs, args); err != nil {
-			return errUsage
+			return err
 		}
 
 		s, err := a.open()
@@ -62,6 +63,12 @@ display. The address is printed either way, and --open forces the attempt.
 			return errors.New("this project has no workspace yet; run 'gnotes init'")
 		}
 		a.warnProblems(s)
+
+		// The token is the only protection, so a chosen one must not be
+		// guessable in practice.
+		if *token != "" && len(*token) < 16 {
+			return errors.New("a token must be at least 16 characters")
+		}
 
 		srv, err := web.New(s, web.Options{Token: *token})
 		if err != nil {
@@ -79,6 +86,9 @@ display. The address is printed either way, and --open forces the attempt.
 		url := srv.URL(ln.Addr().String())
 		a.printf("%s  %s\n", a.style(ansiBold, "gnotes"), s.Project.Config.Name)
 		a.printf("%s\n", url)
+		if tcp, ok := ln.Addr().(*net.TCPAddr); ok && !tcp.IP.IsLoopback() {
+			a.printf("%s\n", a.style(ansiRed, "warning: listening beyond this machine over plain HTTP; anyone who sees the address can read and change these notes"))
+		}
 
 		// The browser is launched before Run, which is safe: the listener is
 		// already accepting, so a request that arrives first waits in the
@@ -146,5 +156,12 @@ func openBrowser(url string) error {
 		cmd = "xdg-open"
 	}
 
-	return exec.Command(cmd, append(args, url)...).Start()
+	c := exec.Command(cmd, append(args, url)...)
+	if err := c.Start(); err != nil {
+		return err
+	}
+	// Reaped in the background, or the opener would stay a zombie for as long
+	// as the server runs.
+	go c.Wait()
+	return nil
 }

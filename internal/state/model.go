@@ -162,6 +162,12 @@ type Node struct {
 	// it back.
 	Deleted bool
 
+	// deletedBy is the delete event that tombstoned this node, directly or by
+	// deleting its parent. A restore brings back only the nodes its matching
+	// delete took, so an entry deleted on its own stays deleted when its
+	// notebook is restored.
+	deletedBy string
+
 	// Tags are normalised tag strings, sorted and deduplicated.
 	Tags []string
 
@@ -189,9 +195,28 @@ func (n *Node) IsTask() bool { return n.Kind == KindTask }
 
 // Overdue reports whether the node is an unfinished task whose due date has
 // passed.
+//
+// A due date with no time of day is a calendar date, not an instant: the task
+// is overdue from the next day in now's time zone. Compared as midnight UTC, a
+// task due today was overdue all day, and west of Greenwich from the evening
+// before.
 func (n *Node) Overdue(now time.Time) bool {
-	return n.Kind == KindTask && n.Status != StatusDone &&
-		!n.Due.IsZero() && n.Due.Before(now)
+	if n.Kind != KindTask || n.Status == StatusDone || n.Due.IsZero() {
+		return false
+	}
+	if !dateOnly(n.Due) {
+		return n.Due.Before(now)
+	}
+	y, m, d := n.Due.Date()
+	due := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	return due.Before(today)
+}
+
+// dateOnly reports whether a due date has no time of day, which is how a date
+// typed without one is stored and read back.
+func dateOnly(t time.Time) bool {
+	return t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0
 }
 
 // HasTag reports whether the node carries the tag, which must already be
@@ -288,6 +313,11 @@ func ParseDue(s string, now time.Time) (time.Time, bool) {
 		}
 	}
 
+	// A time of day typed without a zone means the writer's own. It is stored
+	// with its offset, so replay reads the same instant everywhere.
+	if t, err := time.ParseInLocation("2006-01-02 15:04", s, now.Location()); err == nil {
+		return t, true
+	}
 	return ParseDueAbsolute(s)
 }
 
@@ -315,7 +345,7 @@ func FormatDue(t time.Time) string {
 	}
 	// A date with no time of day round-trips as a date, keeping the log
 	// readable in a diff.
-	if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 {
+	if dateOnly(t) {
 		return t.Format("2006-01-02")
 	}
 	return t.Format(time.RFC3339)

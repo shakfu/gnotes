@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/shakfu/gnotes/internal/event"
@@ -200,19 +200,29 @@ func parseLog(path string) ([]event.Event, map[event.Action]int, bool, error) {
 	return events, skipped, torn, nil
 }
 
-// Fingerprint summarises the event logs without reading them, so a caller can
-// notice that another process has written.
+// Snapshot records the size and modification time of every event log, so a
+// caller can notice that another process has written without reading the logs.
 //
-// Names, sizes and modification times are enough: the logs are append-only, so
-// any change moves at least one of them. Hashing the contents would be more
-// certain and would cost a full read on every check.
-func Fingerprint(p *Project) string {
+// Sizes and times are enough: the logs are append-only, so any change moves at
+// least one of them. Hashing the contents would be more certain and would cost
+// a full read on every check.
+type Snapshot map[string]FileStamp
+
+// FileStamp is what a Snapshot records for one log.
+type FileStamp struct {
+	Size    int64
+	ModTime int64
+}
+
+// Snap takes a Snapshot of the project's event logs. A missing or unreadable
+// directory yields an empty one.
+func Snap(p *Project) Snapshot {
 	entries, err := os.ReadDir(p.EventsDir())
 	if err != nil {
-		return ""
+		return Snapshot{}
 	}
 
-	var parts []string
+	snap := make(Snapshot, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != LogExt {
 			continue
@@ -221,11 +231,13 @@ func Fingerprint(p *Project) string {
 		if err != nil {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%s:%d:%d", e.Name(), info.Size(), info.ModTime().UnixNano()))
+		snap[e.Name()] = FileStamp{Size: info.Size(), ModTime: info.ModTime().UnixNano()}
 	}
-	sort.Strings(parts)
-	return strings.Join(parts, "|")
+	return snap
 }
+
+// Equal reports whether two snapshots describe the same logs.
+func (s Snapshot) Equal(other Snapshot) bool { return maps.Equal(s, other) }
 
 // Append writes events to the actor's log as one contiguous batch.
 //
@@ -237,23 +249,26 @@ func Fingerprint(p *Project) string {
 // Two processes racing may both read the same edge reference and so both
 // branch from it. That is not a fault to prevent: it is exactly the situation
 // two machines syncing produce, and ordering resolves it the same way.
-func Append(p *Project, actor Actor, events []event.Event) error {
+//
+// It returns how many bytes the log grew by, net of any torn tail it removed,
+// so a caller can tell its own write from another process's.
+func Append(p *Project, actor Actor, events []event.Event) (int64, error) {
 	if len(events) == 0 {
-		return nil
+		return 0, nil
 	}
 	if !actor.Valid() {
-		return errors.New("cannot write events: the current user is not configured; run 'gnotes init'")
+		return 0, errors.New("cannot write events: the current user is not configured; run 'gnotes init'")
 	}
 
 	dir := p.EventsDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create events directory: %w", err)
+		return 0, fmt.Errorf("create events directory: %w", err)
 	}
 
 	path := filepath.Join(dir, LogName(actor))
-	terminate, err := settleTail(path)
+	terminate, removed, err := settleTail(path)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	// Build the whole batch first. A single write keeps a partially applied
@@ -268,7 +283,7 @@ func Append(p *Project, actor Actor, events []event.Event) error {
 	for _, e := range events {
 		line, err := event.Encode(e)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		buf.Write(line)
 		buf.WriteByte('\n')
@@ -276,21 +291,21 @@ func Append(p *Project, actor Actor, events []event.Event) error {
 
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+		return 0, fmt.Errorf("open %s: %w", path, err)
 	}
 
 	if _, err := f.Write(buf.Bytes()); err != nil {
 		f.Close()
-		return fmt.Errorf("append to %s: %w", path, err)
+		return 0, fmt.Errorf("append to %s: %w", path, err)
 	}
 	// No fsync. A command that returns is durable against a crashed gnotes,
 	// not against a power cut: the write has reached the page cache, and what
 	// protects the log across a lost machine is the git sync, not the disk
 	// barrier. Paying an fsync per command would cost more than it protects.
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", path, err)
+		return 0, fmt.Errorf("close %s: %w", path, err)
 	}
-	return nil
+	return int64(buf.Len()) - removed, nil
 }
 
 // settleTail deals with a log whose last line has no newline, so that the next
@@ -307,49 +322,49 @@ func Append(p *Project, actor Actor, events []event.Event) error {
 // while the file is still the size it was measured at keeps this from cutting
 // off a concurrent append by the same author from another process; if one is
 // in flight the repair is left for the next command.
-func settleTail(path string) (terminate bool, err error) {
+func settleTail(path string) (terminate bool, removed int64, err error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return false, 0, nil
 		}
-		return false, fmt.Errorf("stat %s: %w", path, err)
+		return false, 0, fmt.Errorf("stat %s: %w", path, err)
 	}
 	size := info.Size()
 	if size == 0 {
-		return false, nil
+		return false, 0, nil
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
-		return false, fmt.Errorf("open %s: %w", path, err)
+		return false, 0, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
 
 	var last [1]byte
 	if _, err := f.ReadAt(last[:], size-1); err != nil {
-		return false, fmt.Errorf("read %s: %w", path, err)
+		return false, 0, fmt.Errorf("read %s: %w", path, err)
 	}
 	if last[0] == '\n' {
-		return false, nil
+		return false, 0, nil
 	}
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return false, fmt.Errorf("read %s: %w", path, err)
+		return false, 0, fmt.Errorf("read %s: %w", path, err)
 	}
 	cut := int64(bytes.LastIndexByte(raw, '\n') + 1)
 	if decodable(bytes.TrimSpace(raw[cut:])) {
-		return true, nil
+		return true, 0, nil
 	}
 
 	if again, err := os.Stat(path); err != nil || again.Size() != size {
-		return false, nil
+		return false, 0, nil
 	}
 	if err := os.Truncate(path, cut); err != nil {
-		return false, fmt.Errorf("discard the torn tail of %s: %w", path, err)
+		return false, 0, fmt.Errorf("discard the torn tail of %s: %w", path, err)
 	}
-	return false, nil
+	return false, size - cut, nil
 }
 
 // decodable reports whether a line is a whole record. An action this build does

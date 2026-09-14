@@ -16,7 +16,6 @@ import (
 	"strings"
 
 	"github.com/shakfu/gnotes/internal/session"
-	"github.com/shakfu/gnotes/internal/store"
 )
 
 // Protocol versions this server implements, newest first.
@@ -42,6 +41,11 @@ type message struct {
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
+
+	// Result and Error mark a response from the client, which this server
+	// never asks for and so ignores.
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  json.RawMessage `json:"error,omitempty"`
 }
 
 // response is a reply to a request. Exactly one of Result and Error is set.
@@ -76,22 +80,13 @@ type Server struct {
 	// down. Everything that is not a frame goes here.
 	logw io.Writer
 
-	// fingerprint is the state of the logs when this process last read them,
-	// used to notice writes by the command line or another machine.
-	fingerprint string
-
 	// name and version identify this server to the client.
 	name, version string
 }
 
 // New builds a server over an open session.
 func New(s *session.Session, name, version string) *Server {
-	return &Server{
-		sess:        s,
-		name:        name,
-		version:     version,
-		fingerprint: store.Fingerprint(s.Project),
-	}
+	return &Server{sess: s, name: name, version: version}
 }
 
 // Serve reads frames from in and writes replies to out until in reaches end of
@@ -119,12 +114,20 @@ func (s *Server) Serve(in io.Reader, out io.Writer, logw io.Writer) error {
 			continue
 		}
 
+		// A frame we cannot use has no id to reply against, so the error
+		// carries a null id, as JSON-RPC requires.
+		if !json.Valid(line) {
+			s.send(response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{
+				Code: codeParse, Message: "invalid JSON",
+			}})
+			continue
+		}
 		var msg message
 		if err := json.Unmarshal(line, &msg); err != nil {
-			// A frame we cannot parse has no id to reply against, so the error
-			// carries a null id, as JSON-RPC requires.
+			// Valid JSON that is not an object: an array, which would be a
+			// batch, or a bare value. Batches were removed in 2025-06-18.
 			s.send(response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{
-				Code: codeParse, Message: "invalid JSON: " + err.Error(),
+				Code: codeInvalidRequest, Message: "a frame must be one JSON-RPC object",
 			}})
 			continue
 		}
@@ -157,15 +160,40 @@ func readLine(r *bufio.Reader) ([]byte, error) {
 
 // handle dispatches one frame.
 func (s *Server) handle(msg message) {
-	// A notification has no id and must never be answered, not even on error.
-	notification := len(msg.ID) == 0
+	// A response from the client answers nothing this server sent.
+	if msg.Method == "" && (len(msg.Result) > 0 || len(msg.Error) > 0) {
+		fmt.Fprintf(s.logw, "gnotes mcp: ignored a response frame\n")
+		return
+	}
 
-	result, err := s.dispatch(msg.Method, msg.Params)
-	if notification {
-		if err != nil {
+	// A notification has no id and must never be answered, not even on error.
+	// Only notification methods run without an id: a tools/call sent without
+	// one would change the project with nobody told the outcome.
+	if len(msg.ID) == 0 {
+		if msg.JSONRPC != "2.0" || !strings.HasPrefix(msg.Method, "notifications/") {
+			fmt.Fprintf(s.logw, "gnotes mcp: ignored %q sent without an id\n", msg.Method)
+			return
+		}
+		if _, err := s.dispatch(msg.Method, msg.Params); err != nil {
 			fmt.Fprintf(s.logw, "gnotes mcp: %s: %v\n", msg.Method, err)
 		}
 		return
+	}
+
+	if problem := invalidRequest(msg); problem != "" {
+		id := msg.ID
+		if !validID(id) {
+			id = json.RawMessage("null")
+		}
+		s.send(response{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: codeInvalidRequest, Message: problem}})
+		return
+	}
+
+	result, err := s.dispatch(msg.Method, msg.Params)
+	if err == nil && result == nil {
+		// A response carries a result or an error; an empty object stands in
+		// for a method with nothing to return.
+		result = struct{}{}
 	}
 
 	reply := response{JSONRPC: "2.0", ID: msg.ID}
@@ -179,6 +207,34 @@ func (s *Server) handle(msg message) {
 		reply.Result = result
 	}
 	s.send(reply)
+}
+
+// invalidRequest explains why a request is not valid JSON-RPC 2.0, or returns
+// the empty string.
+func invalidRequest(msg message) string {
+	switch {
+	case msg.JSONRPC != "2.0":
+		return `"jsonrpc" must be "2.0"`
+	case !validID(msg.ID):
+		return "an id must be a string or a number"
+	case msg.Method == "":
+		return "a request needs a method"
+	}
+	return ""
+}
+
+// validID reports whether an id is a string or a number. MCP forbids null, and
+// JSON-RPC does not allow objects or arrays.
+func validID(id json.RawMessage) bool {
+	var v any
+	if json.Unmarshal(id, &v) != nil {
+		return false
+	}
+	switch v.(type) {
+	case string, float64:
+		return true
+	}
+	return false
 }
 
 // dispatch routes a method to its handler. A nil result with a nil error means
@@ -294,19 +350,6 @@ func (s *Server) send(r response) {
 // of stat calls, and an agent that reads a stale tree acts on notes that no
 // longer say what it thinks they say.
 func (s *Server) refresh() error {
-	current := store.Fingerprint(s.sess.Project)
-	if current == s.fingerprint {
-		return nil
-	}
-	if err := s.sess.Reload(); err != nil {
-		return err
-	}
-	s.fingerprint = current
-	return nil
-}
-
-// committed records the state of the log after this server wrote, so its own
-// append is not mistaken for an outside change on the next call.
-func (s *Server) committed() {
-	s.fingerprint = store.Fingerprint(s.sess.Project)
+	_, err := s.sess.Refresh()
+	return err
 }

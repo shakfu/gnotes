@@ -8,10 +8,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/shakfu/gnotes/internal/event"
 	"github.com/shakfu/gnotes/internal/session"
 	"github.com/shakfu/gnotes/internal/state"
 	"github.com/shakfu/gnotes/internal/store"
@@ -185,18 +189,84 @@ func TestAPIRequiresTheToken(t *testing.T) {
 	}
 }
 
-func TestTokenIsAcceptedInAQueryParameter(t *testing.T) {
+func TestTokenIsAcceptedInAQueryParameterOnlyByTheStream(t *testing.T) {
 	f := newFixture(t)
 
-	// The event stream cannot set headers, so the query form has to work.
-	res, err := f.http.Client().Get(f.http.URL + "/api/state?token=test-token")
+	// The event stream cannot set headers, so the query form has to work there.
+	res, err := f.http.Client().Get(f.http.URL + "/api/events?token=test-token")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
-
+	res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", res.StatusCode)
+		t.Fatalf("stream status = %d", res.StatusCode)
+	}
+
+	// Anywhere else it would put the token in addresses for no reason.
+	res, err = f.http.Client().Get(f.http.URL + "/api/state?token=test-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("state status = %d, want 401 for a query token", res.StatusCode)
+	}
+}
+
+// A site whose name was rebound to 127.0.0.1 arrives with its own Host.
+func TestForeignHostIsRefused(t *testing.T) {
+	f := newFixture(t)
+
+	req, _ := http.NewRequest("GET", f.http.URL+"/api/state", nil)
+	req.Host = "evil.example:80"
+	req.Header.Set("Authorization", "Bearer test-token")
+	res, err := f.http.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusMisdirectedRequest {
+		t.Fatalf("status = %d, want 421", res.StatusCode)
+	}
+
+	for _, host := range []string{"localhost:1234", "127.0.0.1:1", "[::1]:8080"} {
+		if !loopbackHost(host) {
+			t.Errorf("loopbackHost(%q) = false", host)
+		}
+	}
+}
+
+func TestResponsesCarrySecurityHeaders(t *testing.T) {
+	f := newFixture(t)
+	res := f.do("GET", "/", nil)
+	res.Body.Close()
+	for name, want := range map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"Referrer-Policy":        "no-referrer",
+	} {
+		if got := res.Header.Get(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if csp := res.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") {
+		t.Errorf("Content-Security-Policy = %q", csp)
+	}
+}
+
+func TestStatusCodesDistinguishFailures(t *testing.T) {
+	f := newFixture(t)
+
+	res := f.do("PATCH", "/api/node/nothing-like-this", map[string]any{"title": "x"})
+	res.Body.Close()
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown entry: status = %d, want 404", res.StatusCode)
+	}
+
+	big := strings.Repeat("x", 5<<20)
+	res = f.do("POST", "/api/node", map[string]any{"kind": "note", "title": "big", "body": big})
+	res.Body.Close()
+	if res.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized body: status = %d, want 413", res.StatusCode)
 	}
 }
 
@@ -787,6 +857,85 @@ func TestOwnWritesAreNotSeenAsOutsideChanges(t *testing.T) {
 	}
 }
 
+// An outside write that lands just before a write from the page must still
+// reach the page. It used to be recorded as seen by the page's own commit and
+// never loaded.
+func TestOutsideWriteBeforeAPageWriteIsNotLost(t *testing.T) {
+	f := newFixture(t)
+
+	other, err := session.OpenProject(f.sess.Project, store.Actor{ID: ulid.NewGenerator().New(), Name: "bob"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.SetClock(clock)
+	if _, err := other.NewNote(f.work, "from elsewhere", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	f.newNote("mine", "")
+	f.srv.checkDisk()
+
+	got := strings.Join(entries(f.get("/api/state")), ",")
+	if !strings.Contains(got, "from elsewhere") || !strings.Contains(got, "mine") {
+		t.Fatalf("entries = %s, want both notes", got)
+	}
+}
+
+// A log that cannot be read refuses writes, and the poll keeps retrying.
+func TestUnreadableLogRefusesWrites(t *testing.T) {
+	f := newFixture(t)
+
+	bad := filepath.Join(f.sess.Project.EventsDir(), ulid.NewGenerator().New()+".mallory.jsonl")
+	if err := os.WriteFile(bad, []byte("not json\n{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.srv.checkDisk()
+
+	res := f.do("POST", "/api/node", map[string]any{"kind": "note", "title": "blind", "notebook": f.work})
+	res.Body.Close()
+	if res.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 while the log is unreadable", res.StatusCode)
+	}
+
+	if err := os.Remove(bad); err != nil {
+		t.Fatal(err)
+	}
+	f.newNote("after the repair", "")
+}
+
+// Responses are encoded after the session lock is released, so they must not
+// share slices the tree mutates. Run with -race.
+func TestConcurrentTagEditsDoNotRace(t *testing.T) {
+	f := newFixture(t)
+	id := f.newNote("tagged", "")
+
+	for _, tag := range []string{"a", "b", "c"} {
+		f.patch("/api/node/"+id, map[string]any{"addTag": tag})
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				f.do("GET", "/api/state", nil).Body.Close()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				f.do("PATCH", "/api/node/"+id, map[string]any{"addTag": "0"}).Body.Close()
+				f.do("PATCH", "/api/node/"+id, map[string]any{"removeTag": "0"}).Body.Close()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 func TestEventStreamPushesOnChange(t *testing.T) {
 	f := newFixture(t)
 
@@ -995,5 +1144,23 @@ func TestDecodeRejectsTrailingData(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		t.Errorf("trailing whitespace: status = %s, want 200", res.Status)
+	}
+}
+
+// A link to an entry that has not synced yet is shown with a remove button, so
+// removing it must work even though the target cannot be resolved.
+func TestRemovingALinkToAnUnsyncedEntry(t *testing.T) {
+	f := newFixture(t)
+	from := f.newNote("from", "")
+
+	missing := ulid.NewGenerator().New()
+	link := event.Event{ID: ulid.NewGenerator().New(), Action: event.LinkNode, Payload: event.Payload{ID: from, Target: missing}}
+	if _, err := store.Append(f.sess.Project, store.Actor{ID: ulid.NewGenerator().New(), Name: "bob"}, []event.Event{link}); err != nil {
+		t.Fatal(err)
+	}
+
+	f.post("/api/node/"+from+"/link", map[string]any{"target": missing, "remove": true})
+	if links := f.sess.State.Get(from).Links; len(links) != 0 {
+		t.Fatalf("links = %v, want the pending link removed", links)
 	}
 }

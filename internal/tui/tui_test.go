@@ -1,12 +1,17 @@
 package tui
 
 import (
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/shakfu/gnotes/internal/editor"
+	"github.com/shakfu/gnotes/internal/event"
 	"github.com/shakfu/gnotes/internal/session"
 	"github.com/shakfu/gnotes/internal/state"
 	"github.com/shakfu/gnotes/internal/store"
@@ -36,6 +41,8 @@ func newModel(t *testing.T) *Model {
 
 	m := New(s)
 	m.now = clock
+	// No editor unless a test sets one, whatever the developer's shell has.
+	m.getenv = func(string) string { return "" }
 	m.width, m.height = 100, 24
 	return m
 }
@@ -540,9 +547,17 @@ func TestCommandCompletion(t *testing.T) {
 	m = typeText(t, m, "note")
 	m = press(t, m, "tab")
 
-	// "note" is an alias of "new" and the only command starting that way, so
-	// completion should settle on a single unambiguous name.
-	if got := m.input.String(); !strings.HasPrefix(got, "no") {
+	// "note" is already a command, the alias of "new". It must stay "note"
+	// rather than growing into "notebook", which merely starts the same way.
+	if got := m.input.String(); got != "note " {
+		t.Fatalf("completion produced %q, want %q", got, "note ")
+	}
+
+	// An alias completes like a name.
+	m = press(t, m, "esc", ":")
+	m = typeText(t, m, "pri")
+	m = press(t, m, "tab")
+	if got := m.input.String(); got != "pri" && got != "prio" {
 		t.Fatalf("completion produced %q", got)
 	}
 
@@ -687,6 +702,7 @@ func TestDetailViewShowsTheBody(t *testing.T) {
 func TestHelpOpensAndCloses(t *testing.T) {
 	m := withContent(t)
 
+	m.height = 200 // tall enough to show the whole reference
 	m = press(t, m, "?")
 	if m.mode != modeHelp {
 		t.Fatal("? did not open help")
@@ -698,9 +714,35 @@ func TestHelpOpensAndCloses(t *testing.T) {
 		}
 	}
 
-	m = press(t, m, "j")
-	if m.mode != modeHelp-modeHelp+modeNormal {
-		t.Fatal("any key should close help")
+	m = press(t, m, "q")
+	if m.mode != modeNormal {
+		t.Fatal("a key other than scrolling should close help")
+	}
+}
+
+// On a normal terminal the reference is taller than the screen, so it scrolls
+// rather than losing its first sections off the top.
+func TestHelpScrollsOnASmallTerminal(t *testing.T) {
+	m := withContent(t)
+	m.height = 24
+	m = press(t, m, "?")
+
+	first := m.View()
+	if lines := strings.Count(first, "\n") + 1; lines > m.height {
+		t.Fatalf("help drew %d lines on a %d-line terminal", lines, m.height)
+	}
+	if !strings.Contains(first, "up and down") {
+		t.Fatal("the first section is not shown first")
+	}
+
+	for i := 0; i < 60; i++ {
+		m = press(t, m, "j")
+	}
+	if m.mode != modeHelp {
+		t.Fatal("j closed help instead of scrolling it")
+	}
+	if last := m.View(); !strings.Contains(last, ":quit") && !strings.Contains(last, ":help") {
+		t.Fatalf("scrolling did not reach the command list:\n%s", last)
 	}
 }
 
@@ -1012,4 +1054,309 @@ func titlesOf(nodes []*state.Node) []string {
 		out[i] = n.Title
 	}
 	return out
+}
+
+// command runs a ':' command line and returns the model and any queued work.
+func command(t *testing.T, m *Model, line string) (*Model, tea.Cmd) {
+	t.Helper()
+	updated, cmd := m.runCommand(line)
+	return updated.(*Model), cmd
+}
+
+// The cursor follows the entry, not the row, when a sort reorders the list.
+func TestSelectionFollowsTheEntryAcrossASort(t *testing.T) {
+	m := withContent(t)
+	m.focus = paneEntries
+	m.entry = indexOfTitle(m, "fix the lexer")
+	id := m.entries[m.entry].ID
+
+	m, _ = command(t, m, "sort title")
+	if got := m.currentEntry(); got == nil || got.ID != id {
+		t.Fatalf("after sorting the cursor is on %v, want fix the lexer", got)
+	}
+}
+
+// A task that leaves a filtered list closes its detail view, so the next key
+// cannot act on the task that slid into its row.
+func TestDetailClosesWhenItsEntryLeavesTheList(t *testing.T) {
+	m := withContent(t)
+	work := m.notebooks()[0].ID
+	if _, err := m.sess.NewTask(work, "second task", ""); err != nil {
+		t.Fatal(err)
+	}
+	m.commit("")
+
+	m, _ = command(t, m, "filter status open")
+	m.focus = paneEntries
+	m.entry = indexOfTitle(m, "fix the lexer")
+	m = press(t, m, "enter")
+	if m.mode != modeDetail {
+		t.Fatal("enter did not open the detail view")
+	}
+
+	m = press(t, m, "space")
+	if m.mode == modeDetail {
+		t.Fatal("the detail view stayed open on a different entry")
+	}
+	for _, n := range m.sess.State.List(state.Filter{Kinds: []state.Kind{state.KindTask}}, state.OrderRank) {
+		if n.Title == "second task" && n.Status != state.StatusOpen {
+			t.Fatal("the neighbouring task was changed")
+		}
+	}
+}
+
+// A failed command rolls the tree back; the list must show the rolled-back
+// tree, not the half-applied one.
+func TestFailedCommandLeavesNoPhantomChangesInTheList(t *testing.T) {
+	m := withContent(t)
+	m.focus = paneEntries
+	m.entry = indexOfTitle(m, "fix the lexer")
+
+	m, _ = command(t, m, "tag bug #")
+	if !m.statusErr {
+		t.Fatalf("status = %q, want the bad tag reported", m.status)
+	}
+	if n := m.currentEntry(); n == nil || n.HasTag("bug") {
+		t.Fatalf("the list shows a tag that was never written: %v", n)
+	}
+}
+
+// Undo walks back this interface's own deletions, one at a time, and a
+// notebook's restore does not bring back what was deleted before it.
+func TestUndoRestoresOnlyThisInterfacesDeletionsInOrder(t *testing.T) {
+	m := withContent(t)
+	nb := m.notebooks()[0]
+
+	// Someone else's deletion, made before the interface acted.
+	sketch := m.entries[indexOfTitle(m, "design sketch")]
+	if err := m.sess.Delete(sketch); err != nil {
+		t.Fatal(err)
+	}
+	m.commit("")
+
+	m.focus = paneEntries
+	m.entry = indexOfTitle(m, "fix the lexer")
+	lexer := m.currentEntry().ID
+	m = press(t, m, "d")
+	m = typeText(t, m, "y")
+	m = press(t, m, "enter")
+
+	m.focus = paneNotebooks
+	m.notebook = 0
+	m = press(t, m, "d")
+	m = typeText(t, m, "y")
+	m = press(t, m, "enter")
+
+	m = press(t, m, "u")
+	if m.sess.State.Get(nb.ID).Deleted || !m.sess.State.Get(lexer).Deleted {
+		t.Fatal("the first undo should restore the notebook and nothing else")
+	}
+	m = press(t, m, "u")
+	if m.sess.State.Get(lexer).Deleted {
+		t.Fatal("the second undo did not restore the task")
+	}
+	m = press(t, m, "u")
+	if !m.sess.State.Get(sketch.ID).Deleted {
+		t.Fatal("undo restored a deletion this interface did not make")
+	}
+}
+
+// The poll notices another process's write without a keypress.
+func TestPollPicksUpOutsideWrites(t *testing.T) {
+	m := withContent(t)
+
+	other, err := session.OpenProject(m.sess.Project, store.Actor{ID: ulid.NewGenerator().New(), Name: "bob"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.SetClock(clock)
+	if _, err := other.NewNote(m.notebooks()[0].ID, "from elsewhere", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, cmd := m.Update(pollMsg{})
+	m = updated.(*Model)
+	if cmd == nil {
+		t.Fatal("the poll did not schedule the next one")
+	}
+	if indexOfTitle(m, "from elsewhere") < 0 {
+		t.Fatalf("the poll did not pick up the outside write: %v", titlesOf(m.entries))
+	}
+}
+
+// Sync runs in the background and reports when it finishes.
+func TestSyncRunsInTheBackground(t *testing.T) {
+	m := withContent(t)
+
+	m, cmd := command(t, m, "sync")
+	if cmd == nil || !m.syncing {
+		t.Fatal(":sync did not hand git to a background command")
+	}
+
+	// The temporary project is not a git repository, so the sync fails.
+	updated, _ := m.Update(cmd())
+	m = updated.(*Model)
+	if m.syncing || !m.statusErr {
+		t.Fatalf("after the sync: syncing=%v status=%q, want the failure shown", m.syncing, m.status)
+	}
+}
+
+// A title from another author's log must not send escape sequences or extra
+// lines to the terminal, in the list, the detail view or a prefilled prompt.
+func TestViewReplacesControlCharactersFromTheLog(t *testing.T) {
+	m := withContent(t)
+	id := m.entries[indexOfTitle(m, "design sketch")].ID
+
+	mallory := store.Actor{ID: ulid.NewGenerator().New(), Name: "mallory"}
+	g := ulid.NewGenerator()
+	events := []event.Event{
+		{ID: g.New(), Action: event.EditTitle, Payload: event.Payload{ID: id, Title: "evil\x1b]0;PWNED\x07\nforged"}},
+	}
+	events = append(events, event.Event{ID: g.New(), Ref: events[0].ID, Action: event.EditBody, Payload: event.Payload{ID: id, Body: "x\x1b[2Jy"}})
+	if _, err := store.Append(m.sess.Project, mallory, events); err != nil {
+		t.Fatal(err)
+	}
+	m = press(t, m, "R")
+
+	m.focus = paneEntries
+	m.entry = indexOfNode(m.entries, id)
+	check := func(where string) {
+		t.Helper()
+		out := m.View()
+		if strings.Contains(out, "PWNED\x07") || strings.Contains(out, "\x1b]0") || strings.Contains(out, "\x1b[2J") {
+			t.Errorf("%s rendered a control sequence from the log: %q", where, out)
+		}
+		if strings.Contains(out, "\nforged") {
+			t.Errorf("%s let a title break its line", where)
+		}
+	}
+	check("the list")
+	m = press(t, m, "enter")
+	check("the detail view")
+	m = press(t, m, "esc", "r")
+	check("the rename prompt")
+}
+
+// The notebook column follows the selection past the bottom of the screen.
+func TestNotebookColumnScrollsToTheSelection(t *testing.T) {
+	m := newModel(t)
+	for i := 0; i < 32; i++ {
+		if _, err := m.sess.NewNotebook(fmt.Sprintf("notebook %02d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.commit("")
+	m.width, m.height = 100, 10
+	m.focus = paneNotebooks
+
+	m = press(t, m, "G")
+	if !strings.Contains(m.View(), "notebook 31") {
+		t.Fatal("the selected notebook is not drawn")
+	}
+	m = press(t, m, "g")
+	if !strings.Contains(m.View(), "notebook 00") {
+		t.Fatal("scrolling back up did not show the first notebook")
+	}
+}
+
+// Wide characters take two columns. Counting runes pushed the column separator
+// and the row's tail past the edge.
+func TestWideCharactersKeepColumnsAligned(t *testing.T) {
+	m := newModel(t)
+	nb, err := m.sess.NewNotebook("日本語のノート")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.sess.NewTask(nb.ID, "漢字のタスクを長く書くとどうなるか見てみる", ""); err != nil {
+		t.Fatal(err)
+	}
+	m.commit("")
+	m.width, m.height = 60, 12
+	m.focus = paneEntries
+
+	for i, line := range strings.Split(m.View(), "\n") {
+		if w := ansi.StringWidth(line); w > m.width {
+			t.Errorf("line %d is %d columns wide on a %d-column terminal: %q", i, w, m.width, line)
+		}
+	}
+}
+
+// e opens $EDITOR and saves what comes back, found again by id.
+func TestEditOpensTheEditorAndSaves(t *testing.T) {
+	m := withContent(t)
+	m.getenv = func(k string) string {
+		if k == "EDITOR" {
+			return "true"
+		}
+		return ""
+	}
+	m.focus = paneEntries
+	m.entry = indexOfTitle(m, "design sketch")
+	id := m.currentEntry().ID
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	m = updated.(*Model)
+	if cmd == nil {
+		t.Fatal("e did not hand the terminal to the editor")
+	}
+
+	// Run what ExecProcess would, then deliver its message.
+	edit, err := editor.Start("", m.getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(edit.Path, []byte("rewritten\r\nin full\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.Update(editorDoneMsg{id: id, edit: edit})
+	if got := m.sess.State.Get(id).Body; got != "rewritten\nin full" {
+		t.Fatalf("body = %q", got)
+	}
+}
+
+// Without an editor the first line is edited in place, and saving it unchanged
+// keeps the body exactly, trailing newline included.
+func TestFirstLineEditKeepsTheRestOfTheBody(t *testing.T) {
+	m := withContent(t)
+	m.focus = paneEntries
+	m.entry = indexOfTitle(m, "design sketch")
+	n := m.currentEntry()
+	if err := m.sess.SetBody(n, "abc123 fix\n"); err != nil {
+		t.Fatal(err)
+	}
+	m.commit("")
+
+	before := len(m.sess.Log())
+	m = press(t, m, "e")
+	m = press(t, m, "enter")
+	if got := m.sess.State.Get(n.ID).Body; got != "abc123 fix\n" {
+		t.Fatalf("body = %q, want it unchanged", got)
+	}
+	if len(m.sess.Log()) != before {
+		t.Fatal("saving an unchanged first line wrote an event")
+	}
+}
+
+func TestCommonPrefixKeepsWholeCharacters(t *testing.T) {
+	if got := commonPrefix([]string{"caf\u00e9", "caf\u00e8"}); got != "caf" {
+		t.Fatalf("commonPrefix = %q, want %q", got, "caf")
+	}
+}
+
+func TestInputShowsTheCursorAndTheAnswer(t *testing.T) {
+	var in input
+	in.set("hello")
+	in.home()
+	if out := in.render("> ", 40); !strings.Contains(out, "\x1b[7mh\x1b[27m") {
+		t.Fatalf("no cursor drawn at the start: %q", out)
+	}
+
+	in.set("yes")
+	label := "delete notebook " + strings.Repeat("very long title ", 5) + "and its contents? (y/N) "
+	if out := stripANSI(in.render(label, 50)); !strings.Contains(out, "yes") {
+		t.Fatalf("a long label hid the answer: %q", out)
+	}
 }

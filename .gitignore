@@ -34,3 +34,8 @@ go.work.sum
 
 # Build output
 /gnotes
+
+# agents
+.claude
+CLAUDE.md
+REVIEW.md

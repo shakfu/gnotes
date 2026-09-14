@@ -30,6 +30,51 @@ func (s *State) Children(parent string) []*Node {
 	return out
 }
 
+// Subtree returns a node and every node below it, deleted or not, or nil when
+// the node does not exist.
+func (s *State) Subtree(id string) []*Node {
+	root := s.Get(id)
+	if root == nil {
+		return nil
+	}
+	out := []*Node{root}
+	for i := 0; i < len(out); i++ {
+		for _, child := range s.children[out[i].ID] {
+			if n := s.Nodes[child]; n != nil {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// LinkTarget resolves a reference to one of n's links, for removing it.
+//
+// A link may point at a node that is deleted or has not synced, which Resolve
+// cannot find. The reference is therefore matched against the link ids first,
+// as a full id or a suffix of at least HandleLen, and only then resolved as
+// usual.
+func (s *State) LinkTarget(n *Node, ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	upper := ulid.Canonical(strings.ToUpper(ref))
+	if len(ref) >= HandleLen {
+		var matches []string
+		for _, id := range n.Links {
+			if strings.HasSuffix(id, upper) {
+				matches = append(matches, id)
+			}
+		}
+		if len(matches) == 1 {
+			return matches[0], nil
+		}
+	}
+	target, err := s.Resolve(ref)
+	if err != nil {
+		return "", err
+	}
+	return target.ID, nil
+}
+
 // Siblings returns a parent's live children as rank placements, which is what
 // rank.Resolve needs to work out where a new or moved node goes.
 func (s *State) Siblings(parent string, excluding string) []rank.Sibling {
@@ -122,27 +167,50 @@ type ErrNoMatch struct{ Ref string }
 
 func (e *ErrNoMatch) Error() string { return fmt.Sprintf("nothing matches %q", e.Ref) }
 
-// Resolve turns a user-typed reference into a node.
+// HandleLen is the number of trailing id characters shown as a handle, and the
+// shortest id suffix a reference is matched against.
+const HandleLen = 6
+
+// Resolve turns a user-typed reference into a live node.
 //
 // It tries progressively looser interpretations and stops at the first that
-// matches anything: the full id, then an id suffix, then a title. Stopping at
-// the first successful tier is what keeps a short id from being reported as
-// ambiguous merely because some note's title happens to contain it.
+// matches anything: the full id, an id suffix, the exact title, a title
+// prefix, then a title substring. Stopping at the first successful tier keeps
+// a handle from being reported as ambiguous merely because some title contains
+// it, and keeps "parser" resolvable next to "parser rewrite".
 //
 // Ids are matched by suffix rather than prefix because the leading characters
 // of a ULID are its timestamp, so everything created in the same session
-// shares them.
+// shares them. A suffix shorter than HandleLen is not tried: two or three
+// letters of a title are often valid id characters, and matching them against
+// ids sent commands to entries the user never named.
+//
+// The workspace is only matched when kinds names it, so a word that happens to
+// match the project name cannot rename or tag the root.
 func (s *State) Resolve(ref string, kinds ...Kind) (*Node, error) {
+	return s.resolve(ref, false, kinds)
+}
+
+// ResolveDeleted is Resolve over deleted nodes, for restoring one. It has the
+// same tiers and reports ambiguity the same way rather than guessing.
+func (s *State) ResolveDeleted(ref string, kinds ...Kind) (*Node, error) {
+	return s.resolve(ref, true, kinds)
+}
+
+func (s *State) resolve(ref string, deleted bool, kinds []Kind) (*Node, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return nil, &ErrNoMatch{Ref: ref}
 	}
 
 	wanted := func(n *Node) bool {
-		if n.Deleted {
+		if n.Deleted != deleted {
 			return false
 		}
-		return len(kinds) == 0 || slices.Contains(kinds, n.Kind)
+		if len(kinds) == 0 {
+			return n.Kind != KindWorkspace
+		}
+		return slices.Contains(kinds, n.Kind)
 	}
 
 	if n, ok := s.Nodes[ulid.Canonical(ref)]; ok && wanted(n) {
@@ -151,18 +219,21 @@ func (s *State) Resolve(ref string, kinds ...Kind) (*Node, error) {
 
 	upper := strings.ToUpper(ref)
 	lower := strings.ToLower(ref)
+	bySuffixOK := len(ref) >= HandleLen
 
-	var bySuffix, byPrefix, byContains []*Node
+	var bySuffix, byTitle, byPrefix, byContains []*Node
 	for _, n := range s.Nodes {
 		if !wanted(n) {
 			continue
 		}
-		if strings.HasSuffix(n.ID, upper) {
+		if bySuffixOK && strings.HasSuffix(n.ID, upper) {
 			bySuffix = append(bySuffix, n)
 			continue
 		}
 		title := strings.ToLower(n.Title)
 		switch {
+		case title == lower:
+			byTitle = append(byTitle, n)
 		case strings.HasPrefix(title, lower):
 			byPrefix = append(byPrefix, n)
 		case strings.Contains(title, lower):
@@ -170,7 +241,7 @@ func (s *State) Resolve(ref string, kinds ...Kind) (*Node, error) {
 		}
 	}
 
-	for _, tier := range [][]*Node{bySuffix, byPrefix, byContains} {
+	for _, tier := range [][]*Node{bySuffix, byTitle, byPrefix, byContains} {
 		switch len(tier) {
 		case 0:
 			continue

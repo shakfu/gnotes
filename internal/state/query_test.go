@@ -549,3 +549,120 @@ func BenchmarkList(b *testing.B) {
 		s.List(Filter{Kinds: []Kind{KindTask}}, OrderRank)
 	}
 }
+
+// A title fragment shorter than a handle must never be matched against ids.
+// Two letters are a valid id suffix for roughly one node in a thousand.
+func TestResolveIgnoresShortIDSuffixes(t *testing.T) {
+	b := newBuilder(t)
+	ws := b.workspace("demo")
+	nb := b.node(event.AddNotebook, ws, "nb")
+	decoy := b.node(event.AddNote, nb, "unrelated")
+	frag := strings.ToLower(decoy[len(decoy)-2:])
+	want := b.node(event.AddTask, nb, frag+" migration")
+
+	s := b.mustBuild()
+	got, err := s.Resolve(frag)
+	if err != nil {
+		t.Fatalf("Resolve(%q): %v", frag, err)
+	}
+	if got.ID != want {
+		t.Fatalf("Resolve(%q) = %q, want the title match", frag, got.Title)
+	}
+}
+
+// An exact title wins over longer titles that start with it.
+func TestResolvePrefersAnExactTitle(t *testing.T) {
+	b := newBuilder(t)
+	ws := b.workspace("demo")
+	nb := b.node(event.AddNotebook, ws, "nb")
+	exact := b.node(event.AddNote, nb, "Parser")
+	b.node(event.AddNote, nb, "parser rewrite")
+
+	s := b.mustBuild()
+	got, err := s.Resolve("parser")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.ID != exact {
+		t.Fatalf("Resolve = %q, want the exact title", got.Title)
+	}
+}
+
+func TestResolveSkipsTheWorkspaceUnlessAsked(t *testing.T) {
+	f := newFilled(t)
+	s := f.mustBuild()
+
+	if n, err := s.Resolve("demo"); err == nil {
+		t.Fatalf("Resolve(demo) = %q, want no match on the workspace", n.Title)
+	}
+	if n, err := s.Resolve("demo", KindWorkspace); err != nil || n.ID != f.ws {
+		t.Fatalf("Resolve(demo, workspace) = %v, %v", n, err)
+	}
+}
+
+func TestResolveDeletedReportsAmbiguity(t *testing.T) {
+	f := newFilled(t)
+	f.emit(event.DeleteNode, event.Payload{ID: f.sketch})
+	f.emit(event.DeleteNode, event.Payload{ID: f.spec})
+	s := f.mustBuild()
+
+	var ambiguous *ErrAmbiguous
+	if _, err := s.ResolveDeleted("e"); !errors.As(err, &ambiguous) {
+		t.Fatalf("ResolveDeleted(e) = %v, want ErrAmbiguous", err)
+	}
+	got, err := s.ResolveDeleted("spec")
+	if err != nil || got.ID != f.spec {
+		t.Fatalf("ResolveDeleted(spec) = %v, %v", got, err)
+	}
+	if _, err := s.ResolveDeleted("shopping"); err == nil {
+		t.Fatal("ResolveDeleted matched a live node")
+	}
+}
+
+// A date-only due date is a calendar date in the reader's time zone.
+func TestOverdueComparesCalendarDates(t *testing.T) {
+	task := &Node{Kind: KindTask}
+	task.Due, _ = ParseDueAbsolute("2026-08-17")
+
+	pdt := time.FixedZone("PDT", -7*3600)
+	aest := time.FixedZone("AEST", 10*3600)
+	cases := []struct {
+		now  time.Time
+		want bool
+	}{
+		{time.Date(2026, 8, 16, 18, 0, 0, 0, pdt), false},  // the evening before, west
+		{time.Date(2026, 8, 17, 23, 59, 0, 0, pdt), false}, // late on the day itself
+		{time.Date(2026, 8, 17, 9, 0, 0, 0, aest), false},  // early on the day, east
+		{time.Date(2026, 8, 18, 0, 1, 0, 0, pdt), true},    // the next day
+		{time.Date(2026, 8, 18, 0, 1, 0, 0, time.UTC), true},
+	}
+	for _, c := range cases {
+		if got := task.Overdue(c.now); got != c.want {
+			t.Errorf("Overdue(%v) = %v, want %v", c.now, got, c.want)
+		}
+	}
+
+	// A due time is an instant.
+	task.Due, _ = ParseDueAbsolute("2026-08-17T15:00:00+02:00")
+	if task.Overdue(time.Date(2026, 8, 17, 12, 59, 0, 0, time.UTC)) {
+		t.Error("overdue a minute before its due time")
+	}
+	if !task.Overdue(time.Date(2026, 8, 17, 13, 1, 0, 0, time.UTC)) {
+		t.Error("not overdue a minute after its due time")
+	}
+}
+
+// A time typed without a zone is the writer's local time, stored with its
+// offset so that every reader agrees on the instant.
+func TestParseDueReadsATimeOfDayAsLocal(t *testing.T) {
+	pdt := time.FixedZone("PDT", -7*3600)
+	now := time.Date(2026, 8, 17, 9, 0, 0, 0, pdt)
+
+	got, ok := ParseDue("2026-08-21 15:00", now)
+	if !ok {
+		t.Fatal("ParseDue refused a date and time")
+	}
+	if FormatDue(got) != "2026-08-21T15:00:00-07:00" {
+		t.Fatalf("FormatDue = %q", FormatDue(got))
+	}
+}

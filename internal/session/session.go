@@ -9,6 +9,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/shakfu/gnotes/internal/event"
@@ -17,6 +18,10 @@ import (
 	"github.com/shakfu/gnotes/internal/store"
 	"github.com/shakfu/gnotes/internal/ulid"
 )
+
+// ClockTolerance is how far ahead of this machine's clock a new event may be
+// dated to keep it after the last event in the log.
+const ClockTolerance = 5 * time.Minute
 
 // Session is an open project together with the identity writing to it.
 //
@@ -49,6 +54,11 @@ type Session struct {
 	// pending are the events staged since the last Commit.
 	pending []event.Event
 
+	// seen is the state of the logs on disk that the tree reflects: taken
+	// before the last successful load, and advanced past this session's own
+	// appends. Any other difference is a write by someone else.
+	seen store.Snapshot
+
 	gen *ulid.Generator
 
 	// now is the clock, replaced in tests so that relative dates are stable.
@@ -77,17 +87,40 @@ func OpenProject(p *store.Project, actor store.Actor) (*Session, error) {
 }
 
 // Reload re-reads the log from disk, discarding any uncommitted events.
+//
+// A failed load leaves the session as it was, still marked out of date, so the
+// next Refresh tries again.
 func (s *Session) Reload() error {
+	// Taken before reading, so a write that lands during the load is seen as a
+	// change next time rather than absorbed unread.
+	before := store.Snap(s.Project)
 	loaded, err := store.Load(s.Project)
 	if err != nil {
 		return err
 	}
+	s.seen = before
 	s.log = loaded.Events
 	s.Skipped = loaded.Skipped
 	s.Torn = loaded.Torn
 	s.pending = nil
 	s.State, s.Problems = state.Materialize(s.log)
 	return nil
+}
+
+// Changed reports whether the logs on disk differ from what the tree reflects,
+// which means another process or a sync has written.
+func (s *Session) Changed() bool {
+	return !store.Snap(s.Project).Equal(s.seen)
+}
+
+// Refresh reloads the session if another process has written, reporting
+// whether it did. Staged events are discarded by a reload, so call it between
+// commands, never inside one.
+func (s *Session) Refresh() (bool, error) {
+	if !s.Changed() {
+		return false, nil
+	}
+	return true, s.Reload()
 }
 
 // SetClock replaces the session's clock.
@@ -118,12 +151,43 @@ func (s *Session) Commit() error {
 	if len(s.pending) == 0 {
 		return nil
 	}
-	if err := store.Append(s.Project, s.Actor, s.pending); err != nil {
+	before := store.Snap(s.Project)
+	grew, err := store.Append(s.Project, s.Actor, s.pending)
+	if err != nil {
 		s.Rollback()
 		return err
 	}
 	s.pending = nil
+	s.absorb(before, grew)
 	return nil
+}
+
+// absorb advances seen past this session's own append, but only when nothing
+// else changed: every other log must be as it was, and this author's log must
+// have grown by exactly what was written. Otherwise seen is left behind, so the
+// next Refresh reloads and picks up the other write.
+func (s *Session) absorb(before store.Snapshot, grew int64) {
+	if !before.Equal(s.seen) {
+		return
+	}
+	after := store.Snap(s.Project)
+	own := store.LogName(s.Actor)
+	if after[own].Size != before[own].Size+grew {
+		return
+	}
+	for name, stamp := range after {
+		if name != own && before[name] != stamp {
+			return
+		}
+	}
+	files := len(before)
+	if _, existed := before[own]; !existed {
+		files++
+	}
+	if len(after) != files {
+		return
+	}
+	s.seen = after
 }
 
 // Rollback discards the staged events and rebuilds the tree from what is
@@ -150,14 +214,18 @@ func (s *Session) Rollback() {
 func (s *Session) emit(action event.Action, p event.Payload) (*event.Event, error) {
 	ref := event.EdgeRef(s.log)
 
-	// The new id must sort after the edge. On a machine whose clock is behind
-	// the one that wrote the last event, taking the wall clock alone would
-	// produce an id that sorts before events already in the log, silently
-	// reordering replay.
+	// The new id sorts after the edge, so a clock slightly behind the one that
+	// wrote the last event still dates events in order.
+	//
+	// The floor is capped at ClockTolerance past this machine's clock. An edge
+	// further ahead comes from a clock that is wrong, and following it would
+	// date every later event, by every author, in that future, which hides
+	// them from --at. Replay order does not depend on the floor: an event
+	// always follows the event it refs, whatever its id.
 	var floor uint64
 	if ref != "" {
 		if ms, err := ulid.Time(ref); err == nil {
-			floor = ms + 1
+			floor = min(ms+1, uint64(s.now().Add(ClockTolerance).UnixMilli()))
 		}
 	}
 
@@ -218,19 +286,28 @@ func (s *Session) ensureContributor() error {
 // The rebalance is itself an event, so every machine replaying the log arrives
 // at the same ranks. Respacing locally without recording it would leave two
 // machines disagreeing about sibling order.
+//
+// A sibling with a malformed rank, which only a damaged or foreign log can
+// contain, also triggers the rebalance. Placing against it would fail every
+// insert under the parent, since no rank can be computed next to it.
 func (s *Session) place(parent, moving string, pos rank.Position) (string, error) {
-	r, err := rank.Resolve(s.State.Siblings(parent, moving), pos)
-	if err == nil {
-		return r, nil
-	}
-	if !errors.Is(err, rank.ErrExhausted) {
-		return "", err
+	siblings := s.State.Siblings(parent, moving)
+	malformed := slices.ContainsFunc(siblings, func(sib rank.Sibling) bool { return !rank.Valid(sib.Rank) })
+
+	if !malformed {
+		r, err := rank.Resolve(siblings, pos)
+		if err == nil {
+			return r, nil
+		}
+		if !errors.Is(err, rank.ErrExhausted) {
+			return "", err
+		}
 	}
 
 	if err := s.rebalance(parent); err != nil {
 		return "", err
 	}
-	r, err = rank.Resolve(s.State.Siblings(parent, moving), pos)
+	r, err := rank.Resolve(s.State.Siblings(parent, moving), pos)
 	if err != nil {
 		return "", fmt.Errorf("could not make room under this parent: %w", err)
 	}

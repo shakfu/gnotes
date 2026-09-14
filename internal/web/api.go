@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -107,11 +108,13 @@ type countsJSON struct {
 // toNode converts a node for the wire.
 func toNode(s *state.State, n *state.Node, now time.Time, includeBody bool) nodeJSON {
 	j := nodeJSON{
-		ID:        n.ID,
-		Ref:       ulid.Short(n.ID, refLen),
-		Kind:      n.Kind.String(),
-		Title:     n.Title,
-		Tags:      n.Tags,
+		ID:    n.ID,
+		Ref:   ulid.Short(n.ID, refLen),
+		Kind:  n.Kind.String(),
+		Title: n.Title,
+		// A copy: the response is encoded after the lock is released, and the
+		// tree sorts and splices this slice in place on the next tag edit.
+		Tags:      slices.Clone(n.Tags),
 		Deleted:   n.Deleted,
 		Created:   n.Created.UTC().Format(time.RFC3339),
 		Updated:   n.Updated.UTC().Format(time.RFC3339),
@@ -428,10 +431,20 @@ func (s *Server) handleNode(w http.ResponseWriter, r *http.Request) {
 
 // mutate runs a write under the lock, commits it, and reports the change.
 //
-// Every mutating handler goes through it, so none can forget to commit, to
-// refresh the on-disk fingerprint, or to wake the connected browsers.
+// Every mutating handler goes through it, so none can forget to commit or to
+// wake the connected browsers.
+//
+// Outside writes are loaded first, so the action runs against the tree on disk
+// rather than the one the last poll saw. A log that cannot be read refuses the
+// write instead of letting it land on a stale tree.
 func (s *Server) mutate(w http.ResponseWriter, action func() (any, error)) {
 	s.mu.Lock()
+
+	if _, err := s.sess.Refresh(); err != nil {
+		s.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("the event log could not be read: %w", err))
+		return
+	}
 
 	result, err := action()
 	if err != nil {
@@ -440,7 +453,7 @@ func (s *Server) mutate(w http.ResponseWriter, action func() (any, error)) {
 		// written by whichever request commits next.
 		s.sess.Rollback()
 		s.mu.Unlock()
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, statusFor(err), err)
 		return
 	}
 
@@ -449,7 +462,6 @@ func (s *Server) mutate(w http.ResponseWriter, action func() (any, error)) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.touchDisk()
 	s.mu.Unlock()
 
 	s.bump()
@@ -471,7 +483,7 @@ type newNodeRequest struct {
 func (s *Server) handleNewNotebook(w http.ResponseWriter, r *http.Request) {
 	var req newNodeRequest
 	if err := decode(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, statusFor(err), err)
 		return
 	}
 
@@ -492,7 +504,7 @@ func (s *Server) handleNewNotebook(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleNewNode(w http.ResponseWriter, r *http.Request) {
 	var req newNodeRequest
 	if err := decode(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, statusFor(err), err)
 		return
 	}
 
@@ -565,7 +577,7 @@ type patchRequest struct {
 func (s *Server) handlePatchNode(w http.ResponseWriter, r *http.Request) {
 	var req patchRequest
 	if err := decode(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, statusFor(err), err)
 		return
 	}
 	id := r.PathValue("id")
@@ -655,10 +667,14 @@ func (s *Server) handleRestoreNode(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	s.mutate(w, func() (any, error) {
-		if err := s.sess.Restore(ulid.Canonical(id)); err != nil {
+		n, err := s.sess.State.ResolveDeleted(id)
+		if err != nil {
 			return nil, err
 		}
-		return map[string]string{"id": id}, nil
+		if err := s.sess.Restore(n.ID); err != nil {
+			return nil, err
+		}
+		return map[string]string{"id": n.ID}, nil
 	})
 }
 
@@ -673,7 +689,7 @@ type moveRequest struct {
 func (s *Server) handleMoveNode(w http.ResponseWriter, r *http.Request) {
 	var req moveRequest
 	if err := decode(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, statusFor(err), err)
 		return
 	}
 	id := r.PathValue("id")
@@ -723,7 +739,7 @@ type linkRequest struct {
 func (s *Server) handleLinkNode(w http.ResponseWriter, r *http.Request) {
 	var req linkRequest
 	if err := decode(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, statusFor(err), err)
 		return
 	}
 	id := r.PathValue("id")
@@ -734,11 +750,11 @@ func (s *Server) handleLinkNode(w http.ResponseWriter, r *http.Request) {
 			return nil, err
 		}
 		if req.Remove {
-			target, err := s.sess.State.Resolve(req.Target)
+			target, err := s.sess.State.LinkTarget(from, req.Target)
 			if err != nil {
 				return nil, err
 			}
-			return map[string]string{"id": from.ID}, s.sess.Unlink(from, target.ID)
+			return map[string]string{"id": from.ID}, s.sess.Unlink(from, target)
 		}
 
 		to, err := s.sess.State.Resolve(req.Target)
@@ -758,9 +774,15 @@ type syncRequest struct {
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	var req syncRequest
 	if err := decode(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, statusFor(err), err)
 		return
 	}
+
+	if !s.syncing.TryLock() {
+		writeError(w, http.StatusConflict, errors.New("a sync is already running"))
+		return
+	}
+	defer s.syncing.Unlock()
 
 	s.mu.Lock()
 	message := fmt.Sprintf("gnotes: %d events", len(s.sess.Log()))
@@ -769,9 +791,13 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 
 	// Outside the lock: a push contacts the network and can take seconds, and
 	// holding the session for that long would stall every other request.
-	res, err := gitsync.Sync(project, message, req.Push)
+	res, err := gitsync.Sync(project, message, gitsync.Options{Push: req.Push, Unattended: true})
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		if res.Committed {
+			err = fmt.Errorf("committed on %s, then: %w", res.Branch, err)
+		}
+		// git failed, not the request, which was well formed.
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -782,7 +808,6 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.touchDisk()
 	s.mu.Unlock()
 	s.bump()
 
@@ -806,7 +831,7 @@ func decode(r *http.Request, into any) error {
 	dec.DisallowUnknownFields()
 
 	if err := dec.Decode(into); err != nil {
-		if err.Error() == "EOF" {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		return fmt.Errorf("malformed request: %w", err)
@@ -832,6 +857,20 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 // writeError sends a failure the page can display verbatim.
+// statusFor picks the status for an error from an action: not found, too large,
+// or otherwise a bad request.
+func statusFor(err error) int {
+	var noMatch *state.ErrNoMatch
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.As(err, &noMatch):
+		return http.StatusNotFound
+	case errors.As(err, &tooLarge):
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
+}
+
 func writeError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)

@@ -9,6 +9,7 @@ package web
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"errors"
@@ -23,7 +24,6 @@ import (
 	"time"
 
 	"github.com/shakfu/gnotes/internal/session"
-	"github.com/shakfu/gnotes/internal/store"
 )
 
 // assets holds the page, its stylesheet and its script.
@@ -65,12 +65,15 @@ type Server struct {
 	watchersMu sync.Mutex
 	watchers   map[chan uint64]struct{}
 
-	// fingerprint is the last observed state of the log files on disk, used to
-	// notice writes made by the command line or another machine's sync.
-	fingerprint string
-
 	pollInterval time.Duration
 	mux          *http.ServeMux
+
+	// anyHost accepts any Host header. It is set when the listener is not on a
+	// loopback address, where the names a client may use cannot be listed.
+	anyHost bool
+
+	// syncing serialises git syncs, which would otherwise race on the index.
+	syncing sync.Mutex
 }
 
 // New builds a server over an open session.
@@ -94,7 +97,6 @@ func New(s *session.Session, opts Options) (*Server, error) {
 		watchers:     make(map[chan uint64]struct{}),
 		pollInterval: interval,
 	}
-	srv.fingerprint = store.Fingerprint(s.Project)
 	srv.version.Store(1)
 	srv.routes()
 
@@ -153,8 +155,40 @@ func (s *Server) routes() {
 }
 
 // ServeHTTP satisfies http.Handler.
+//
+// The Host check stops DNS rebinding: a page on another site whose name has
+// been pointed at 127.0.0.1 reaches this server as same-origin, so the Origin
+// check alone cannot tell it apart. The token still guards the API; this keeps
+// even the page itself from being served to such a site.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.anyHost && !loopbackHost(r.Host) {
+		http.Error(w, "this server only answers on a loopback address", http.StatusMisdirectedRequest)
+		return
+	}
+
+	h := w.Header()
+	// The page loads only its own files. no-referrer keeps the token in the
+	// address from leaving in a Referer header.
+	h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "no-referrer")
+
 	s.mux.ServeHTTP(w, r)
+}
+
+// loopbackHost reports whether a Host header names this machine by a loopback
+// name or address.
+func loopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // guard wraps an API handler with token and origin checks.
@@ -175,30 +209,25 @@ func (s *Server) guard(h http.HandlerFunc) http.Handler {
 	})
 }
 
-// authorised reports whether the request carries the token, in a header or in
-// the query string. The query form exists so that the initial page load and
-// the event stream, which cannot set headers, still work.
+// authorised reports whether the request carries the token.
+//
+// It travels in the Authorization header, except for the event stream, which
+// a browser opens without headers and so takes it in the query string. Only
+// that route accepts the query form, keeping the token out of the addresses
+// of every other request.
 func (s *Server) authorised(r *http.Request) bool {
 	if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
-		return constantTimeEqual(bearer, s.token)
+		return tokenEqual(bearer, s.token)
 	}
-	if got := r.Header.Get("X-Gnotes-Token"); got != "" {
-		return constantTimeEqual(got, s.token)
+	if r.Method == http.MethodGet && r.URL.Path == "/api/events" {
+		return tokenEqual(r.URL.Query().Get("token"), s.token)
 	}
-	return constantTimeEqual(r.URL.Query().Get("token"), s.token)
+	return false
 }
 
-// constantTimeEqual compares two tokens without leaking their contents through
-// how long the comparison takes.
-func constantTimeEqual(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var diff byte
-	for i := 0; i < len(a); i++ {
-		diff |= a[i] ^ b[i]
-	}
-	return diff == 0
+// tokenEqual compares tokens in constant time.
+func tokenEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // sameOrigin reports whether an Origin header refers to the host being served.
@@ -226,6 +255,10 @@ func (s *Server) Serve(addr string) (net.Listener, error) {
 // Run serves on a listener and polls for outside changes until the listener is
 // closed.
 func (s *Server) Run(ln net.Listener) error {
+	if addr, ok := ln.Addr().(*net.TCPAddr); ok && !addr.IP.IsLoopback() {
+		s.anyHost = true
+	}
+
 	stop := make(chan struct{})
 	defer close(stop)
 	go s.watch(stop)
@@ -262,24 +295,14 @@ func (s *Server) watch(stop <-chan struct{}) {
 	}
 }
 
-// checkDisk reloads the session if the logs changed underneath it.
+// checkDisk reloads the session if the logs changed underneath it. A failed
+// reload leaves the session marked out of date, so the next tick retries.
 func (s *Server) checkDisk() {
-	current := store.Fingerprint(s.sess.Project)
-
 	s.mu.Lock()
-	changed := current != s.fingerprint
-	if changed {
-		s.fingerprint = current
-		if err := s.sess.Reload(); err != nil {
-			// A transient read error during someone else's write is not worth
-			// tearing the server down; the next tick will retry.
-			s.mu.Unlock()
-			return
-		}
-	}
+	changed, err := s.sess.Refresh()
 	s.mu.Unlock()
 
-	if changed {
+	if changed && err == nil {
 		s.bump()
 	}
 }
@@ -299,12 +322,6 @@ func (s *Server) bump() {
 		default:
 		}
 	}
-}
-
-// touchDisk records the on-disk state after this server wrote, so its own
-// write is not mistaken for an outside one on the next poll.
-func (s *Server) touchDisk() {
-	s.fingerprint = store.Fingerprint(s.sess.Project)
 }
 
 // subscribe registers a channel for change notifications.

@@ -35,7 +35,20 @@ const (
 
 	// LogExt is the extension of an event log.
 	LogExt = ".jsonl"
+
+	// AttributesFile is the git attributes file kept beside the logs.
+	AttributesFile = ".gitattributes"
 )
+
+// attributes tells git to merge two versions of a log by keeping the lines of
+// both.
+//
+// One file per author keeps two people off each other's paths, but one person
+// on two machines appends to the same file from both, and git's line merge
+// reports two additions at the end of a file as a conflict. The union driver
+// keeps both sides instead. Replay orders the lines, so their order in the
+// merged file does not matter.
+const attributes = "*" + LogExt + " merge=union\n"
 
 // ErrNotFound reports that no project exists at or above the starting
 // directory.
@@ -162,10 +175,30 @@ func Init(root, name string, now time.Time) (*Project, error) {
 	if err := os.MkdirAll(p.EventsDir(), 0o755); err != nil {
 		return nil, fmt.Errorf("create project directories: %w", err)
 	}
+	if err := EnsureAttributes(p); err != nil {
+		return nil, err
+	}
 	if err := p.writeConfig(); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+// EnsureAttributes writes the git attributes for the event logs when the file
+// is missing. An existing file is left alone, whatever it says.
+func EnsureAttributes(p *Project) error {
+	dir := p.EventsDir()
+	path := filepath.Join(dir, AttributesFile)
+	if _, err := os.Stat(path); err == nil || !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create events directory: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(attributes), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
 }
 
 // writeConfig persists the descriptor via a temporary file and a rename, so a

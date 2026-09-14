@@ -336,6 +336,16 @@ func Snippet(n *state.Node, query string, width int) string {
 		end = len(body)
 		start = max(0, end-width)
 	}
+	// The offsets were found in the lowercased body, whose byte length can
+	// differ from the original's, so they are moved to character boundaries
+	// before slicing rather than trusted to be on one.
+	start = min(start, len(body))
+	for start > 0 && !utf8.RuneStart(body[start]) {
+		start--
+	}
+	for end < len(body) && !utf8.RuneStart(body[end]) {
+		end++
+	}
 
 	frag := body[start:end]
 	if start > 0 {

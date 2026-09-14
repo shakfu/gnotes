@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/shakfu/gnotes/internal/event"
 	"github.com/shakfu/gnotes/internal/state"
@@ -86,9 +85,6 @@ func project(t *testing.T) (*state.State, []event.Event) {
 
 func export(t *testing.T, st *state.State, log []event.Event, opt Options) string {
 	t.Helper()
-	if opt.Now.IsZero() {
-		opt.Now = time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
-	}
 	var buf bytes.Buffer
 	if err := Write(&buf, st, log, opt); err != nil {
 		t.Fatalf("export: %v", err)
@@ -103,8 +99,7 @@ func fullOptions() Options {
 // -----------------------------------------------------------------------------
 
 // The export is a derived artefact people will regenerate and diff. Two runs
-// over the same log must therefore differ in nothing but the timestamp, which
-// means every map in the encoder has to be walked in sorted order.
+// over the same log must therefore be identical, which means every map in the encoder has to be walked in sorted order.
 func TestExportIsReproducible(t *testing.T) {
 	st, log := project(t)
 
@@ -350,6 +345,8 @@ func TestQuotingEscapesApostrophes(t *testing.T) {
 		"semi;colon":  "'semi;colon'",
 		"tab\there":   "'tab\there'",
 		"unicode: ok": "'unicode: ok'",
+		"nul\x00byte": "'nul' || char(0) || 'byte'",
+		"\x00":        "'' || char(0) || ''",
 	}
 	for in, want := range cases {
 		if got := quote(in); got != want {
@@ -556,4 +553,99 @@ func TestCommentMetadataCannotEscapeIntoStatements(t *testing.T) {
 	if got := query(t, db, "SELECT v FROM meta WHERE k = 'project';"); got != opt.Project {
 		t.Errorf("project meta: got %q, want %q", got, opt.Project)
 	}
+}
+
+// deletedIntervals returns a node's deleted intervals, oldest first.
+func deletedIntervals(rows []histRow, node string) []histRow {
+	var out []histRow
+	for _, r := range rows {
+		if r.node == node && r.field == "deleted" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// Deleting a notebook deletes what is in it, and restoring it brings back only
+// what that delete took. The history must say the same as the tree.
+func TestHistoryFollowsCascadingDeletes(t *testing.T) {
+	b := newBuilder()
+	ws := b.id()
+	b.emit(event.InitWorkspace, event.Payload{ID: ws, Name: "demo"})
+	nb := b.id()
+	b.emit(event.AddNotebook, event.Payload{ID: nb, Parent: ws, Rank: "7fff", Name: "work"})
+	kept := b.id()
+	b.emit(event.AddNote, event.Payload{ID: kept, Parent: nb, Rank: "7fff", Title: "comes back"})
+	alone := b.id()
+	b.emit(event.AddNote, event.Payload{ID: alone, Parent: nb, Rank: "bfff", Title: "deleted on its own"})
+
+	b.emit(event.DeleteNode, event.Payload{ID: alone})
+	b.emit(event.DeleteNode, event.Payload{ID: nb})
+	b.emit(event.RestoreNode, event.Payload{ID: nb})
+	// Rejected by the materializer, so it must leave no trace.
+	b.emit(event.DeleteNode, event.Payload{ID: ws})
+
+	events := event.Sort(b.events)
+	st, _ := state.Materialize(events)
+	rows := historyRows(export(t, st, events, fullOptions()))
+
+	intervals := func(node string) string {
+		var parts []string
+		for _, r := range deletedIntervals(rows, node) {
+			parts = append(parts, r.value)
+		}
+		return strings.Join(parts, ",")
+	}
+	if got := intervals(kept); got != "'0','1','0'" {
+		t.Errorf("note deleted with its notebook: deleted history %s, want '0','1','0'", got)
+	}
+	if got := intervals(alone); got != "'0','1'" {
+		t.Errorf("note deleted on its own: deleted history %s, want '0','1'", got)
+	}
+	if got := intervals(ws); got != "'0'" {
+		t.Errorf("workspace: deleted history %s, want only '0'", got)
+	}
+	for _, node := range []string{kept, alone} {
+		ivs := deletedIntervals(rows, node)
+		current := ivs[len(ivs)-1]
+		want := "'0'"
+		if st.Get(node).Deleted {
+			want = "'1'"
+		}
+		if current.to != "NULL" || current.value != want {
+			t.Errorf("node %s: open interval %+v disagrees with the tree", node, current)
+		}
+	}
+}
+
+// A NUL in a body must reach the database whole. Inside a literal it ended the
+// string for sqlite3, dropping the rest of the value or aborting the load.
+func TestNulBytesSurviveTheLoad(t *testing.T) {
+	b := newBuilder()
+	ws := b.id()
+	b.emit(event.InitWorkspace, event.Payload{ID: ws, Name: "demo"})
+	nb := b.id()
+	b.emit(event.AddNotebook, event.Payload{ID: nb, Parent: ws, Rank: "7fff", Name: "work"})
+	note := b.id()
+	b.emit(event.AddNote, event.Payload{ID: note, Parent: nb, Rank: "7fff", Title: "nul"})
+	body := "before\x00after'); DROP TABLE nodes; --"
+	b.emit(event.EditBody, event.Payload{ID: note, Body: body})
+
+	events := event.Sort(b.events)
+	st, _ := state.Materialize(events)
+	db := loadIntoSQLite(t, export(t, st, events, fullOptions()))
+
+	want := strings.ToUpper(hexOf(body))
+	if got := query(t, db, "SELECT hex(body) FROM nodes WHERE title = 'nul';"); got != want {
+		t.Fatalf("body = %s, want %s", got, want)
+	}
+}
+
+func hexOf(s string) string {
+	const digits = "0123456789abcdef"
+	out := make([]byte, 0, 2*len(s))
+	for i := 0; i < len(s); i++ {
+		out = append(out, digits[s[i]>>4], digits[s[i]&0x0f])
+	}
+	return string(out)
 }

@@ -35,6 +35,7 @@ const view = {
   tags: new Set(),
   selected: "",
   entries: [],
+  version: 0,       // the server's change counter as of the last render
 };
 
 let lastDeleted = null;   // for the undo offer after a deletion
@@ -114,6 +115,9 @@ function ask(label, { value = "", confirm = "Create" } = {}) {
   el.askLabel.textContent = label;
   el.askInput.value = value;
   el.askOk.textContent = confirm;
+  // Cleared first: a cancel closes the dialog without setting it, so the "ok"
+  // left by the previous confirmation would otherwise count as this one's.
+  el.ask.returnValue = "";
   el.ask.showModal();
   el.askInput.select();
 
@@ -139,16 +143,26 @@ function queryString() {
 }
 
 let loading = null;
+let reloadQueued = false;
 
 async function load() {
   // Requests are coalesced: a burst of keystrokes or a flurry of server events
-  // should produce one render, not one per trigger.
-  if (loading) return loading;
+  // should produce one render, not one per trigger. A load asked for while one
+  // is in flight runs again once it finishes, since the view may have changed
+  // since that request was sent; returning the old request alone showed
+  // results for the previous query.
+  if (loading) {
+    reloadQueued = true;
+    return loading;
+  }
 
   loading = (async () => {
     try {
-      const state = await api("GET", `/api/state?${queryString()}`);
-      render(state);
+      do {
+        reloadQueued = false;
+        const state = await api("GET", `/api/state?${queryString()}`);
+        if (!reloadQueued) render(state);
+      } while (reloadQueued);
     } catch (err) {
       toast(err.message, { error: true });
     } finally {
@@ -161,8 +175,17 @@ async function load() {
 
 /* -------------------------------------------------------------- render */
 
+let problemsShown = 0;
+
 function render(state) {
   view.entries = state.entries;
+  view.version = state.version;
+
+  // A selected tag that no longer exists anywhere would filter the list to
+  // nothing, with no chip left to clear it.
+  for (const tag of view.tags) {
+    if (!state.tags.some((t) => t.tag === tag)) view.tags.delete(tag);
+  }
 
   el.project.textContent = state.project;
   el.project.title = state.location;
@@ -178,15 +201,17 @@ function render(state) {
   renderScope(state);
   renderRows(state.entries);
 
-  if (state.problems?.length) {
-    toast(`${state.problems.length} event(s) could not be applied`, { error: true });
+  // Reported when the count changes, not on every render, where it would
+  // cover every other message.
+  const problems = state.problems?.length || 0;
+  if (problems && problems !== problemsShown) {
+    toast(`${problems} event(s) could not be applied`, { error: true });
   }
+  problemsShown = problems;
 
-  // A selection that no longer exists, because it was deleted here or
-  // elsewhere, closes rather than lingering as a stale pane.
-  if (view.selected && !state.entries.some((n) => n.id === view.selected)) {
-    refreshDetail();
-  }
+  // The detail pane is refetched on every render, so a change made here or
+  // elsewhere shows in it. A deleted selection closes.
+  if (view.selected) refreshDetail();
 }
 
 function renderCounts(c) {
@@ -419,21 +444,47 @@ async function select(id) {
 
 function closeDetail() {
   view.selected = "";
+  detailData = null;
   el.detail.hidden = true;
   el.shell.classList.remove("has-detail");
   el.detailInner.replaceChildren();
 }
 
+// detailData is the last server answer for the open entry. Saves compare
+// against it, not against the value the pane was built with, which goes stale
+// as soon as anything is saved.
+let detailData = null;
+
+function latest(node) {
+  return detailData?.node.id === node.id ? detailData.node : node;
+}
+
 async function refreshDetail() {
   if (!view.selected) return closeDetail();
+  const id = view.selected;
 
   let data;
   try {
-    data = await api("GET", `/api/node/${view.selected}`);
+    data = await api("GET", `/api/node/${id}`);
   } catch {
     // The entry is gone, most likely deleted from another front end.
-    return closeDetail();
+    if (view.selected === id) closeDetail();
+    return;
   }
+  // A slower answer for an entry no longer selected must not replace the pane.
+  if (view.selected !== id) return;
+  detailData = data;
+
+  // A field being edited keeps what has been typed: rebuilding the pane would
+  // discard it. Other focus is restored after the rebuild.
+  const active = el.detailInner.contains(document.activeElement) ? document.activeElement : null;
+  const field = active?.dataset.field;
+  if (field === "title" || field === "body") {
+    const saved = data.node[field] || "";
+    const typed = field === "title" ? active.value.trim() : active.value;
+    if (typed !== saved) return;
+  }
+  const caret = active && "selectionStart" in active ? active.selectionStart : null;
 
   el.detail.hidden = false;
   el.shell.classList.add("has-detail");
@@ -443,6 +494,14 @@ async function refreshDetail() {
   // be sized once it is actually in the document.
   const title = el.detailInner.querySelector(".detail__title");
   if (title) autoGrow(title);
+
+  if (field) {
+    const again = el.detailInner.querySelector(`[data-field="${field}"]`);
+    again?.focus();
+    if (again && caret !== null && "setSelectionRange" in again) {
+      again.setSelectionRange(caret, caret);
+    }
+  }
 }
 
 function detailFor({ node, path, backlinks, history }) {
@@ -471,16 +530,23 @@ function detailFor({ node, path, backlinks, history }) {
   title.className = "detail__title";
   title.rows = 1;
   title.value = node.title;
+  title.dataset.field = "title";
   title.setAttribute("aria-label", "Title");
 
   title.addEventListener("input", () => autoGrow(title));
   title.addEventListener("keydown", (event) => {
     if (event.key === "Enter") { event.preventDefault(); title.blur(); }
-    if (event.key === "Escape") { title.value = node.title; title.blur(); }
+    if (event.key === "Escape") {
+      // Kept from the document handler, which would close the pane.
+      event.stopPropagation();
+      title.value = latest(node).title;
+      title.blur();
+    }
   });
   title.addEventListener("blur", () => {
     const next = title.value.trim();
-    if (!next || next === node.title) { title.value = node.title; return; }
+    const saved = latest(node).title;
+    if (!next || next === saved) { title.value = saved; return; }
     run(() => api("PATCH", `/api/node/${node.id}`, { title: next }));
   });
   frag.append(title);
@@ -529,6 +595,7 @@ function fieldsFor(node) {
     due.type = "text";
     due.className = "field-control";
     due.value = node.due || "";
+    due.dataset.field = "due";
     due.placeholder = "2026-09-01, friday, tomorrow";
     due.setAttribute("aria-label", "Due date");
     due.addEventListener("change", () => {
@@ -577,6 +644,7 @@ function tagEditor(node) {
 
   const input = document.createElement("input");
   input.placeholder = "+ tag";
+  input.dataset.field = "tag";
   input.setAttribute("aria-label", "Add a tag");
   input.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
@@ -595,12 +663,13 @@ function bodyFor(node) {
   const body = document.createElement("textarea");
   body.className = "detail__body";
   body.value = node.body || "";
+  body.dataset.field = "body";
   body.placeholder = "Write something. Markdown is stored as you type it.";
   body.spellcheck = true;
   body.setAttribute("aria-label", "Body");
 
   const save = () => {
-    if (body.value === (node.body || "")) return;
+    if (body.value === (latest(node).body || "")) return;
     run(() => api("PATCH", `/api/node/${node.id}`, { body: body.value }));
   };
 
@@ -751,6 +820,7 @@ async function deleteNode(node) {
 }
 
 function restore(id) {
+  if (lastDeleted === id) lastDeleted = null;
   run(() => api("POST", `/api/node/${id}/restore`), "Restored");
 }
 
@@ -804,15 +874,12 @@ async function create(kind) {
 function watch() {
   const stream = new EventSource(`/api/events?token=${encodeURIComponent(TOKEN)}`);
 
-  let seen = 0;
+  // Compared with the version the page last rendered, not with the previous
+  // message. A change between the first load and the subscription is then not
+  // missed, and a restarted server, whose count starts again at 1, still
+  // triggers a reload.
   stream.addEventListener("message", (event) => {
-    const version = Number(event.data);
-    if (version > seen) {
-      // The first message only establishes the baseline; there is nothing new
-      // to fetch at that point.
-      if (seen !== 0) load();
-      seen = version;
-    }
+    if (Number(event.data) !== view.version) load();
   });
 
   // EventSource reconnects on its own, so an error only needs reporting if it
@@ -868,6 +935,8 @@ document.addEventListener("keydown", (event) => {
     case "t": event.preventDefault(); create("task"); break;
 
     case " ": {
+      // Space on a focused button presses that button.
+      if (event.target instanceof HTMLButtonElement) break;
       event.preventDefault();
       const n = view.entries.find((x) => x.id === view.selected);
       if (n?.kind === "task") {
@@ -944,13 +1013,25 @@ $("menu").addEventListener("click", () => {
 // project.
 const THEME_KEY = "gnotes-theme";
 
+// Storage can be unavailable, blocked or throwing; the theme then simply is
+// not remembered, and the page must still start.
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
-  if (theme === "auto") localStorage.removeItem(THEME_KEY);
-  else localStorage.setItem(THEME_KEY, theme);
+  try {
+    if (theme === "auto") localStorage.removeItem(THEME_KEY);
+    else localStorage.setItem(THEME_KEY, theme);
+  } catch { /* not remembered */ }
 }
 
-applyTheme(localStorage.getItem(THEME_KEY) || "auto");
+function savedTheme() {
+  try {
+    return localStorage.getItem(THEME_KEY) || "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+applyTheme(savedTheme());
 
 $("theme").addEventListener("click", () => {
   const order = ["auto", "light", "dark"];

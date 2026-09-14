@@ -767,3 +767,95 @@ func TestSummary(t *testing.T) {
 		t.Fatalf("Overdue = %d, want 1", c.Overdue)
 	}
 }
+
+// A restore undoes only what its matching delete took. A note deleted on its
+// own before its notebook was deleted stays deleted when the notebook returns.
+func TestRestoreLeavesSeparatelyDeletedChildrenDeleted(t *testing.T) {
+	p := newProject(t)
+	p.emit(event.DeleteNode, event.Payload{ID: p.note})
+	p.emit(event.DeleteNode, event.Payload{ID: p.nb})
+	p.emit(event.RestoreNode, event.Payload{ID: p.nb})
+
+	s := p.mustBuild()
+	if !s.Get(p.note).Deleted {
+		t.Error("the separately deleted note came back with its notebook")
+	}
+	if s.Get(p.task).Deleted {
+		t.Error("the task deleted with the notebook was not restored")
+	}
+
+	p.emit(event.RestoreNode, event.Payload{ID: p.note})
+	if s := p.mustBuild(); s.Get(p.note).Deleted {
+		t.Error("the note cannot be restored on its own afterwards")
+	}
+}
+
+// branch emits the next events as if written by someone who had not seen the
+// events since from.
+func (b *builder) branch(from string) { b.ref = from }
+
+// One author deletes a notebook while another, not yet synced, adds a note to
+// it. The note must not be lost: it arrives deleted, and restoring the
+// notebook brings it back with its body.
+func TestAddIntoAConcurrentlyDeletedNotebookSurvivesRestore(t *testing.T) {
+	p := newProject(t)
+	fork := p.ref
+
+	p.emit(event.DeleteNode, event.Payload{ID: p.nb})
+
+	p.branch(fork)
+	late := p.node(event.AddNote, p.nb, "written offline")
+	p.emit(event.EditBody, event.Payload{ID: late, Body: "important"})
+	p.emit(event.AddTag, event.Payload{ID: late, Tag: "offline"})
+
+	s := p.mustBuild()
+	n := s.Get(late)
+	if n == nil || !n.Deleted {
+		t.Fatalf("offline note = %+v, want it present and deleted", n)
+	}
+	if len(s.Tags()) != 0 {
+		t.Fatalf("Tags = %v, want the deleted note's tag uncounted", s.Tags())
+	}
+
+	p.emit(event.RestoreNode, event.Payload{ID: p.nb})
+	s = p.mustBuild()
+	n = s.Get(late)
+	if n.Deleted || n.Body != "important" {
+		t.Fatalf("after restore: deleted=%v body=%q", n.Deleted, n.Body)
+	}
+	if tags := s.Tags(); len(tags) != 1 || tags[0].Tag != "offline" {
+		t.Fatalf("Tags = %v, want offline counted once restored", tags)
+	}
+}
+
+// An edit made concurrently with a delete is kept, and shows after a restore.
+func TestEditToADeletedNodeShowsAfterRestore(t *testing.T) {
+	p := newProject(t)
+	p.emit(event.DeleteNode, event.Payload{ID: p.task})
+	p.emit(event.EditTitle, event.Payload{ID: p.task, Title: "renamed meanwhile"})
+	p.emit(event.SetStatus, event.Payload{ID: p.task, Status: "done"})
+	p.emit(event.RestoreNode, event.Payload{ID: p.task})
+
+	s := p.mustBuild()
+	n := s.Get(p.task)
+	if n.Title != "renamed meanwhile" || n.Status != StatusDone {
+		t.Fatalf("restored task = %q %v, want the concurrent edits", n.Title, n.Status)
+	}
+}
+
+// Moving into a deleted notebook is still refused: the node stays visible
+// where it was rather than disappearing with a notebook it was never in.
+func TestMoveIntoADeletedNotebookIsRejected(t *testing.T) {
+	p := newProject(t)
+	other := p.node(event.AddNotebook, p.ws, "other")
+	p.emit(event.DeleteNode, event.Payload{ID: other})
+	p.emit(event.MoveNode, event.Payload{ID: p.note, Parent: other, Rank: rank.Mid()})
+
+	s, problems := p.build()
+	if len(problems) != 1 {
+		t.Fatalf("problems = %v, want the move rejected", problems)
+	}
+	if s.Get(p.note).Parent != p.nb || s.Get(p.note).Deleted {
+		t.Fatal("the note left its notebook")
+	}
+}

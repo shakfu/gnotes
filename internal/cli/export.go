@@ -43,7 +43,7 @@ together.
 		noHistory := fs.Bool("no-history", false, "omit the point-in-time history table")
 		noFTS := fs.Bool("no-fts", false, "omit the full text index")
 		if err := parse(fs, args); err != nil {
-			return errUsage
+			return err
 		}
 		if fs.NArg() > 0 {
 			return errUsage
@@ -71,7 +71,6 @@ together.
 		if err := sqlexport.Write(buf, s.State, s.Log(), sqlexport.Options{
 			Project: s.Project.Config.Name,
 			Version: Version,
-			Now:     a.Now(),
 			History: !*noHistory,
 			FTS:     !*noFTS,
 		}); err != nil {

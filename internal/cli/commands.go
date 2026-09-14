@@ -6,12 +6,16 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
-	"os/exec"
+	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/shakfu/gnotes/internal/editor"
 	"github.com/shakfu/gnotes/internal/event"
 	"github.com/shakfu/gnotes/internal/gitsync"
 	"github.com/shakfu/gnotes/internal/rank"
@@ -71,7 +75,12 @@ func parse(fs *flag.FlagSet, args []string) error {
 		}
 	}
 
-	return fs.Parse(append(flags, positional...))
+	// The "--" is passed on so that a positional beginning with a dash is not
+	// read as a flag after all.
+	if err := fs.Parse(append(append(flags, "--"), positional...)); err != nil {
+		return fmt.Errorf("%w: %v", errUsage, err)
+	}
+	return nil
 }
 
 // isBoolFlag reports whether a flag stands alone, in the way flag.FlagSet
@@ -92,48 +101,112 @@ event log. The name defaults to the directory's own.
 
 The first time you run it anywhere, it also records your name and mints the
 identity that every event you write is attributed to. That identity is stored
-outside the project, so it follows you across all of them.`,
+outside the project, so it follows you across all of them.
+
+'gnotes -g init [dir]' sets up the global notes instead: a project that belongs
+to you rather than to a repository, reached from anywhere with a leading -g. It
+is created in dir, or ~/notes, and its location is recorded. A project already
+in dir, such as a clone from another machine, is used as it is.`,
 	run: func(a *App, args []string) error {
 		fs := a.flags("init")
 		user := fs.String("user", "", "your display name")
 		if err := parse(fs, args); err != nil {
-			return errUsage
+			return err
 		}
 
 		actor, err := store.LoadUser()
 		if err != nil {
 			return err
 		}
-		if *user != "" || !actor.Valid() {
-			name := *user
-			if name == "" {
-				if name, err = a.prompt("Your name: "); err != nil {
-					return err
-				}
-			}
-			actor.Name = name
-			if actor, err = store.SaveUser(actor); err != nil {
-				return err
-			}
-			a.printf("identity: %s\n", actor.Name)
-		}
 
 		name := strings.Join(fs.Args(), " ")
+		if a.Global {
+			dir, p, err := loadGlobal()
+			if err != nil {
+				return err
+			}
+			if p != nil {
+				a.printf("global notes location already exists: %s\n", dir)
+				return nil
+			}
+			if fs.NArg() > 1 {
+				return fmt.Errorf("%w: give one directory for the global notes", errUsage)
+			}
+			// A recorded location whose project has gone is set up again in
+			// place, unless another directory is given.
+			switch {
+			case fs.NArg() == 1:
+				dir = fs.Arg(0)
+				if !filepath.IsAbs(dir) {
+					dir = filepath.Join(a.Dir, dir)
+				}
+			case dir == "":
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return err
+				}
+				dir = filepath.Join(home, "notes")
+			}
+			a.Dir, name = filepath.Clean(dir), "global"
+		}
+		here := resolvedPath(a.Dir)
 
-		// An existing project just gets its workspace started, so that a fresh
-		// clone of a repository someone else initialised is usable.
-		p, err := store.Init(a.Dir, name, a.Now())
-		if errors.Is(err, store.ErrExists) {
-			s, err := a.open()
+		// Everything that can refuse is checked before the identity is saved,
+		// so a refused init changes nothing.
+		existing, err := store.Discover(a.Dir)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			existing = nil
+		case err != nil:
+			return err
+		}
+
+		if existing != nil && resolvedPath(existing.Root()) != here {
+			// A project above, in the same repository, would be shadowed for
+			// every command run below the new one.
+			if top, inGit := gitsync.Toplevel(a.Dir); !inGit || within(resolvedPath(existing.Root()), top) {
+				return fmt.Errorf("a gnotes project already covers this directory, at %s", existing.Root())
+			}
+			existing = nil
+		}
+
+		if existing != nil {
+			s, err := session.OpenProject(existing, actor)
 			if err != nil {
 				return err
 			}
 			if s.State.Workspace != "" {
-				return errors.New("this project is already initialised")
+				if actor.Valid() {
+					if *user != "" {
+						return errors.New("this project is already initialised; change your name with 'gnotes whoami --set'")
+					}
+					if !a.Global {
+						return errors.New("this project is already initialised")
+					}
+				} else if _, err := a.saveIdentity(actor, *user); err != nil {
+					// A fresh clone of someone else's project: only the
+					// identity is missing, and setting it is all there is to do.
+					return err
+				}
+				if a.Global {
+					return a.saveGlobal(existing)
+				}
+				a.printf("this project is already initialised; you can start writing\n")
+				return nil
 			}
-			p = s.Project
-		} else if err != nil {
-			return err
+		}
+
+		if *user != "" || !actor.Valid() {
+			if actor, err = a.saveIdentity(actor, *user); err != nil {
+				return err
+			}
+		}
+
+		p := existing
+		if p == nil {
+			if p, err = store.Init(a.Dir, name, a.Now()); err != nil {
+				return err
+			}
 		}
 
 		s, err := session.OpenProject(p, actor)
@@ -151,9 +224,69 @@ outside the project, so it follows you across all of them.`,
 			}
 		}
 		a.printf("created %s\n", p.Dir)
-		a.printf("\nnext: gnotes note \"a first note\"  or  gnotes task \"a first task\"\n")
+		if a.Global {
+			if err := a.saveGlobal(p); err != nil {
+				return err
+			}
+		}
+
+		switch top, inGit := gitsync.Toplevel(a.Dir); {
+		case !inGit:
+			a.printf("%s\n", a.style(ansiDim, "note: this directory is not in a git repository, which 'gnotes sync' needs"))
+		case top != here:
+			a.printf("%s\n", a.style(ansiDim, "note: the repository's root is "+top+"; notes created here are only found from this directory down"))
+		}
+		g := ""
+		if a.Global {
+			g = "-g "
+		}
+		a.printf("\nnext: gnotes %snote \"a first note\"  or  gnotes %stask \"a first task\"\n", g, g)
 		return nil
 	},
+}
+
+// saveGlobal records p as the global notes project.
+func (a *App) saveGlobal(p *store.Project) error {
+	if err := store.SaveGlobal(p.Root()); err != nil {
+		return err
+	}
+	a.printf("global notes: %s\n", p.Root())
+	return nil
+}
+
+// saveIdentity stores the user's name, asking for it when none was given.
+func (a *App) saveIdentity(actor store.Actor, name string) (store.Actor, error) {
+	if name == "" {
+		var err error
+		if name, err = a.prompt("Your name: "); err != nil {
+			return actor, err
+		}
+	}
+	actor.Name = name
+	actor, err := store.SaveUser(actor)
+	if err != nil {
+		return actor, err
+	}
+	a.printf("identity: %s\n", actor.Name)
+	return actor, nil
+}
+
+// resolvedPath returns an absolute path with symlinks followed where possible,
+// so two spellings of one directory compare equal.
+func resolvedPath(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	return dir
+}
+
+// within reports whether path is dir or below it.
+func within(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // prompt reads one line from standard input.
@@ -272,7 +405,7 @@ func (a *App) createEntry(args []string, isTask bool) error {
 	}
 
 	if err := parse(fs, args); err != nil {
-		return errUsage
+		return err
 	}
 	title := strings.Join(fs.Args(), " ")
 	if title == "" {
@@ -281,14 +414,14 @@ func (a *App) createEntry(args []string, isTask bool) error {
 
 	text := *body
 	if *stdin {
-		piped, err := io.ReadAll(a.Stdin)
+		piped, err := a.readStdin()
 		if err != nil {
-			return fmt.Errorf("read standard input: %w", err)
+			return err
 		}
 		if text != "" {
 			text += "\n\n"
 		}
-		text += strings.TrimRight(string(piped), "\n")
+		text += strings.TrimRight(piped, "\n")
 	}
 
 	s, err := a.open()
@@ -377,7 +510,8 @@ Filters combine, so this shows only the open, high-priority tasks tagged bug:
     gnotes ls -k task -s open -p high -t bug
 
 --at replays the log as it stood at a past moment and lists that instead. It
-reads a date, a timestamp, or a duration ago:
+reads a date, a timestamp, or a duration ago. A date means the start of that
+day in your time zone:
 
     gnotes ls --at 2026-08-01
     gnotes ls --at 3d`,
@@ -397,7 +531,7 @@ reads a date, a timestamp, or a duration ago:
 		fs.Var(&tags, "t", "tag (repeatable)")
 
 		if err := parse(fs, args); err != nil {
-			return errUsage
+			return err
 		}
 
 		s, err := a.open()
@@ -407,12 +541,15 @@ reads a date, a timestamp, or a duration ago:
 		a.warnProblems(s)
 
 		view := s.State
+		listNow := a.Now()
 		if *at != "" {
 			cutoff, err := parseWhen(*at, a.Now())
 			if err != nil {
 				return err
 			}
 			view, _ = s.At(cutoff.UnixMilli())
+			// Overdue as of then, not as of now.
+			listNow = cutoff
 			if !*asJSON {
 				a.printf("%s\n", a.style(ansiDim, "as of "+cutoff.Local().Format("2006-01-02 15:04")))
 			}
@@ -423,7 +560,7 @@ reads a date, a timestamp, or a duration ago:
 			Text:           strings.Join(fs.Args(), " "),
 			Overdue:        *overdue,
 			IncludeDeleted: *all,
-			Now:            a.Now(),
+			Now:            listNow,
 		}
 		if *notebook != "" {
 			nb, err := view.Resolve(*notebook, state.KindNotebook)
@@ -477,7 +614,7 @@ reads a date, a timestamp, or a duration ago:
 			}
 			return a.writeJSON(out)
 		}
-		a.listNodes(view, nodes, f.Notebook == "")
+		a.listNodes(view, nodes, f.Notebook == "", listNow)
 		return nil
 	},
 }
@@ -491,7 +628,7 @@ var cmdShow = &command{
 		fs := a.flags("show")
 		asJSON := fs.Bool("json", false, "machine-readable output")
 		if err := parse(fs, args); err != nil {
-			return errUsage
+			return err
 		}
 		if fs.NArg() == 0 {
 			return errUsage
@@ -513,7 +650,7 @@ var cmdShow = &command{
 
 		if back := s.State.Backlinks(n.ID); len(back) > 0 {
 			a.printf("\n%s\n", a.style(ansiBold, "referenced by"))
-			a.listNodes(s.State, back, true)
+			a.listNodes(s.State, back, true, a.Now())
 		}
 		return nil
 	},
@@ -534,7 +671,7 @@ matches.`,
 		limit := fs.Int("n", 20, "maximum results")
 		asJSON := fs.Bool("json", false, "machine-readable output")
 		if err := parse(fs, args); err != nil {
-			return errUsage
+			return err
 		}
 		query := strings.Join(fs.Args(), " ")
 		if strings.TrimSpace(query) == "" {
@@ -562,7 +699,7 @@ matches.`,
 		}
 
 		for _, r := range results {
-			a.listNodes(s.State, []*state.Node{r.Node}, true)
+			a.listNodes(s.State, []*state.Node{r.Node}, true, a.Now())
 			if snippet := search.Snippet(r.Node, query, 100); snippet != "" {
 				a.printf("    %s\n", a.style(ansiDim, snippet))
 			}
@@ -597,6 +734,35 @@ var cmdTags = &command{
 	},
 }
 
+// maxStdin bounds a body read from standard input. A body is one line of the
+// log, and every load reads the whole log.
+const maxStdin = 16 << 20
+
+// readStdin reads a body from standard input.
+//
+// Text that is not UTF-8 is refused rather than stored: JSON encoding would
+// replace each bad byte, so the body would silently differ from the input, and
+// feeding the same input again would write another event. A terminal gets a
+// hint, since otherwise the command appears to hang.
+func (a *App) readStdin() (string, error) {
+	if f, ok := a.Stdin.(*os.File); ok {
+		if info, err := f.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+			fmt.Fprintln(a.Stderr, "reading the body from the terminal; finish with ctrl-d")
+		}
+	}
+	raw, err := io.ReadAll(io.LimitReader(a.Stdin, maxStdin+1))
+	if err != nil {
+		return "", fmt.Errorf("read standard input: %w", err)
+	}
+	switch {
+	case len(raw) > maxStdin:
+		return "", fmt.Errorf("standard input is larger than %d MiB", maxStdin>>20)
+	case !utf8.Valid(raw):
+		return "", errors.New("standard input is not UTF-8 text")
+	}
+	return string(raw), nil
+}
+
 // ---------------------------------------------------------------- modify
 
 // withNode resolves a reference, runs an action against it, commits, and
@@ -625,6 +791,72 @@ func (a *App) withNode(refStr string, action func(*session.Session, *state.Node)
 	return nil
 }
 
+// splitRef divides arguments into an entry reference and the words after it,
+// for commands whose reference may be several unquoted words.
+//
+// Every split is tried. restOK says whether the words after a split make sense
+// for the command, and a split counts only when its reference resolves too.
+// Exactly one such split is used; several are refused, since "tag fix the
+// lexer bug" could mean tagging "fix the lexer" with bug or "fix" with three
+// tags, and guessing wrong changes an entry the user did not name. With no
+// valid split the first word is taken as the reference, which reproduces the
+// resolver's or the command's own error.
+func splitRef(s *session.Session, args []string, restOK func(rest []string) bool, kinds ...state.Kind) (*state.Node, []string, error) {
+	var (
+		found *state.Node
+		rest  []string
+		ways  int
+	)
+	for k := 1; k <= len(args); k++ {
+		if !restOK(args[k:]) {
+			continue
+		}
+		n, err := s.State.Resolve(strings.Join(args[:k], " "), kinds...)
+		if err != nil {
+			continue
+		}
+		found, rest = n, args[k:]
+		ways++
+	}
+
+	switch ways {
+	case 1:
+		return found, rest, nil
+	case 0:
+		n, err := s.State.Resolve(args[0], kinds...)
+		return n, args[1:], err
+	default:
+		return nil, nil, fmt.Errorf("%q can be read more than one way; quote the entry's title or use its handle", strings.Join(args, " "))
+	}
+}
+
+// withSplitNode is withNode for commands that take a reference followed by
+// further words. See splitRef.
+func (a *App) withSplitNode(args []string, restOK func(*session.Session, []string) bool, action func(*session.Session, *state.Node, []string) error, format string) error {
+	if len(args) < 2 {
+		return errUsage
+	}
+	s, err := a.open()
+	if err != nil {
+		return err
+	}
+	n, rest, err := splitRef(s, args, func(rest []string) bool { return restOK(s, rest) })
+	if err != nil {
+		return err
+	}
+	if err := action(s, n, rest); err != nil {
+		return err
+	}
+	if err := a.commit(s); err != nil {
+		return err
+	}
+	a.printf(format+"\n", ref(n), n.Title)
+	return nil
+}
+
+// someWords accepts any non-empty remainder.
+func someWords(_ *session.Session, rest []string) bool { return len(rest) > 0 }
+
 var cmdEdit = &command{
 	name:    "edit",
 	args:    "<ref> [--title <text>] [-m <body>] [--stdin]",
@@ -640,28 +872,33 @@ var cmdEdit = &command{
 		body := fs.String("m", "", "new body")
 		stdin := fs.Bool("stdin", false, "read the body from standard input")
 		if err := parse(fs, args); err != nil {
-			return errUsage
+			return err
 		}
 		if fs.NArg() == 0 {
 			return errUsage
 		}
 
-		return a.withNode(fs.Arg(0), func(s *session.Session, n *state.Node) error {
-			if *title != "" {
+		// Set rather than non-empty: -m "" clears the body, and --title "" is
+		// refused with a reason instead of opening the editor.
+		given := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+
+		return a.withNode(strings.Join(fs.Args(), " "), func(s *session.Session, n *state.Node) error {
+			if given["title"] {
 				if err := s.SetTitle(n, *title); err != nil {
 					return err
 				}
 			}
 			switch {
 			case *stdin:
-				piped, err := io.ReadAll(a.Stdin)
+				piped, err := a.readStdin()
 				if err != nil {
-					return fmt.Errorf("read standard input: %w", err)
+					return err
 				}
-				return s.SetBody(n, strings.TrimRight(string(piped), "\n"))
-			case *body != "":
+				return s.SetBody(n, strings.TrimRight(piped, "\n"))
+			case given["m"]:
 				return s.SetBody(n, *body)
-			case *title == "":
+			case !given["title"]:
 				// Nothing was specified, so the intent is to edit the body
 				// interactively.
 				edited, err := a.editInEditor(n.Body)
@@ -675,67 +912,30 @@ var cmdEdit = &command{
 	},
 }
 
-// editInEditor writes the current body to a temporary file, opens it in the
-// user's editor and returns what came back.
+// editInEditor opens the current body in the user's editor and returns what
+// came back.
+//
+// Interrupts are ignored while the editor runs. The editor shares the
+// terminal and receives ctrl-c itself; gnotes exiting on it would leave the
+// temporary file, which holds the body, behind.
 func (a *App) editInEditor(current string) (string, error) {
-	editor := firstNonEmpty(os.Getenv("VISUAL"), os.Getenv("EDITOR"))
-	if editor == "" {
+	edit, err := editor.Start(current, a.Env)
+	if errors.Is(err, editor.ErrNoEditor) {
 		return "", errors.New("no editor configured; set $EDITOR, or pass -m or --stdin")
 	}
-
-	// A .md suffix so the editor turns on the right syntax highlighting.
-	f, err := os.CreateTemp("", "gnotes-*.md")
 	if err != nil {
 		return "", err
 	}
-	defer os.Remove(f.Name())
+	defer edit.Cleanup()
 
-	if _, err := f.WriteString(current); err != nil {
-		f.Close()
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		return "", err
-	}
-
-	if err := runEditor(editor, f.Name()); err != nil {
-		return "", err
-	}
-	out, err := os.ReadFile(f.Name())
+	edit.Cmd.Stdin, edit.Cmd.Stdout, edit.Cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	signal.Ignore(os.Interrupt)
+	err = edit.Cmd.Run()
+	signal.Reset(os.Interrupt)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("the editor exited with an error: %w", err)
 	}
-	return strings.TrimRight(string(out), "\n"), nil
-}
-
-// runEditor launches the user's editor on a file, with the terminal handed
-// straight through so a full-screen editor works normally.
-//
-// The command is split on spaces rather than run through a shell, so that a
-// setting like "code -w" works while a path containing a semicolon cannot turn
-// into a second command.
-func runEditor(editor, path string) error {
-	fields := strings.Fields(editor)
-	if len(fields) == 0 {
-		return errors.New("no editor configured")
-	}
-
-	cmd := exec.Command(fields[0], append(fields[1:], path)...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("editor %q exited with an error: %w", editor, err)
-	}
-	return nil
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
+	return edit.Finish()
 }
 
 var cmdStatus = &command{
@@ -764,15 +964,16 @@ func statusRun(a *App, invoked string, args []string) error {
 		want = "open"
 	}
 
+	// The status is always one word, so the reference is everything else.
 	if len(args) == 0 {
 		return errUsage
 	}
-	refStr := args[0]
+	refStr := strings.Join(args, " ")
 	if want == "" {
 		if len(args) < 2 {
 			return errUsage
 		}
-		want = args[1]
+		refStr, want = strings.Join(args[:len(args)-1], " "), args[len(args)-1]
 	}
 
 	st, ok := state.ParseStatus(want)
@@ -796,12 +997,12 @@ var cmdDue = &command{
 
 Relative words are resolved now, so the stored date never shifts.`,
 	run: func(a *App, args []string) error {
-		if len(args) < 2 {
-			return errUsage
+		dateOK := func(s *session.Session, rest []string) bool {
+			_, ok := state.ParseDue(strings.Join(rest, " "), s.Now())
+			return len(rest) > 0 && ok
 		}
-		when := strings.Join(args[1:], " ")
-		return a.withNode(args[0], func(s *session.Session, n *state.Node) error {
-			return s.SetDue(n, when)
+		return a.withSplitNode(args, dateOK, func(s *session.Session, n *state.Node, rest []string) error {
+			return s.SetDue(n, strings.Join(rest, " "))
 		}, "%s  due set on %q")
 	},
 }
@@ -815,11 +1016,13 @@ var cmdPriority = &command{
 		if len(args) < 2 {
 			return errUsage
 		}
-		p, ok := state.ParsePriority(args[1])
+		// The priority is always one word, so the reference is everything else.
+		word := args[len(args)-1]
+		p, ok := state.ParsePriority(word)
 		if !ok {
-			return fmt.Errorf("unknown priority %q; use low, normal, high or none", args[1])
+			return fmt.Errorf("unknown priority %q; use low, normal, high or none", word)
 		}
-		return a.withNode(args[0], func(s *session.Session, n *state.Node) error {
+		return a.withNode(strings.Join(args[:len(args)-1], " "), func(s *session.Session, n *state.Node) error {
 			return s.SetPriority(n, p)
 		}, "%s  priority set on %q")
 	},
@@ -830,11 +1033,8 @@ var cmdTag = &command{
 	args:    "<ref> <tag>...",
 	summary: "add tags",
 	run: func(a *App, args []string) error {
-		if len(args) < 2 {
-			return errUsage
-		}
-		return a.withNode(args[0], func(s *session.Session, n *state.Node) error {
-			for _, tag := range args[1:] {
+		return a.withSplitNode(args, someWords, func(s *session.Session, n *state.Node, tags []string) error {
+			for _, tag := range tags {
 				if err := s.AddTag(n, tag); err != nil {
 					return err
 				}
@@ -849,11 +1049,8 @@ var cmdUntag = &command{
 	args:    "<ref> <tag>...",
 	summary: "remove tags",
 	run: func(a *App, args []string) error {
-		if len(args) < 2 {
-			return errUsage
-		}
-		return a.withNode(args[0], func(s *session.Session, n *state.Node) error {
-			for _, tag := range args[1:] {
+		return a.withSplitNode(args, someWords, func(s *session.Session, n *state.Node, tags []string) error {
+			for _, tag := range tags {
 				if err := s.RemoveTag(n, tag); err != nil {
 					return err
 				}
@@ -869,11 +1066,8 @@ var cmdAssign = &command{
 	summary: "put someone on a task",
 	help:    `Use "me" for yourself. Other names must belong to someone who has already written to this project.`,
 	run: func(a *App, args []string) error {
-		if len(args) < 2 {
-			return errUsage
-		}
-		return a.withNode(args[0], func(s *session.Session, n *state.Node) error {
-			return s.Assign(n, args[1])
+		return a.withSplitNode(args, someWords, func(s *session.Session, n *state.Node, who []string) error {
+			return s.Assign(n, strings.Join(who, " "))
 		}, "%s  assigned %q")
 	},
 }
@@ -883,11 +1077,8 @@ var cmdUnassign = &command{
 	args:    "<ref> <who>",
 	summary: "take someone off a task",
 	run: func(a *App, args []string) error {
-		if len(args) < 2 {
-			return errUsage
-		}
-		return a.withNode(args[0], func(s *session.Session, n *state.Node) error {
-			return s.Unassign(n, args[1])
+		return a.withSplitNode(args, someWords, func(s *session.Session, n *state.Node, who []string) error {
+			return s.Unassign(n, strings.Join(who, " "))
 		}, "%s  unassigned %q")
 	},
 }
@@ -905,11 +1096,7 @@ var cmdLink = &command{
 		if err != nil {
 			return err
 		}
-		from, err := s.State.Resolve(args[0])
-		if err != nil {
-			return err
-		}
-		to, err := s.State.Resolve(args[1])
+		from, to, err := splitTwoRefs(s, args)
 		if err != nil {
 			return err
 		}
@@ -924,6 +1111,22 @@ var cmdLink = &command{
 	},
 }
 
+// splitTwoRefs reads two entry references from unquoted words.
+func splitTwoRefs(s *session.Session, args []string) (*state.Node, *state.Node, error) {
+	from, rest, err := splitRef(s, args, func(rest []string) bool {
+		_, err := s.State.Resolve(strings.Join(rest, " "))
+		return len(rest) > 0 && err == nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	to, err := s.State.Resolve(strings.Join(rest, " "))
+	if err != nil {
+		return nil, nil, err
+	}
+	return from, to, nil
+}
+
 var cmdUnlink = &command{
 	name:    "unlink",
 	args:    "<from> <to>",
@@ -936,15 +1139,22 @@ var cmdUnlink = &command{
 		if err != nil {
 			return err
 		}
-		from, err := s.State.Resolve(args[0])
-		if err != nil {
-			return err
+		var target string
+		from, to, err := splitTwoRefs(s, args)
+		if err == nil {
+			target = to.ID
+		} else {
+			// The target may be deleted or not yet synced, which the resolver
+			// cannot find; the link itself still names it.
+			var linkErr error
+			if from, linkErr = s.State.Resolve(args[0]); linkErr != nil {
+				return err
+			}
+			if target, linkErr = s.State.LinkTarget(from, strings.Join(args[1:], " ")); linkErr != nil {
+				return err
+			}
 		}
-		to, err := s.State.Resolve(args[1])
-		if err != nil {
-			return err
-		}
-		if err := s.Unlink(from, to.ID); err != nil {
+		if err := s.Unlink(from, target); err != nil {
 			return err
 		}
 		if err := a.commit(s); err != nil {
@@ -967,7 +1177,7 @@ var cmdMove = &command{
 		before := fs.String("before", "", "place before this entry")
 		after := fs.String("after", "", "place after this entry")
 		if err := parse(fs, args); err != nil {
-			return errUsage
+			return err
 		}
 		if fs.NArg() == 0 {
 			return errUsage
@@ -977,32 +1187,70 @@ var cmdMove = &command{
 		if err != nil {
 			return err
 		}
-		n, err := s.State.Resolve(fs.Arg(0))
+		n, rest, err := splitRef(s, fs.Args(), func(rest []string) bool {
+			if len(rest) == 0 {
+				return true
+			}
+			_, err := s.State.Resolve(strings.Join(rest, " "), state.KindNotebook)
+			return err == nil
+		})
 		if err != nil {
 			return err
+		}
+
+		// One placement at most, and a move needs a destination or a placement:
+		// "mv x" alone used to move the entry to the bottom without being asked.
+		placements := 0
+		for _, set := range []bool{*top, *bottom, *before != "", *after != ""} {
+			if set {
+				placements++
+			}
+		}
+		if placements > 1 || (placements == 0 && len(rest) == 0) {
+			return errUsage
+		}
+
+		notebook := strings.Join(rest, " ")
+		parent := n.Parent
+		if notebook != "" {
+			nb, err := s.State.Resolve(notebook, state.KindNotebook)
+			if err != nil {
+				return err
+			}
+			parent = nb.ID
+		}
+
+		// A sibling named for --before or --after must be where the entry is
+		// going; otherwise the placement would silently become the end.
+		sibling := func(ref string) (string, error) {
+			sib, err := s.State.Resolve(ref)
+			if err != nil {
+				return "", err
+			}
+			if sib.Parent != parent && n.Kind != state.KindNotebook {
+				return "", fmt.Errorf("%q is not in the notebook %q is moving to", sib.Title, n.Title)
+			}
+			return sib.ID, nil
 		}
 
 		pos := rank.End()
 		switch {
 		case *top:
 			pos = rank.Start()
-		case *bottom:
-			pos = rank.End()
 		case *before != "":
-			sib, err := s.State.Resolve(*before)
+			id, err := sibling(*before)
 			if err != nil {
 				return err
 			}
-			pos = rank.Before(sib.ID)
+			pos = rank.Before(id)
 		case *after != "":
-			sib, err := s.State.Resolve(*after)
+			id, err := sibling(*after)
 			if err != nil {
 				return err
 			}
-			pos = rank.After(sib.ID)
+			pos = rank.After(id)
 		}
 
-		notebook := strings.Join(fs.Args()[1:], " ")
 		if err := s.Move(n, notebook, pos); err != nil {
 			return err
 		}
@@ -1026,7 +1274,7 @@ log. Deleting a notebook deletes what is in it.`,
 		if len(args) == 0 {
 			return errUsage
 		}
-		return a.withNode(args[0], func(s *session.Session, n *state.Node) error {
+		return a.withNode(strings.Join(args, " "), func(s *session.Session, n *state.Node) error {
 			return s.Delete(n)
 		}, "%s  deleted %q")
 	},
@@ -1045,11 +1293,9 @@ var cmdRestore = &command{
 			return err
 		}
 
-		// The default resolver skips deleted nodes, which is right everywhere
-		// except here.
-		n := findDeleted(s, args[0])
-		if n == nil {
-			return fmt.Errorf("no deleted entry matches %q", args[0])
+		n, err := s.State.ResolveDeleted(strings.Join(args, " "))
+		if err != nil {
+			return fmt.Errorf("no deleted entry: %w", err)
 		}
 		if err := s.Restore(n.ID); err != nil {
 			return err
@@ -1061,27 +1307,6 @@ var cmdRestore = &command{
 		return nil
 	},
 }
-
-// findDeleted looks for a tombstoned node by handle or title.
-func findDeleted(s *session.Session, refStr string) *state.Node {
-	upper := strings.ToUpper(refStr)
-	lower := strings.ToLower(refStr)
-
-	var found *state.Node
-	for _, n := range s.State.List(state.Filter{IncludeDeleted: true, Kinds: allKinds}, state.OrderCreated) {
-		if !n.Deleted {
-			continue
-		}
-		if strings.HasSuffix(n.ID, upper) || strings.Contains(strings.ToLower(n.Title), lower) {
-			// The most recently created match, which is almost always the one
-			// just deleted by mistake.
-			found = n
-		}
-	}
-	return found
-}
-
-var allKinds = []state.Kind{state.KindNotebook, state.KindNote, state.KindTask}
 
 // ---------------------------------------------------------------- project
 
@@ -1098,7 +1323,7 @@ This is the actual stored data; everything else in gnotes is derived from it.`,
 		fs := a.flags("log")
 		count := fs.Int("n", 20, "how many events to show")
 		if err := parse(fs, args); err != nil {
-			return errUsage
+			return err
 		}
 
 		s, err := a.open()
@@ -1194,7 +1419,7 @@ publish everything else on it.`,
 		fs := a.flags("sync")
 		push := fs.Bool("push", false, "also pull from and push to origin")
 		if err := parse(fs, args); err != nil {
-			return errUsage
+			return err
 		}
 
 		s, err := a.open()
@@ -1203,8 +1428,11 @@ publish everything else on it.`,
 		}
 
 		message := fmt.Sprintf("gnotes: %s", plural(len(s.Log()), "event"))
-		res, err := gitsync.Sync(s.Project, message, *push)
+		res, err := gitsync.Sync(s.Project, message, gitsync.Options{Push: *push})
 		if err != nil {
+			if res.Committed {
+				a.printf("committed the event logs on %s\n", res.Branch)
+			}
 			return err
 		}
 
@@ -1267,7 +1495,7 @@ var cmdWho = &command{
 		fs := a.flags("whoami")
 		set := fs.String("set", "", "change your display name")
 		if err := parse(fs, args); err != nil {
-			return errUsage
+			return err
 		}
 
 		actor, err := store.LoadUser()
@@ -1306,7 +1534,7 @@ var cmdHelp = &command{
 		if len(args) > 0 {
 			c, ok := byName[args[0]]
 			if !ok {
-				return fmt.Errorf("unknown command %q", args[0])
+				return fmt.Errorf("%w: unknown command %q", errUsage, args[0])
 			}
 			a.printf("usage: gnotes %s %s\n\n%s\n", c.name, c.args, c.summary)
 			if c.help != "" {
@@ -1320,7 +1548,8 @@ var cmdHelp = &command{
 
 		a.printf("gnotes is a git-backed notes and tasks tool.\n\n")
 		a.printf("usage: gnotes <command> [arguments]\n")
-		a.printf("       gnotes            open the interactive interface\n\n")
+		a.printf("       gnotes -g <command>  use the global notes, not this directory's project\n")
+		a.printf("       gnotes               open the interactive interface\n\n")
 
 		var t table
 		for _, c := range commands {
@@ -1338,17 +1567,44 @@ var cmdHelp = &command{
 }
 
 // parseWhen reads a point in the past, for time travel. It accepts a date, a
-// timestamp, or a duration ago such as "3d" or "2h".
+// timestamp, a relative word, or a duration ago such as "3d" or "2h".
+//
+// A date means the start of that day, and a date or time without a zone is in
+// now's time zone, which is the one the result is printed in. A point in the
+// future is refused: replaying up to it would silently show the present.
 func parseWhen(s string, now time.Time) (time.Time, error) {
 	s = strings.TrimSpace(s)
 
+	t, ok := time.Time{}, false
 	if d, err := parseDurationAgo(s); err == nil {
-		return now.Add(-d), nil
+		t, ok = now.Add(-d), true
 	}
-	if t, ok := state.ParseDue(s, now); ok && !t.IsZero() {
-		return t, nil
+	for _, layout := range []string{"2006-01-02", "2006-01-02 15:04", "2006/01/02"} {
+		if ok {
+			break
+		}
+		if parsed, err := time.ParseInLocation(layout, s, now.Location()); err == nil {
+			t, ok = parsed, true
+		}
 	}
-	return time.Time{}, fmt.Errorf("could not read %q as a time; try 2026-08-01, or 3d for three days ago", s)
+	if !ok {
+		if parsed, err := time.Parse(time.RFC3339, s); err == nil {
+			t, ok = parsed, true
+		}
+	}
+	if !ok {
+		if parsed, relative := state.ParseDue(s, now); relative && !parsed.IsZero() {
+			t, ok = parsed, true
+		}
+	}
+
+	switch {
+	case !ok:
+		return time.Time{}, fmt.Errorf("could not read %q as a time; try 2026-08-01, or 3d for three days ago", s)
+	case t.After(now):
+		return time.Time{}, fmt.Errorf("%q is in the future; --at looks at the past", s)
+	}
+	return t, nil
 }
 
 // parseDurationAgo reads the compact forms people actually type. Go's own
@@ -1373,8 +1629,10 @@ func parseDurationAgo(s string) (time.Duration, error) {
 		return 0, errors.New("not a duration")
 	}
 
-	var n int
-	if _, err := fmt.Sscanf(s[:len(s)-1], "%d", &n); err != nil || n < 0 {
+	// Atoi rather than Sscanf, which stops at the first non-digit and so read
+	// "1.5d" as one day. The bound keeps the multiplication from overflowing.
+	n, err := strconv.Atoi(s[:len(s)-1])
+	if err != nil || n < 0 || int64(n) > math.MaxInt64/int64(scale) {
 		return 0, errors.New("not a duration")
 	}
 	return time.Duration(n) * scale, nil

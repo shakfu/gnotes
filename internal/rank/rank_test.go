@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -329,5 +330,37 @@ func BenchmarkResolveAppend(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_, _ = Resolve(list, End())
+	}
+}
+
+// Appends step a fixed distance rather than halving the space to the end, so
+// a long list never exhausts it.
+func TestManyAppendsNeverExhaust(t *testing.T) {
+	var list []Sibling
+	for i := 0; i < 10000; i++ {
+		r, err := Resolve(list, End())
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		if len(list) > 0 && r <= list[len(list)-1].Rank {
+			t.Fatalf("append %d: %q does not sort after %q", i, r, list[len(list)-1].Rank)
+		}
+		list = append(list, Sibling{ID: strconv.Itoa(i), Rank: r})
+	}
+}
+
+// Near the bounds, where a whole step no longer fits, placement falls back to
+// the midpoint and stays ordered.
+func TestStepsFallBackToMidpointsAtTheBounds(t *testing.T) {
+	high := format(new(big.Int).Sub(maxRank, big.NewInt(10)))
+	r, err := Resolve([]Sibling{{ID: "a", Rank: high}}, End())
+	if err != nil || r <= high {
+		t.Fatalf("append near the top = %q, %v; want a rank above %q", r, err, high)
+	}
+
+	low := format(big.NewInt(10))
+	r, err = Resolve([]Sibling{{ID: "a", Rank: low}}, Start())
+	if err != nil || r >= low {
+		t.Fatalf("prepend near the bottom = %q, %v; want a rank below %q", r, err, low)
 	}
 }

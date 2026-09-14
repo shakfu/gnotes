@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/shakfu/gnotes/internal/mcp"
 	"github.com/shakfu/gnotes/internal/store"
@@ -30,6 +29,9 @@ where the client will surface them if it shows anything at all.`,
 	run: func(a *App, args []string) error {
 		fs := a.flags("mcp")
 		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if fs.NArg() > 0 {
 			return errUsage
 		}
 
@@ -43,12 +45,10 @@ where the client will surface them if it shows anything at all.`,
 		if s.State.Workspace == "" {
 			return errors.New("this project has no workspace yet; run 'gnotes init'")
 		}
-		for _, p := range s.Problems {
-			fmt.Fprintf(a.Stderr, "gnotes mcp: %s\n", p)
-		}
+		a.warnProblems(s)
 
-		// Standard output is the protocol channel and carries nothing else;
-		// a.Stdout is deliberately not used anywhere in this command.
-		return mcp.New(s, "gnotes", Version).Serve(os.Stdin, os.Stdout, a.Stderr)
+		// Standard output is the protocol channel and carries nothing else, so
+		// nothing in this command prints to it before Serve.
+		return mcp.New(s, "gnotes", Version).Serve(a.Stdin, a.Stdout, a.Stderr)
 	},
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shakfu/gnotes/internal/display"
 	"github.com/shakfu/gnotes/internal/state"
 	"github.com/shakfu/gnotes/internal/ulid"
 )
@@ -31,7 +32,12 @@ const (
 )
 
 // style wraps s in an ANSI code when colour is on.
+//
+// s is made safe for a terminal first, colour or not. Nearly everything this
+// program prints from the log passes through here or through table.write, so
+// those two places keep a teammate's title from sending escape sequences.
 func (a *App) style(code, s string) string {
+	s = display.Line(s)
 	if !a.Color || s == "" {
 		return s
 	}
@@ -106,6 +112,8 @@ func (t *table) write(w io.Writer) {
 	widths := make([]int, 0, 8)
 	for _, row := range t.rows {
 		for i, cell := range row {
+			row[i] = display.Line(cell)
+			cell = row[i]
 			if i >= len(widths) {
 				widths = append(widths, 0)
 			}
@@ -141,12 +149,14 @@ func (t *table) write(w io.Writer) {
 
 // listNodes prints nodes as a table: handle, marker, title, then the metadata
 // that is actually set.
-func (a *App) listNodes(s sessionState, nodes []*state.Node, showNotebook bool) {
+//
+// now decides what counts as overdue, which for a time-travelled listing is
+// the cutoff rather than the present.
+func (a *App) listNodes(s sessionState, nodes []*state.Node, showNotebook bool, now time.Time) {
 	if len(nodes) == 0 {
 		fmt.Fprintln(a.Stdout, "nothing to show")
 		return
 	}
-	now := a.Now()
 
 	var t table
 	for _, n := range nodes {
@@ -162,9 +172,9 @@ func (a *App) listNodes(s sessionState, nodes []*state.Node, showNotebook bool) 
 			styled = append(styled, a.style(ansiBlue, nb))
 		}
 
-		meta := a.meta(n, now)
+		meta := a.meta(s, n, now)
 		plain = append(plain, meta)
-		styled = append(styled, a.metaStyled(n, now))
+		styled = append(styled, a.metaStyled(s, n, now))
 		t.addStyled(plain, styled)
 	}
 	t.write(a.Stdout)
@@ -183,21 +193,21 @@ func (a *App) titleStyle(n *state.Node) string {
 	if n.Kind == state.KindTask && n.Status == state.StatusDone {
 		return a.style(ansiDim, n.Title)
 	}
-	return n.Title
+	return display.Line(n.Title)
 }
 
 // meta renders the trailing annotations: tags, priority, due date, assignees.
 // Only fields that are set appear, so an unadorned note prints as one clean
 // line.
-func (a *App) meta(n *state.Node, now time.Time) string {
-	return strings.Join(a.metaParts(n, now, false), " ")
+func (a *App) meta(s sessionState, n *state.Node, now time.Time) string {
+	return strings.Join(a.metaParts(s, n, now, false), " ")
 }
 
-func (a *App) metaStyled(n *state.Node, now time.Time) string {
-	return strings.Join(a.metaParts(n, now, true), " ")
+func (a *App) metaStyled(s sessionState, n *state.Node, now time.Time) string {
+	return strings.Join(a.metaParts(s, n, now, true), " ")
 }
 
-func (a *App) metaParts(n *state.Node, now time.Time, styled bool) []string {
+func (a *App) metaParts(s sessionState, n *state.Node, now time.Time, styled bool) []string {
 	paint := func(code, s string) string {
 		if !styled {
 			return s
@@ -224,6 +234,9 @@ func (a *App) metaParts(n *state.Node, now time.Time, styled bool) []string {
 			due += "!"
 		}
 		parts = append(parts, paint(code, due))
+	}
+	for _, id := range n.Assignees {
+		parts = append(parts, paint(ansiDim, "@"+s.Contributor(id)))
 	}
 	if len(n.Links) > 0 {
 		parts = append(parts, paint(ansiDim, fmt.Sprintf("->%d", len(n.Links))))
@@ -275,7 +288,7 @@ func (a *App) showNode(s sessionState, n *state.Node, path []string) {
 	t.write(a.Stdout)
 
 	if n.Body != "" {
-		a.printf("\n%s\n", n.Body)
+		a.printf("\n%s\n", display.Block(n.Body))
 	}
 }
 
@@ -300,22 +313,23 @@ func (a *App) linkLabels(s sessionState, ids []string) []string {
 // is an interface other programs depend on and it should not change every time
 // an internal field does.
 type jsonNode struct {
-	ID        string   `json:"id"`
-	Ref       string   `json:"ref"`
-	Kind      string   `json:"kind"`
-	Title     string   `json:"title"`
-	Body      string   `json:"body,omitempty"`
-	Notebook  string   `json:"notebook,omitempty"`
-	Tags      []string `json:"tags,omitempty"`
-	Links     []string `json:"links,omitempty"`
-	Status    string   `json:"status,omitempty"`
-	Priority  string   `json:"priority,omitempty"`
-	Due       string   `json:"due,omitempty"`
-	Assignees []string `json:"assignees,omitempty"`
-	Deleted   bool     `json:"deleted,omitempty"`
-	Created   string   `json:"created"`
-	Updated   string   `json:"updated"`
-	CreatedBy string   `json:"createdBy,omitempty"`
+	ID         string   `json:"id"`
+	Ref        string   `json:"ref"`
+	Kind       string   `json:"kind"`
+	Title      string   `json:"title"`
+	Body       string   `json:"body,omitempty"`
+	Notebook   string   `json:"notebook,omitempty"`
+	NotebookID string   `json:"notebookId,omitempty"`
+	Tags       []string `json:"tags"`
+	Links      []string `json:"links"`
+	Status     string   `json:"status,omitempty"`
+	Priority   string   `json:"priority,omitempty"`
+	Due        string   `json:"due,omitempty"`
+	Assignees  []string `json:"assignees"`
+	Deleted    bool     `json:"deleted,omitempty"`
+	Created    string   `json:"created"`
+	Updated    string   `json:"updated"`
+	CreatedBy  string   `json:"createdBy,omitempty"`
 }
 
 // toJSON converts a node for output, resolving ids to names where a reader
@@ -333,8 +347,15 @@ func toJSON(s sessionState, n *state.Node) jsonNode {
 		Created: n.Created.UTC().Format(time.RFC3339),
 		Updated: n.Updated.UTC().Format(time.RFC3339),
 	}
-	if parent := s.Get(n.Parent); parent != nil {
-		j.Notebook = parent.Title
+	// Lists are always arrays, so a script can iterate without a null check.
+	for _, list := range []*[]string{&j.Tags, &j.Links, &j.Assignees} {
+		if *list == nil {
+			*list = []string{}
+		}
+	}
+	// The notebook's id as well as its title, which need not be unique.
+	if parent := s.Get(n.Parent); parent != nil && parent.Kind == state.KindNotebook {
+		j.Notebook, j.NotebookID = parent.Title, parent.ID
 	}
 	if n.CreatedBy != "" {
 		j.CreatedBy = s.Contributor(n.CreatedBy)

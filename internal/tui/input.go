@@ -1,6 +1,12 @@
 package tui
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/shakfu/gnotes/internal/display"
+)
 
 // input is a single-line text field with a cursor.
 //
@@ -105,8 +111,19 @@ func (in *input) end()  { in.cursor = len(in.runes) }
 //
 // When the content is longer than the field, the window follows the cursor, so
 // typing past the right edge keeps what is being typed in view.
+//
+// The prefix and content are drawn with control characters replaced: a prompt
+// can be prefilled with a title from the log. The stored runes are untouched,
+// so an edit that changes nothing saves nothing.
+//
+// A label too long for the line is shortened so the typed text stays visible;
+// a prompt that names a long title would otherwise hide the answer entirely.
 func (in *input) render(prefix string, width int) string {
-	avail := width - len([]rune(prefix))
+	prefix = display.Line(prefix)
+	if width-ansi.StringWidth(prefix) < 12 && width > 16 {
+		prefix = ansi.Truncate(prefix, width/2, "... ")
+	}
+	avail := width - ansi.StringWidth(prefix)
 	if avail < 4 {
 		return prefix
 	}
@@ -120,7 +137,19 @@ func (in *input) render(prefix string, width int) string {
 	var b strings.Builder
 	b.WriteString(prefix)
 	for i := start; i < end; i++ {
-		b.WriteRune(in.runes[i])
+		r := in.runes[i]
+		if display.Control(r) {
+			r = '?'
+		}
+		// The character under the cursor is drawn in reverse video, so the
+		// cursor shows wherever it is, not only at the end.
+		if i == in.cursor {
+			b.WriteString("\x1b[7m")
+			b.WriteRune(r)
+			b.WriteString("\x1b[27m")
+			continue
+		}
+		b.WriteRune(r)
 	}
 	// The cursor sits past the last character when appending, so it needs a
 	// space of its own to occupy.
@@ -128,19 +157,6 @@ func (in *input) render(prefix string, width int) string {
 		b.WriteString("_")
 	}
 	return b.String()
-}
-
-// cursorColumn is where the terminal cursor belongs, given a prefix.
-func (in *input) cursorColumn(prefix string, width int) int {
-	avail := width - len([]rune(prefix))
-	if avail < 1 {
-		return len([]rune(prefix))
-	}
-	offset := in.cursor
-	if offset >= avail {
-		offset = avail - 1
-	}
-	return len([]rune(prefix)) + offset
 }
 
 // history recall. The command line remembers what has been run so that a

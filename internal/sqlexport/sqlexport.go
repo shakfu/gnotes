@@ -44,9 +44,6 @@ type Options struct {
 	// Version is the gnotes build that produced the script.
 	Version string
 
-	// Now is the export timestamp, a field so tests are reproducible.
-	Now time.Time
-
 	// History emits the bitemporal node_history table. It costs roughly one
 	// row per event and is what makes point-in-time queries an index seek
 	// instead of a replay.
@@ -152,7 +149,7 @@ func (e *encoder) section(title string) {
 func (e *encoder) header() {
 	e.comment("gnotes SQL export")
 	e.comment("project: %s", e.opt.Project)
-	e.comment("exported: %s by gnotes %s", e.opt.Now.UTC().Format(time.RFC3339), e.opt.Version)
+	e.comment("last event: %s, exported by gnotes %s", e.lastEventAt(), e.opt.Version)
 	e.comment("events: %d", len(e.log))
 	e.blank()
 	e.comment("This database is derived. The event logs under .gnotes/events are the")
@@ -330,7 +327,7 @@ func (e *encoder) meta() {
 		{"event_schema_version", fmt.Sprint(event.Version)},
 		{"gnotes_version", e.opt.Version},
 		{"project", e.opt.Project},
-		{"exported_at", e.opt.Now.UTC().Format(time.RFC3339)},
+		{"last_event_at", e.lastEventAt()},
 		{"event_count", fmt.Sprint(len(e.log))},
 		{"workspace", e.st.Workspace},
 		{"has_history", boolText(e.opt.History)},
@@ -339,6 +336,24 @@ func (e *encoder) meta() {
 	for _, r := range rows {
 		e.line("INSERT INTO meta (k, v) VALUES (%s, %s);", quote(r[0]), quote(r[1]))
 	}
+}
+
+// lastEventAt dates the newest event in the log, empty for an empty log.
+//
+// It stands where an export timestamp would. The wall clock made two exports
+// of the same log differ, so a regenerated database could not be compared with
+// the last one.
+func (e *encoder) lastEventAt() string {
+	var newest time.Time
+	for i := range e.log {
+		if at, err := ulid.Timestamp(e.log[i].ID); err == nil && at.After(newest) {
+			newest = at
+		}
+	}
+	if newest.IsZero() {
+		return ""
+	}
+	return newest.UTC().Format(time.RFC3339)
 }
 
 func (e *encoder) contributors() {
@@ -478,6 +493,11 @@ type span struct {
 // walk as state.Materialize, recording what each event changed instead of only
 // where it ended up. Scalar fields close their previous interval when set
 // again; set members close theirs when removed.
+//
+// A shadow tree is replayed alongside. An event the materializer rejects
+// changed nothing, so it records nothing, and a delete or restore records the
+// change on every node it actually reached. Reading the payload alone missed
+// both, and the history disagreed with the nodes table.
 func (e *encoder) history() {
 	e.section("Data: history")
 
@@ -533,9 +553,25 @@ func (e *encoder) history() {
 		}
 	}
 
+	shadow, _ := state.Materialize(nil)
+
 	for seq := range e.log {
 		ev := &e.log[seq]
 		p := &ev.Payload
+
+		// A delete or restore cascades, so the deleted flag is watched on the
+		// whole subtree it can reach.
+		var watched []*state.Node
+		var was []bool
+		if ev.Action == event.DeleteNode || ev.Action == event.RestoreNode {
+			watched = shadow.Subtree(p.ID)
+			for _, n := range watched {
+				was = append(was, n.Deleted)
+			}
+		}
+		if err := shadow.ApplyUnsorted(ev); err != nil {
+			continue
+		}
 
 		switch ev.Action {
 		case event.InitWorkspace:
@@ -550,7 +586,9 @@ func (e *encoder) history() {
 			set(p.ID, "title", title, false, seq)
 			set(p.ID, "parent", p.Parent, p.Parent == "", seq)
 			set(p.ID, "rank", p.Rank, false, seq)
-			set(p.ID, "deleted", "0", false, seq)
+			// Created inside a notebook deleted concurrently, it arrives
+			// deleted; see state.addNode.
+			set(p.ID, "deleted", flag(shadow.Get(p.ID).Deleted), false, seq)
 			if ev.Action == event.AddTask {
 				// A task is open the moment it exists; the materializer says
 				// so by leaving the zero value alone, and the history has to
@@ -581,11 +619,12 @@ func (e *encoder) history() {
 				set(id, "rank", p.Ranks[id], false, seq)
 			}
 
-		case event.DeleteNode:
-			set(p.ID, "deleted", "1", false, seq)
-
-		case event.RestoreNode:
-			set(p.ID, "deleted", "0", false, seq)
+		case event.DeleteNode, event.RestoreNode:
+			for i, n := range watched {
+				if n.Deleted != was[i] {
+					set(n.ID, "deleted", flag(n.Deleted), false, seq)
+				}
+			}
 
 		case event.SetStatus:
 			if s, ok := state.ParseStatus(p.Status); ok {
@@ -631,6 +670,14 @@ func (e *encoder) history() {
 			seqOrNull(s.to),
 		)
 	}
+}
+
+// flag renders a boolean as the 0 or 1 the history table stores.
+func flag(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
 }
 
 // -----------------------------------------------------------------------------
@@ -754,8 +801,16 @@ func (e *encoder) depth(n *state.Node) int {
 
 // quote renders a SQL string literal. Doubling the apostrophe is the whole of
 // SQLite's escaping rule; newlines and every other byte are literal.
+//
+// A NUL is emitted as char(0) joined to the quoted pieces around it. Written
+// inside the literal, sqlite3's script reader ends the string there, which
+// either aborts the load or silently drops the rest of the value.
 func quote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	pieces := strings.Split(s, "\x00")
+	for i, p := range pieces {
+		pieces[i] = "'" + strings.ReplaceAll(p, "'", "''") + "'"
+	}
+	return strings.Join(pieces, " || char(0) || ")
 }
 
 // quoteOrNull renders the empty string as NULL, for columns where absent and

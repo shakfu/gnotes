@@ -3,6 +3,7 @@ package search
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/shakfu/gnotes/internal/state"
 )
@@ -357,5 +358,17 @@ func BenchmarkSearch(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		ix.Search("parser lexer", 20)
+	}
+}
+
+// Lowercasing can change a string's byte length, so offsets found in the
+// lowercased body must not cut the original through a character.
+func TestSnippetNeverSplitsACharacter(t *testing.T) {
+	body := strings.Repeat("İ", 40) + " needle " + strings.Repeat("K", 40)
+	n := &state.Node{Body: body}
+	for width := 5; width < 60; width++ {
+		if got := Snippet(n, "needle", width); !utf8.ValidString(got) {
+			t.Fatalf("width %d: snippet is not valid UTF-8: %q", width, got)
+		}
 	}
 }

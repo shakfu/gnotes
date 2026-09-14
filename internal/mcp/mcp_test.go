@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shakfu/gnotes/internal/event"
 	"github.com/shakfu/gnotes/internal/session"
 	"github.com/shakfu/gnotes/internal/state"
 	"github.com/shakfu/gnotes/internal/store"
@@ -237,10 +238,17 @@ func TestMalformedFrameIsReportedWithANullID(t *testing.T) {
 // embedded one would split a reply into two unparseable halves.
 func TestRepliesAreOneLineEach(t *testing.T) {
 	f := newFixture(t)
-	if _, err := f.sess.NewNote(f.work, "multi\nline\nbody test", "a\nbody\nwith\nnewlines"); err != nil {
+	n, err := f.sess.NewNote(f.work, "multi", "a\nbody\nwith\nnewlines")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := f.sess.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// The session refuses a multi-line title, but one can still arrive in
+	// another author's synced log.
+	rename := event.Event{ID: ulid.NewGenerator().New(), Action: event.EditTitle, Payload: event.Payload{ID: n.ID, Title: "multi\nline\nbody test"}}
+	if _, err := store.Append(f.sess.Project, store.Actor{ID: ulid.NewGenerator().New(), Name: "bob"}, []event.Event{rename}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -768,5 +776,117 @@ func TestAFailedToolDoesNotLeakIntoTheNextCall(t *testing.T) {
 	}
 	if !kept {
 		t.Fatal("the later note was not written")
+	}
+}
+
+// A link to a deleted entry is listed by gnotes_get, so gnotes_update must be
+// able to remove it by the handle shown.
+func TestUnlinkADeletedTarget(t *testing.T) {
+	f := newFixture(t)
+	src, _ := f.sess.NewNote(f.work, "source", "")
+	dst, _ := f.sess.NewNote(f.work, "destination", "")
+	if err := f.sess.Link(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sess.Delete(dst); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sess.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	text, isError := f.call("gnotes_update", map[string]any{"ref": "source", "unlink": dst.ID[len(dst.ID)-6:]})
+	if isError {
+		t.Fatalf("unlink failed: %s", text)
+	}
+	if links := f.sess.State.Get(src.ID).Links; len(links) != 0 {
+		t.Fatalf("links = %v, want none", links)
+	}
+}
+
+// Frames that are not valid JSON-RPC 2.0 requests get -32600, with a null id
+// where the frame's own id cannot be echoed.
+func TestInvalidEnvelopesAreRejected(t *testing.T) {
+	cases := map[string]string{
+		"batch":         `[{"jsonrpc":"2.0","id":1,"method":"ping"}]`,
+		"bare value":    `42`,
+		"null id":       `{"jsonrpc":"2.0","id":null,"method":"ping"}`,
+		"object id":     `{"jsonrpc":"2.0","id":{"a":1},"method":"ping"}`,
+		"wrong version": `{"jsonrpc":"1.0","id":1,"method":"ping"}`,
+		"no version":    `{"id":1,"method":"ping"}`,
+		"no method":     `{"jsonrpc":"2.0","id":1}`,
+	}
+	for name, frame := range cases {
+		t.Run(name, func(t *testing.T) {
+			replies := newFixture(t).exchange(frame)
+			if len(replies) != 1 {
+				t.Fatalf("got %d replies", len(replies))
+			}
+			e, ok := replies[0]["error"].(map[string]any)
+			if !ok || int(e["code"].(float64)) != codeInvalidRequest {
+				t.Fatalf("reply = %v, want -32600", replies[0])
+			}
+		})
+	}
+}
+
+// A response frame from the client, and a request without an id, get no
+// reply. The request must also not run: a tools/call without an id would change
+// the project with nobody told.
+func TestFramesWithoutARequestAreNotAnsweredOrRun(t *testing.T) {
+	f := newFixture(t)
+	call := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"gnotes_create","arguments":{"title":"ghost"}}}`
+	replies := f.exchange(`{"jsonrpc":"2.0","id":5,"result":{}}`, call)
+	if len(replies) != 0 {
+		t.Fatalf("got replies %v, want none", replies)
+	}
+	if got := f.sess.State.List(state.Filter{Text: "ghost"}, state.OrderRank); len(got) != 0 {
+		t.Fatal("a tools/call without an id created an entry")
+	}
+}
+
+// A method with nothing to return still answers with a result object.
+func TestEveryReplyCarriesAResultOrAnError(t *testing.T) {
+	replies := newFixture(t).exchange(`{"jsonrpc":"2.0","id":4,"method":"notifications/initialized"}`)
+	if len(replies) != 1 {
+		t.Fatalf("got %d replies", len(replies))
+	}
+	if _, ok := replies[0]["result"]; !ok {
+		t.Fatalf("reply = %v, want a result", replies[0])
+	}
+}
+
+// An update reports what it changed, not every field it was given.
+func TestUpdateReportsOnlyRealChanges(t *testing.T) {
+	f := newFixture(t)
+	f.mustCall("gnotes_create", map[string]any{"kind": "task", "title": "steady"})
+
+	text := f.mustCall("gnotes_update", map[string]any{"ref": "steady", "status": "open"})
+	if !strings.HasPrefix(text, "No change") {
+		t.Fatalf("setting the current status reported %q", text)
+	}
+	text = f.mustCall("gnotes_update", map[string]any{"ref": "steady", "status": "done", "priority": ""})
+	if !strings.Contains(text, "(status)") {
+		t.Fatalf("reply = %q, want status reported", text)
+	}
+}
+
+func TestNotebooksRefuseEntryFields(t *testing.T) {
+	f := newFixture(t)
+	if text, isError := f.call("gnotes_create", map[string]any{"kind": "notebook", "title": "nb", "tags": []string{"x"}}); !isError {
+		t.Fatalf("a notebook with tags was created: %s", text)
+	}
+	if text, isError := f.call("gnotes_update", map[string]any{"ref": "work", "notebook": "work"}); !isError {
+		t.Fatalf("a notebook was moved into a notebook: %s", text)
+	}
+}
+
+func TestAMissingRefIsNamed(t *testing.T) {
+	f := newFixture(t)
+	for _, tool := range []string{"gnotes_get", "gnotes_update", "gnotes_delete", "gnotes_restore"} {
+		text, isError := f.call(tool, map[string]any{})
+		if !isError || !strings.Contains(text, `"ref" is required`) {
+			t.Errorf("%s without ref = %q", tool, text)
+		}
 	}
 }

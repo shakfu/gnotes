@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -168,34 +169,15 @@ var tuiCommands = []*tuiCommand{
 	{
 		name: "sync", args: "[push]",
 		summary: "commit the logs to git, or exchange with origin",
-		run: func(m *Model, args []string) error {
-			withRemote := len(args) > 0 && (args[0] == "push" || args[0] == "--push")
-
-			message := fmt.Sprintf("gnotes: %d events", len(m.sess.Log()))
-			res, err := gitsync.Sync(m.sess.Project, message, withRemote)
-			if err != nil {
-				return err
-			}
-
-			// Another machine's work may have arrived in the pull.
-			m.reload()
-
-			switch {
-			case res.Pushed:
-				m.setStatus("synced with origin on %s", res.Branch)
-			case res.Committed:
-				m.setStatus("committed on %s", res.Branch)
-			default:
-				m.setStatus("nothing to commit")
-			}
-			return nil
-		},
+		run:     (*Model).startSync,
 	},
 	{
 		name: "reload", aliases: []string{"r"}, args: "",
 		summary: "re-read the log from disk",
 		run: func(m *Model, args []string) error {
-			m.reload()
+			if err := m.reload(); err != nil {
+				return err
+			}
 			m.setStatus("reloaded")
 			return nil
 		},
@@ -252,7 +234,65 @@ func (m *Model) runCommand(line string) (tea.Model, tea.Cmd) {
 		}
 		m.setError(err)
 	}
-	return m, nil
+	cmd := m.after
+	m.after = nil
+	return m, cmd
+}
+
+// syncDoneMsg carries the outcome of a background sync.
+type syncDoneMsg struct {
+	res gitsync.Result
+	err error
+}
+
+// startSync runs git in the background. A pull and push can take seconds, or
+// wait on the network, and the interface must keep drawing meanwhile.
+//
+// The sync only reads paths from the project, never the session, so running
+// it alongside Update is safe; the reload happens back in Update when it ends.
+func (m *Model) startSync(args []string) error {
+	if m.syncing {
+		return fmt.Errorf("a sync is already running")
+	}
+	opt := gitsync.Options{
+		Push:       len(args) > 0 && (args[0] == "push" || args[0] == "--push"),
+		Unattended: true,
+	}
+	message := fmt.Sprintf("gnotes: %d events", len(m.sess.Log()))
+	project := m.sess.Project
+
+	m.syncing = true
+	m.setStatus("syncing...")
+	m.after = func() tea.Msg {
+		res, err := gitsync.Sync(project, message, opt)
+		return syncDoneMsg{res: res, err: err}
+	}
+	return nil
+}
+
+// syncDone reports a finished sync and loads whatever it brought in.
+func (m *Model) syncDone(msg syncDoneMsg) {
+	m.syncing = false
+
+	// Reloaded whether or not the sync failed: a commit or a merge may have
+	// landed before the error.
+	if err := m.reload(); err != nil {
+		return
+	}
+
+	res := msg.res
+	switch {
+	case msg.err != nil && res.Committed:
+		m.setError(fmt.Errorf("committed on %s, then: %w", res.Branch, msg.err))
+	case msg.err != nil:
+		m.setError(msg.err)
+	case res.Pushed:
+		m.setStatus("synced with origin on %s", res.Branch)
+	case res.Committed:
+		m.setStatus("committed on %s", res.Branch)
+	default:
+		m.setStatus("nothing to commit")
+	}
 }
 
 // requireEntry returns the selected note or task, or explains that there is
@@ -280,11 +320,12 @@ func (m *Model) createFromCommand(isTask bool, title string) error {
 		nb = created
 	}
 
+	var created *state.Node
 	var err error
 	if isTask {
-		_, err = m.sess.NewTask(nb.ID, title, "")
+		created, err = m.sess.NewTask(nb.ID, title, "")
 	} else {
-		_, err = m.sess.NewNote(nb.ID, title, "")
+		created, err = m.sess.NewNote(nb.ID, title, "")
 	}
 	if err != nil {
 		return err
@@ -292,7 +333,7 @@ func (m *Model) createFromCommand(isTask bool, title string) error {
 
 	m.commit("created " + title)
 	m.focus = paneEntries
-	m.selectTitle(title)
+	m.selectID(created.ID)
 	return nil
 }
 
@@ -369,7 +410,7 @@ func (m *Model) runFilter(args []string) error {
 		return fmt.Errorf("cannot filter on %q", field)
 	}
 
-	m.entry, m.scroll = 0, 0
+	m.resetCursor()
 	m.refresh()
 	m.setStatus("%d shown", len(m.entries))
 	return nil
@@ -391,9 +432,16 @@ func (m *Model) complete() {
 		if len(fields) == 1 {
 			prefix = fields[0]
 		}
-		if done := commonPrefix(matchingCommands(prefix)); done != "" {
+		// A word that is already a command or alias is complete: "note" must
+		// not grow into "notebook" just because both start the same way.
+		if _, exact := tuiByName[prefix]; exact {
+			m.input.set(prefix + " ")
+			return
+		}
+		matches := matchingCommands(prefix)
+		if done := commonPrefix(matches); done != "" {
 			m.input.set(done)
-			if len(matchingCommands(prefix)) == 1 {
+			if len(matches) == 1 {
 				m.input.insert(' ')
 			}
 		}
@@ -422,12 +470,14 @@ func (m *Model) complete() {
 	}
 }
 
-// matchingCommands lists the command names starting with a prefix.
+// matchingCommands lists the command names and aliases starting with a prefix.
 func matchingCommands(prefix string) []string {
 	var out []string
 	for _, c := range tuiCommands {
-		if strings.HasPrefix(c.name, prefix) {
-			out = append(out, c.name)
+		for _, name := range append([]string{c.name}, c.aliases...) {
+			if strings.HasPrefix(name, prefix) {
+				out = append(out, name)
+			}
 		}
 	}
 	sort.Strings(out)
@@ -442,7 +492,9 @@ func commonPrefix(candidates []string) string {
 	prefix := candidates[0]
 	for _, c := range candidates[1:] {
 		for !strings.HasPrefix(c, prefix) {
-			prefix = prefix[:len(prefix)-1]
+			// A whole character at a time, or a multi-byte one would be cut.
+			_, size := utf8.DecodeLastRuneInString(prefix)
+			prefix = prefix[:len(prefix)-size]
 			if prefix == "" {
 				return ""
 			}

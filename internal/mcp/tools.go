@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -551,7 +552,7 @@ func (s *Server) getEntry(raw json.RawMessage) (string, error) {
 	}
 
 	st := s.sess.State
-	n, err := st.Resolve(a.Ref)
+	n, err := resolveRef(st, a.Ref)
 	if err != nil {
 		return "", err
 	}
@@ -596,7 +597,11 @@ func (s *Server) getEntry(raw json.RawMessage) (string, error) {
 		b.WriteString("\nreferences:\n")
 		for _, id := range n.Links {
 			if target := st.Get(id); target != nil {
-				fmt.Fprintf(&b, "  %s  %s\n", ulid.Short(id, refLen), target.Title)
+				deleted := ""
+				if target.Deleted {
+					deleted = "  (deleted)"
+				}
+				fmt.Fprintf(&b, "  %s  %s%s\n", ulid.Short(id, refLen), target.Title, deleted)
 			} else {
 				fmt.Fprintf(&b, "  %s  (not synced yet)\n", ulid.Short(id, refLen))
 			}
@@ -620,8 +625,16 @@ func (s *Server) getEntry(raw json.RawMessage) (string, error) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(&b, "  %s  %-20s %s by %s\n",
-				ulid.Short(e.ID, refLen), e.Action, at.Format(time.RFC3339), st.Contributor(e.UserID))
+			// A notebook's history includes its children's events, which
+			// name the child they were about.
+			about := ""
+			if p.ID != n.ID {
+				if other := st.Get(p.ID); other != nil {
+					about = fmt.Sprintf("  (%s %s)", ulid.Short(other.ID, refLen), other.Title)
+				}
+			}
+			fmt.Fprintf(&b, "  %s  %-20s %s by %s%s\n",
+				ulid.Short(e.ID, refLen), e.Action, at.Format(time.RFC3339), st.Contributor(e.UserID), about)
 		}
 	}
 
@@ -656,6 +669,9 @@ func (s *Server) createEntry(raw json.RawMessage) (string, error) {
 	}
 
 	if a.Kind == "notebook" {
+		if a.Body != "" || a.Notebook != "" || len(a.Tags) > 0 || a.Due != "" || a.Priority != "" {
+			return "", errors.New("a notebook takes only a title; body, notebook, tags, due and priority apply to notes and tasks")
+		}
 		nb, err := s.sess.NewNotebook(a.Title)
 		if err != nil {
 			return "", err
@@ -739,26 +755,40 @@ func (s *Server) updateEntry(raw json.RawMessage) (string, error) {
 	}
 
 	st := s.sess.State
-	n, err := st.Resolve(a.Ref)
+	n, err := resolveRef(st, a.Ref)
 	if err != nil {
 		return "", err
 	}
 
-	var changed []string
+	// A field is reported only if it wrote an event: setting a status the
+	// task already has, or removing a link that is not there, changes nothing.
+	var changed, unchanged []string
+	given := 0
+	note := func(field string, before int) {
+		given++
+		if len(s.sess.Log()) > before {
+			changed = append(changed, field)
+		} else {
+			unchanged = append(unchanged, field)
+		}
+	}
 
 	if a.Title != nil {
+		before := len(s.sess.Log())
 		if err := s.sess.SetTitle(n, *a.Title); err != nil {
 			return "", err
 		}
-		changed = append(changed, "title")
+		note("title", before)
 	}
 	if a.Body != nil {
+		before := len(s.sess.Log())
 		if err := s.sess.SetBody(n, *a.Body); err != nil {
 			return "", err
 		}
-		changed = append(changed, "body")
+		note("body", before)
 	}
 	if a.Status != "" {
+		before := len(s.sess.Log())
 		status, ok := state.ParseStatus(a.Status)
 		if !ok {
 			return "", fmt.Errorf("unknown status %q; use open, doing or done", a.Status)
@@ -766,9 +796,10 @@ func (s *Server) updateEntry(raw json.RawMessage) (string, error) {
 		if err := s.sess.SetStatus(n, status); err != nil {
 			return "", err
 		}
-		changed = append(changed, "status")
+		note("status", before)
 	}
 	if a.Priority != "" {
+		before := len(s.sess.Log())
 		p, ok := state.ParsePriority(a.Priority)
 		if !ok {
 			return "", fmt.Errorf("unknown priority %q", a.Priority)
@@ -776,33 +807,41 @@ func (s *Server) updateEntry(raw json.RawMessage) (string, error) {
 		if err := s.sess.SetPriority(n, p); err != nil {
 			return "", err
 		}
-		changed = append(changed, "priority")
+		note("priority", before)
 	}
 	if a.Due != nil {
+		before := len(s.sess.Log())
 		if err := s.sess.SetDue(n, *a.Due); err != nil {
 			return "", err
 		}
-		changed = append(changed, "due")
+		note("due", before)
 	}
 	for _, tag := range a.AddTags {
+		before := len(s.sess.Log())
 		if err := s.sess.AddTag(n, tag); err != nil {
 			return "", err
 		}
-		changed = append(changed, "tag "+tag)
+		note("tag "+tag, before)
 	}
 	for _, tag := range a.RemoveTags {
+		before := len(s.sess.Log())
 		if err := s.sess.RemoveTag(n, tag); err != nil {
 			return "", err
 		}
-		changed = append(changed, "untag "+tag)
+		note("untag "+tag, before)
 	}
 	if a.Notebook != "" {
+		before := len(s.sess.Log())
+		if n.Kind == state.KindNotebook {
+			return "", errors.New("a notebook cannot be moved into a notebook")
+		}
 		if err := s.sess.Move(n, a.Notebook, rank.End()); err != nil {
 			return "", err
 		}
-		changed = append(changed, "notebook")
+		note("notebook", before)
 	}
 	if a.Link != "" {
+		before := len(s.sess.Log())
 		target, err := st.Resolve(a.Link)
 		if err != nil {
 			return "", err
@@ -810,21 +849,25 @@ func (s *Server) updateEntry(raw json.RawMessage) (string, error) {
 		if err := s.sess.Link(n, target); err != nil {
 			return "", err
 		}
-		changed = append(changed, "link")
+		note("link", before)
 	}
 	if a.Unlink != "" {
-		target, err := st.Resolve(a.Unlink)
+		before := len(s.sess.Log())
+		target, err := st.LinkTarget(n, a.Unlink)
 		if err != nil {
 			return "", err
 		}
-		if err := s.sess.Unlink(n, target.ID); err != nil {
+		if err := s.sess.Unlink(n, target); err != nil {
 			return "", err
 		}
-		changed = append(changed, "unlink")
+		note("unlink", before)
 	}
 
-	if len(changed) == 0 {
+	switch {
+	case given == 0:
 		return "Nothing to change: no fields were given.", nil
+	case len(changed) == 0:
+		return fmt.Sprintf("No change: %s already as given.", strings.Join(unchanged, ", ")), nil
 	}
 	if err := s.commit(); err != nil {
 		return "", err
@@ -832,6 +875,18 @@ func (s *Server) updateEntry(raw json.RawMessage) (string, error) {
 
 	return fmt.Sprintf("Updated %s (%s).\n%s",
 		ulid.Short(n.ID, refLen), strings.Join(changed, ", "), s.renderRow(n, s.sess.Now())), nil
+}
+
+// errMissingRef names the argument rather than reporting that nothing matches
+// the empty string.
+var errMissingRef = errors.New(`"ref" is required: a handle or a title`)
+
+// resolveRef resolves a required ref argument.
+func resolveRef(st *state.State, ref string) (*state.Node, error) {
+	if strings.TrimSpace(ref) == "" {
+		return nil, errMissingRef
+	}
+	return st.Resolve(ref)
 }
 
 type refArgs struct {
@@ -844,7 +899,7 @@ func (s *Server) deleteEntry(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	n, err := s.sess.State.Resolve(a.Ref)
+	n, err := resolveRef(s.sess.State, a.Ref)
 	if err != nil {
 		return "", err
 	}
@@ -865,11 +920,12 @@ func (s *Server) restoreEntry(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	// Resolve deliberately skips deleted entries, which is right everywhere
-	// except here, so the tombstone is looked up directly.
-	n := s.findDeleted(a.Ref)
-	if n == nil {
-		return "", fmt.Errorf("no deleted entry matches %q", a.Ref)
+	if strings.TrimSpace(a.Ref) == "" {
+		return "", errMissingRef
+	}
+	n, err := s.sess.State.ResolveDeleted(a.Ref)
+	if err != nil {
+		return "", fmt.Errorf("no deleted entry: %w", err)
 	}
 	if err := s.sess.Restore(n.ID); err != nil {
 		return "", err
@@ -879,27 +935,6 @@ func (s *Server) restoreEntry(raw json.RawMessage) (string, error) {
 	}
 
 	return fmt.Sprintf("Restored %s %q.", ulid.Short(n.ID, refLen), n.Title), nil
-}
-
-// findDeleted looks up a tombstoned entry by handle or title, preferring the
-// most recently changed when several match.
-func (s *Server) findDeleted(ref string) *state.Node {
-	upper := strings.ToUpper(strings.TrimSpace(ref))
-	lower := strings.ToLower(strings.TrimSpace(ref))
-	if upper == "" {
-		return nil
-	}
-
-	every := []state.Kind{state.KindNotebook, state.KindNote, state.KindTask}
-	for _, n := range s.sess.State.List(state.Filter{IncludeDeleted: true, Kinds: every}, state.OrderUpdated) {
-		if !n.Deleted {
-			continue
-		}
-		if strings.HasSuffix(n.ID, upper) || strings.Contains(strings.ToLower(n.Title), lower) {
-			return n
-		}
-	}
-	return nil
 }
 
 type syncArgs struct {
@@ -913,8 +948,13 @@ func (s *Server) syncProject(raw json.RawMessage) (string, error) {
 	}
 
 	message := fmt.Sprintf("gnotes: %d events", len(s.sess.Log()))
-	res, err := gitsync.Sync(s.sess.Project, message, a.Push)
+	res, err := gitsync.Sync(s.sess.Project, message, gitsync.Options{Push: a.Push, Unattended: true})
 	if err != nil {
+		if res.Committed {
+			// The logs are committed locally; the agent should not retry as if
+			// nothing happened.
+			err = fmt.Errorf("committed on %s, then: %w", res.Branch, err)
+		}
 		return "", err
 	}
 
@@ -922,7 +962,6 @@ func (s *Server) syncProject(raw json.RawMessage) (string, error) {
 	if err := s.sess.Reload(); err != nil {
 		return "", err
 	}
-	s.committed()
 
 	var parts []string
 	if res.Committed {
@@ -946,12 +985,5 @@ func suffix(rest []string) string {
 	return ", " + strings.Join(rest, ", ")
 }
 
-// commit writes the events a tool staged and records the new on-disk state, so
-// this server's own write is not read back as an outside change.
-func (s *Server) commit() error {
-	if err := s.sess.Commit(); err != nil {
-		return err
-	}
-	s.committed()
-	return nil
-}
+// commit writes the events a tool staged.
+func (s *Server) commit() error { return s.sess.Commit() }

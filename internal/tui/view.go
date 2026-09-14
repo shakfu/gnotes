@@ -5,7 +5,9 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/shakfu/gnotes/internal/display"
 	"github.com/shakfu/gnotes/internal/state"
 	"github.com/shakfu/gnotes/internal/ulid"
 )
@@ -65,11 +67,11 @@ func (m *Model) View() string {
 
 // viewHeader is the title bar: the project, then what is narrowing the view.
 func (m *Model) viewHeader() string {
-	left := styleHeader.Render(m.sess.Project.Config.Name)
+	left := styleHeader.Render(display.Line(m.sess.Project.Config.Name))
 
 	var right []string
 	if m.query != "" {
-		right = append(right, "/"+m.query)
+		right = append(right, "/"+display.Line(m.query))
 	}
 	if !filterIsEmpty(m.filter) {
 		right = append(right, "filtered")
@@ -82,7 +84,8 @@ func (m *Model) viewHeader() string {
 	}
 
 	c := m.sess.State.Summary(m.now())
-	right = append(right, fmt.Sprintf("%d open", c.Open))
+	// Open means not done, as the notebook column counts it.
+	right = append(right, fmt.Sprintf("%d open", c.Open+c.Doing))
 	if c.Overdue > 0 {
 		right = append(right, styleOverdue.Render(fmt.Sprintf("%d overdue", c.Overdue)))
 	}
@@ -133,9 +136,19 @@ func (m *Model) renderNotebooks(h int) []string {
 	nbs := m.notebooks()
 	blank := strings.Repeat(" ", notebookWidth)
 
-	for i := 0; i < h; i++ {
+	// The column scrolls to keep the selected notebook in view.
+	if m.notebook < m.nbScroll {
+		m.nbScroll = m.notebook
+	}
+	if m.notebook >= m.nbScroll+h {
+		m.nbScroll = m.notebook - h + 1
+	}
+	m.nbScroll = max(0, min(m.nbScroll, len(nbs)-1))
+
+	for row := 0; row < h; row++ {
+		i := m.nbScroll + row
 		if i >= len(nbs) {
-			lines[i] = blank
+			lines[row] = blank
 			continue
 		}
 		nb := nbs[i]
@@ -153,7 +166,7 @@ func (m *Model) renderNotebooks(h int) []string {
 			count = fmt.Sprintf(" %d", open)
 		}
 
-		label := truncate(nb.Title, notebookWidth-len(count)-2)
+		label := truncate(display.Line(nb.Title), notebookWidth-len(count)-2)
 
 		// Padded to the full column width before any styling is applied.
 		// Padding afterwards would measure the escape sequences as though they
@@ -166,7 +179,7 @@ func (m *Model) renderNotebooks(h int) []string {
 		case i == m.notebook:
 			line = styleBold.Render(line)
 		}
-		lines[i] = line
+		lines[row] = line
 	}
 	return lines
 }
@@ -225,7 +238,7 @@ func (m *Model) renderEntry(n *state.Node, width int, selected bool) string {
 		titleWidth = 1
 	}
 
-	title := truncate(n.Title, titleWidth)
+	title := truncate(display.Line(n.Title), titleWidth)
 	styledTitle := title
 	if n.Kind == state.KindTask && n.Status == state.StatusDone {
 		styledTitle = styleDone.Render(title)
@@ -240,7 +253,7 @@ func (m *Model) renderEntry(n *state.Node, width int, selected bool) string {
 	if selected {
 		// Padded before reversing, so the highlight spans the full row rather
 		// than stopping at the text.
-		return styleSelected.Render(pad(stripToWidth(line, width), width))
+		return styleSelected.Render(pad(ansi.Truncate(line, width, ""), width))
 	}
 	return line
 }
@@ -268,7 +281,7 @@ func (m *Model) entryMeta(n *state.Node) string {
 		parts = append(parts, stylePriority.Render("!"))
 	}
 	for _, tag := range n.Tags {
-		parts = append(parts, styleTag.Render("#"+tag))
+		parts = append(parts, styleTag.Render("#"+display.Line(tag)))
 	}
 	if !n.Due.IsZero() {
 		text := state.FormatDue(n.Due)
@@ -279,17 +292,9 @@ func (m *Model) entryMeta(n *state.Node) string {
 		}
 	}
 	if len(n.Assignees) > 0 {
-		parts = append(parts, styleDim.Render("@"+m.sess.State.Contributor(n.Assignees[0])))
+		parts = append(parts, styleDim.Render("@"+display.Line(m.sess.State.Contributor(n.Assignees[0]))))
 	}
 	return strings.Join(parts, " ")
-}
-
-// stripToWidth clips a styled string to a column count.
-func stripToWidth(s string, width int) string {
-	if lipgloss.Width(s) <= width {
-		return s
-	}
-	return truncate(s, width)
 }
 
 // viewStatus is the bottom line: whichever input is open, or the last message,
@@ -306,9 +311,9 @@ func (m *Model) viewStatus() string {
 
 	if m.status != "" {
 		if m.statusErr {
-			return styleError.Render(truncate(m.status, m.width))
+			return styleError.Render(truncate(display.Line(m.status), m.width))
 		}
-		return styleOK.Render(truncate(m.status, m.width))
+		return styleOK.Render(truncate(display.Line(m.status), m.width))
 	}
 
 	// Hints are trimmed to what fits rather than elided, so a narrow terminal
@@ -336,10 +341,10 @@ func (m *Model) viewDetail() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(clip(styleBold.Render(truncate(n.Title, m.width)), m.width))
+	b.WriteString(clip(styleBold.Render(truncate(display.Line(n.Title), m.width)), m.width))
 	b.WriteByte('\n')
 
-	b.WriteString(clip(styleDim.Render(truncate(strings.Join(m.sess.State.Path(n), " / ")+
+	b.WriteString(clip(styleDim.Render(truncate(display.Line(strings.Join(m.sess.State.Path(n), " / "))+
 		"   "+ulid.Short(n.ID, 6), m.width)), m.width))
 	b.WriteByte('\n')
 
@@ -352,7 +357,7 @@ func (m *Model) viewDetail() string {
 
 	// The body is wrapped rather than clipped: this is the view whose whole
 	// purpose is reading it.
-	body := n.Body
+	body := display.Block(n.Body)
 	if body == "" {
 		body = styleDim.Render("(no body -- press e to write one)")
 	}
@@ -392,15 +397,15 @@ func (m *Model) detailMeta(n *state.Node) string {
 			parts = append(parts, due)
 		}
 		for _, id := range n.Assignees {
-			parts = append(parts, "@"+m.sess.State.Contributor(id))
+			parts = append(parts, "@"+display.Line(m.sess.State.Contributor(id)))
 		}
 	}
 	for _, tag := range n.Tags {
-		parts = append(parts, styleTag.Render("#"+tag))
+		parts = append(parts, styleTag.Render("#"+display.Line(tag)))
 	}
 	for _, id := range n.Links {
 		if target := m.sess.State.Get(id); target != nil {
-			parts = append(parts, styleDim.Render("-> "+truncate(target.Title, 30)))
+			parts = append(parts, styleDim.Render("-> "+truncate(display.Line(target.Title), 30)))
 		}
 	}
 	return strings.Join(parts, "  ")
@@ -455,6 +460,16 @@ func (m *Model) viewHelp() string {
 	}
 	section("commands", rows)
 
-	b.WriteString(styleDim.Render("any key to go back"))
-	return b.String()
+	// The reference is taller than a small terminal, so it scrolls, and the
+	// footer stays on the last line.
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	visible := max(1, m.height-1)
+	m.helpScroll = max(0, min(m.helpScroll, len(lines)-visible))
+	end := min(len(lines), m.helpScroll+visible)
+
+	footer := "any other key to go back"
+	if len(lines) > visible {
+		footer = "j/k scroll  " + footer
+	}
+	return strings.Join(lines[m.helpScroll:end], "\n") + "\n" + styleDim.Render(footer)
 }

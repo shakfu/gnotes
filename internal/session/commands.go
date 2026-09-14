@@ -3,8 +3,10 @@ package session
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
+	"github.com/shakfu/gnotes/internal/display"
 	"github.com/shakfu/gnotes/internal/event"
 	"github.com/shakfu/gnotes/internal/rank"
 	"github.com/shakfu/gnotes/internal/state"
@@ -23,6 +25,12 @@ func (s *Session) NewNotebook(name string) (*state.Node, error) {
 	if name == "" {
 		return nil, errors.New("a notebook needs a name")
 	}
+	if err := singleLine("a notebook name", name); err != nil {
+		return nil, err
+	}
+	if err := s.uniqueNotebook(name, ""); err != nil {
+		return nil, err
+	}
 
 	r, err := s.place(s.State.Workspace, "", rank.End())
 	if err != nil {
@@ -35,6 +43,18 @@ func (s *Session) NewNotebook(name string) (*state.Node, error) {
 		return nil, err
 	}
 	return s.State.Get(e.Payload.ID), nil
+}
+
+// uniqueNotebook refuses a notebook name already used by another live notebook,
+// compared without case. Entries are filed by notebook name on every front
+// end, and two notebooks of one name make that name ambiguous for good.
+func (s *Session) uniqueNotebook(name, except string) error {
+	for _, nb := range s.State.Notebooks() {
+		if nb.ID != except && strings.EqualFold(nb.Title, name) {
+			return fmt.Errorf("there is already a notebook named %q", nb.Title)
+		}
+	}
+	return nil
 }
 
 // NewNote creates a note in a notebook.
@@ -55,6 +75,9 @@ func (s *Session) newEntry(action event.Action, notebook, title, body string) (*
 	title = strings.TrimSpace(title)
 	if title == "" {
 		return nil, errors.New("a title is required")
+	}
+	if err := singleLine("a title", title); err != nil {
+		return nil, err
 	}
 
 	nb, err := s.State.Resolve(notebook, state.KindNotebook)
@@ -103,8 +126,16 @@ func (s *Session) SetTitle(n *state.Node, title string) error {
 	if title == "" {
 		return errors.New("a title cannot be empty")
 	}
+	if err := singleLine("a title", title); err != nil {
+		return err
+	}
 	if n.Title == title {
 		return nil
+	}
+	if n.Kind == state.KindNotebook {
+		if err := s.uniqueNotebook(title, n.ID); err != nil {
+			return err
+		}
 	}
 	if err := s.ensureContributor(); err != nil {
 		return err
@@ -174,7 +205,9 @@ func (s *Session) SetDue(n *state.Node, due string) error {
 	if !ok {
 		return fmt.Errorf("could not read %q as a date; try 2026-08-17, tomorrow, or friday", due)
 	}
-	if n.Due.Equal(when) {
+	// Compared as stored: a relative word resolves to local midnight, which is
+	// never the same instant as the UTC midnight the stored date reads back as.
+	if state.FormatDue(n.Due) == state.FormatDue(when) {
 		return nil
 	}
 	if err := s.ensureContributor(); err != nil {
@@ -187,7 +220,7 @@ func (s *Session) SetDue(n *state.Node, due string) error {
 // AddTag attaches a tag, normalising it first.
 func (s *Session) AddTag(n *state.Node, tag string) error {
 	norm := state.NormalizeTag(tag)
-	if norm == "" {
+	if norm == "" || strings.ContainsFunc(norm, display.Control) {
 		return fmt.Errorf("%q is not a usable tag", tag)
 	}
 	if n.HasTag(norm) {
@@ -222,6 +255,9 @@ func (s *Session) Assign(n *state.Node, who string) error {
 	if err != nil {
 		return err
 	}
+	if slices.Contains(n.Assignees, id) {
+		return nil
+	}
 	if err := s.ensureContributor(); err != nil {
 		return err
 	}
@@ -237,6 +273,9 @@ func (s *Session) Unassign(n *state.Node, who string) error {
 	id, err := s.contributorID(who)
 	if err != nil {
 		return err
+	}
+	if !slices.Contains(n.Assignees, id) {
+		return nil
 	}
 	if err := s.ensureContributor(); err != nil {
 		return err
@@ -260,9 +299,6 @@ func (s *Session) contributorID(who string) (string, error) {
 	}
 	if id, ok := s.State.FindContributor(who); ok {
 		return id, nil
-	}
-	if ulid.Valid(who) {
-		return ulid.Canonical(who), nil
 	}
 
 	known := make([]string, 0, len(s.State.Contributors))
@@ -288,8 +324,11 @@ func (s *Session) Link(from, to *state.Node) error {
 	return err
 }
 
-// Unlink removes a reference.
+// Unlink removes a reference. Removing one that does not exist writes nothing.
 func (s *Session) Unlink(from *state.Node, target string) error {
+	if !slices.Contains(from.Links, target) {
+		return nil
+	}
 	if err := s.ensureContributor(); err != nil {
 		return err
 	}
@@ -353,6 +392,16 @@ func (s *Session) Restore(id string) error {
 // log. Nothing is stored for this; it is a prefix of the events already in
 // memory.
 func (s *Session) At(cutoff int64) (*state.State, []state.Problem) {
-	before, _ := event.SplitAt(s.log, uint64(cutoff))
+	before, _ := event.SplitAt(s.log, uint64(cutoff), uint64(s.now().UnixMilli()))
 	return state.Materialize(before)
+}
+
+// singleLine refuses control characters in a one-line field. Every front end
+// renders these fields on one line, and a newline or escape sequence in one
+// would reach other people's terminals through the synced log.
+func singleLine(what, s string) error {
+	if strings.ContainsFunc(s, display.Control) {
+		return fmt.Errorf("%s cannot contain control characters such as newlines or tabs", what)
+	}
+	return nil
 }

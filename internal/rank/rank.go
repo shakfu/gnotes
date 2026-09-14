@@ -12,6 +12,11 @@
 // space between a specific pair is exhausted. That is detected rather than
 // silently mishandled, and the caller responds by emitting a rebalance event
 // that respaces every child of the parent.
+//
+// Appending and prepending step a fixed Step past the end instead. They are the
+// common operations, and a midpoint towards the bound halved the remaining
+// space on every new entry, so a notebook needed a rebalance, which rewrites
+// every sibling, about once per 95 entries.
 package rank
 
 import (
@@ -30,6 +35,11 @@ const Width = 24
 
 // Bits is the width of the rank space in bits.
 const Bits = Width * 4
+
+// Step is the distance an append or prepend leaves from its neighbour. 2^64
+// leaves room for 64 halving inserts between any two appended siblings, and for
+// 2^31 appends from the middle of the space before the end is reached.
+var Step = new(big.Int).Lsh(big.NewInt(1), 64)
 
 // ErrExhausted reports that no rank exists strictly between two neighbours.
 // The caller is expected to rebalance the parent's children and retry, not to
@@ -142,6 +152,32 @@ func Between(prev, next string) (string, error) {
 	return format(mid), nil
 }
 
+// stepAfter returns a rank Step past prev, or the midpoint towards the end of
+// the space when less than Step remains.
+func stepAfter(prev string) (string, error) {
+	lo, err := parse(prev)
+	if err != nil {
+		return "", err
+	}
+	if next := new(big.Int).Add(lo, Step); next.Cmp(maxRank) < 0 {
+		return format(next), nil
+	}
+	return Between(prev, "")
+}
+
+// stepBefore returns a rank Step below next, or the midpoint towards the start
+// of the space when less than Step remains.
+func stepBefore(next string) (string, error) {
+	hi, err := parse(next)
+	if err != nil {
+		return "", err
+	}
+	if prev := new(big.Int).Sub(hi, Step); prev.Sign() > 0 {
+		return format(prev), nil
+	}
+	return Between("", next)
+}
+
 // Spaced returns count ranks evenly distributed across the whole space. It
 // backs the rebalance event: respacing every child of a parent restores the
 // maximum possible gap between each adjacent pair.
@@ -228,32 +264,30 @@ func Resolve(siblings []Sibling, pos Position) (string, error) {
 
 	switch pos.At {
 	case PosStart:
-		return Between("", first)
+		return stepBefore(first)
 
 	case PosEnd, "":
-		return Between(last, "")
+		return stepAfter(last)
 
 	case PosBefore:
 		i := indexOf(siblings, pos.Sibling)
 		if i < 0 {
-			return Between(last, "")
+			return stepAfter(last)
 		}
-		prev := ""
-		if i > 0 {
-			prev = siblings[i-1].Rank
+		if i == 0 {
+			return stepBefore(first)
 		}
-		return Between(prev, siblings[i].Rank)
+		return Between(siblings[i-1].Rank, siblings[i].Rank)
 
 	case PosAfter:
 		i := indexOf(siblings, pos.Sibling)
 		if i < 0 {
-			return Between(last, "")
+			return stepAfter(last)
 		}
-		next := ""
-		if i < len(siblings)-1 {
-			next = siblings[i+1].Rank
+		if i == len(siblings)-1 {
+			return stepAfter(last)
 		}
-		return Between(siblings[i].Rank, next)
+		return Between(siblings[i].Rank, siblings[i+1].Rank)
 
 	default:
 		return "", ErrInvalid

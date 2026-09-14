@@ -14,22 +14,32 @@ import (
 // directory, because it is a property of the person rather than of the notes.
 // One id follows them across every project, so their history stays theirs.
 const (
-	userConfigDir  = "gnotes"
-	userConfigFile = "user.json"
+	userConfigDir    = "gnotes"
+	userConfigFile   = "user.json"
+	globalConfigFile = "global.json"
 )
 
 // UserConfigPath returns the path of the global identity file. The GNOTES_HOME
 // environment variable overrides it, which is what lets the tests run without
 // touching the real one.
 func UserConfigPath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, userConfigFile), nil
+}
+
+// configDir returns the directory holding the per-user files.
+func configDir() (string, error) {
 	if home := os.Getenv("GNOTES_HOME"); home != "" {
-		return filepath.Join(home, userConfigFile), nil
+		return home, nil
 	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("locate the user configuration directory: %w", err)
 	}
-	return filepath.Join(dir, userConfigDir, userConfigFile), nil
+	return filepath.Join(dir, userConfigDir), nil
 }
 
 // LoadUser reads the global identity. A missing file is not an error; it
@@ -78,18 +88,89 @@ func SaveUser(a Actor) (Actor, error) {
 	if err != nil {
 		return Actor{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return Actor{}, fmt.Errorf("create the configuration directory: %w", err)
-	}
-
-	raw, err := json.MarshalIndent(a, "", "  ")
-	if err != nil {
+	// A crash mid-write must not leave a truncated identity, which would mint
+	// a new id on the next init and split the person's history in two.
+	if err := writeConfigFile(path, a); err != nil {
 		return Actor{}, err
 	}
-	if err := os.WriteFile(path, append(raw, '\n'), 0o644); err != nil {
-		return Actor{}, fmt.Errorf("write %s: %w", path, err)
-	}
 	return a, nil
+}
+
+// GlobalConfigPath returns the path of the file recording where the global
+// notes live. It is kept apart from the identity so that rewriting one cannot
+// drop the other.
+func GlobalConfigPath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, globalConfigFile), nil
+}
+
+// LoadGlobal returns the directory holding the global notes project, or ""
+// when none has been set up.
+func LoadGlobal() (string, error) {
+	path, err := GlobalConfigPath()
+	if err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	var v struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	return v.Path, nil
+}
+
+// SaveGlobal records dir, which must be absolute, as the global notes
+// location.
+func SaveGlobal(dir string) error {
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("the global notes location must be absolute, got %q", dir)
+	}
+	path, err := GlobalConfigPath()
+	if err != nil {
+		return err
+	}
+	return writeConfigFile(path, struct {
+		Path string `json:"path"`
+	}{dir})
+}
+
+// writeConfigFile writes v as indented JSON through a temporary file and a
+// rename, so a crash leaves the previous file intact.
+func writeConfigFile(path string, v any) error {
+	raw, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create the configuration directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
+	if err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(append(raw, '\n')); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
 }
 
 // MarshalJSON and the field tags keep the on-disk identity readable.

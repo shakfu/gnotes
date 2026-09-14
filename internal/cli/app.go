@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -29,6 +30,10 @@ type App struct {
 
 	// Dir is the working directory the project is discovered from.
 	Dir string
+
+	// Global selects the global notes project instead of discovering one. It
+	// is set by a leading -g.
+	Global bool
 
 	// Now is the clock, so relative dates are reproducible under test.
 	Now func() time.Time
@@ -115,6 +120,10 @@ func (a *App) Run(args []string) int {
 	if a.Env == nil {
 		a.Env = os.Getenv
 	}
+	// Only before the command: after it, -g would be a word in a title.
+	if len(args) > 0 && args[0] == "-g" {
+		a.Global, args = true, args[1:]
+	}
 	if len(args) == 0 {
 		// A bare invocation opens the interactive interface, which is the
 		// usual way to reach for a notes tool.
@@ -140,6 +149,18 @@ func (a *App) Run(args []string) int {
 		return 2
 	}
 
+	// Help for a command, wherever the flag appears before "--". Commands that
+	// take free words would otherwise treat it as one, tagging an entry
+	// "--help".
+	for _, arg := range args[1:] {
+		if arg == "--" {
+			break
+		}
+		if arg == "-h" || arg == "--help" {
+			return a.Run([]string{"help", c.name})
+		}
+	}
+
 	run := c.run
 	if c.runNamed != nil {
 		run = func(a *App, rest []string) error { return c.runNamed(a, name, rest) }
@@ -147,6 +168,11 @@ func (a *App) Run(args []string) int {
 
 	if err := run(a, args[1:]); err != nil {
 		if errors.Is(err, errUsage) {
+			// A detail beyond the bare usage error, such as the flag package's
+			// "flag provided but not defined", is shown first.
+			if detail := strings.TrimPrefix(err.Error(), errUsage.Error()+": "); err != errUsage && detail != "" {
+				fmt.Fprintf(a.Stderr, "gnotes: %s\n", detail)
+			}
 			fmt.Fprintf(a.Stderr, "usage: gnotes %s %s\n", c.name, c.args)
 			return 2
 		}
@@ -169,15 +195,26 @@ func closest(typed string) string {
 	best, bestDist := "", len(typed)/3+1
 
 	for name := range byName {
-		if d := distance(typed, name); d <= bestDist {
-			// Ties go to the shorter name, which is the canonical one more
-			// often than not.
-			if d < bestDist || len(name) < len(best) {
-				best, bestDist = name, d
-			}
+		d := distance(typed, name)
+		if d > bestDist {
+			continue
+		}
+		// Ties go to the name nearest the typed length, since a typo is
+		// usually a swapped or doubled letter rather than a lost word, then
+		// alphabetically, so map order cannot decide.
+		gap, bestGap := abs(len(name)-len(typed)), abs(len(best)-len(typed))
+		if d < bestDist || best == "" || gap < bestGap || (gap == bestGap && name < best) {
+			best, bestDist = name, d
 		}
 	}
 	return best
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 // distance is Levenshtein edit distance over two short strings.
@@ -210,8 +247,22 @@ func (a *App) open() (*session.Session, error) {
 		return nil, err
 	}
 
-	s, err := session.Open(a.Dir, actor)
-	if err != nil {
+	var s *session.Session
+	if a.Global {
+		dir, p, err := loadGlobal()
+		switch {
+		case err != nil:
+			return nil, err
+		case dir == "":
+			return nil, errors.New("no global notes; run 'gnotes -g init [dir]'")
+		case p == nil:
+			return nil, fmt.Errorf("no global notes project at %s; run 'gnotes -g init'", dir)
+		}
+		s, err = session.OpenProject(p, actor)
+		if err != nil {
+			return nil, err
+		}
+	} else if s, err = session.Open(a.Dir, actor); err != nil {
 		return nil, err
 	}
 	s.SetClock(a.Now)
@@ -222,7 +273,7 @@ func (a *App) open() (*session.Session, error) {
 	if len(s.Skipped) > 0 {
 		var parts []string
 		for action, n := range s.Skipped {
-			parts = append(parts, fmt.Sprintf("%s x%d", action, n))
+			parts = append(parts, fmt.Sprintf("%q x%d", action, n))
 		}
 		sort.Strings(parts)
 		fmt.Fprintf(a.Stderr, "note: skipped events this version does not understand (%s); upgrade gnotes to apply them\n",
@@ -237,6 +288,19 @@ func (a *App) open() (*session.Session, error) {
 			strings.Join(s.Torn, ", "))
 	}
 	return s, nil
+}
+
+// loadGlobal returns the recorded global notes location and the project there.
+// dir is empty when none is recorded; p is nil when no project is at dir.
+func loadGlobal() (dir string, p *store.Project, err error) {
+	if dir, err = store.LoadGlobal(); err != nil || dir == "" {
+		return dir, nil, err
+	}
+	p, err = store.Open(filepath.Join(dir, store.DirName))
+	if errors.Is(err, store.ErrNotFound) {
+		return dir, nil, nil
+	}
+	return dir, p, err
 }
 
 // commit writes the events staged by a command.

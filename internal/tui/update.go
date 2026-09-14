@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/shakfu/gnotes/internal/editor"
 	"github.com/shakfu/gnotes/internal/rank"
 	"github.com/shakfu/gnotes/internal/state"
 )
@@ -19,14 +22,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.key(msg)
+
+	case pollMsg:
+		m.pollDisk()
+		return m, poll()
+
+	case syncDoneMsg:
+		m.syncDone(msg)
+		return m, nil
+
+	case editorDoneMsg:
+		m.editorDone(msg)
+		return m, nil
 	}
 	return m, nil
 }
 
-// key dispatches a keypress to the handler for the current mode. Which mode is
-// active decides what a bare letter means, which is what makes single-key
-// commands and typing a search coexist.
+// key handles a keypress, then returns any command an action queued in after,
+// such as running the editor.
 func (m *Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	model, cmd := m.dispatchKey(msg)
+	if m.after != nil {
+		cmd = tea.Batch(cmd, m.after)
+		m.after = nil
+	}
+	return model, cmd
+}
+
+// dispatchKey sends a keypress to the handler for the current mode. Which mode
+// is active decides what a bare letter means, which is what makes single-key
+// commands and typing a search coexist.
+func (m *Model) dispatchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// ctrl-c always quits, in every mode. A full-screen program that can trap
 	// the one key everybody reaches for is a program people distrust.
 	if msg.Type == tea.KeyCtrlC {
@@ -40,8 +66,7 @@ func (m *Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeDetail:
 		return m.keyDetail(msg)
 	case modeHelp:
-		m.mode = modeNormal
-		return m, nil
+		return m.keyHelp(msg)
 	default:
 		return m.keyNormal(msg)
 	}
@@ -161,8 +186,9 @@ func (m *Model) keyNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "R":
-		m.reload()
-		m.setStatus("reloaded")
+		if m.reload() == nil {
+			m.setStatus("reloaded")
+		}
 	}
 	return m, nil
 }
@@ -224,11 +250,29 @@ func (m *Model) keyEditing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// The search line filters as it is typed, which is the point of having it
-	// separate from the command line.
-	if m.mode == modeSearch {
+	// separate from the command line. Moving within the line changes nothing,
+	// so it keeps the cursor where it was.
+	if m.mode == modeSearch && m.input.String() != m.query {
 		m.query = m.input.String()
-		m.entry, m.scroll = 0, 0
+		m.resetCursor()
 		m.refresh()
+	}
+	return m, nil
+}
+
+// keyHelp scrolls the key reference; any other key closes it.
+func (m *Model) keyHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		m.helpScroll++
+	case "k", "up":
+		m.helpScroll = max(0, m.helpScroll-1)
+	case "ctrl+d", "pgdown":
+		m.helpScroll += m.height / 2
+	case "ctrl+u", "pgup":
+		m.helpScroll = max(0, m.helpScroll-m.height/2)
+	default:
+		m.mode, m.helpScroll = modeNormal, 0
 	}
 	return m, nil
 }
@@ -309,7 +353,7 @@ func (m *Model) setCursor(i int) {
 			m.notebook = i
 			// A different notebook is a different list, so the entry cursor
 			// starts over rather than landing somewhere arbitrary.
-			m.entry, m.scroll = 0, 0
+			m.resetCursor()
 			m.refresh()
 		}
 		return
@@ -344,11 +388,12 @@ func (m *Model) promptNew(isTask bool) {
 			nb = created
 		}
 
+		var created *state.Node
 		var err error
 		if isTask {
-			_, err = m.sess.NewTask(nb.ID, title, "")
+			created, err = m.sess.NewTask(nb.ID, title, "")
 		} else {
-			_, err = m.sess.NewNote(nb.ID, title, "")
+			created, err = m.sess.NewNote(nb.ID, title, "")
 		}
 		if err != nil {
 			return err
@@ -358,20 +403,9 @@ func (m *Model) promptNew(isTask bool) {
 		// Put the cursor on what was just created, which is almost always what
 		// the next keypress is aimed at.
 		m.focus = paneEntries
-		m.selectTitle(title)
+		m.selectID(created.ID)
 		return nil
 	})
-}
-
-// selectTitle moves the entry cursor to the last entry with a given title.
-func (m *Model) selectTitle(title string) {
-	for i := len(m.entries) - 1; i >= 0; i-- {
-		if m.entries[i].Title == title {
-			m.entry = i
-			m.clampScroll()
-			return
-		}
-	}
 }
 
 // promptRename edits the selected item's title, prefilled so it can be
@@ -390,19 +424,70 @@ func (m *Model) promptRename() {
 	})
 }
 
-// promptEdit edits the selected entry's body. The body is multi-line, which a
-// single-line field cannot take, so this replaces the first line and keeps the
-// rest; the full editor is the command line's ':edit'.
+// promptEdit edits the selected entry's body in $EDITOR, handing it the
+// terminal until it exits.
 func (m *Model) promptEdit() {
 	n := m.currentEntry()
 	if n == nil {
 		return
 	}
 
-	first, rest, _ := strings.Cut(n.Body, "\n")
-	m.ask("body: ", first, func(m *Model, line string) error {
+	edit, err := editor.Start(n.Body, m.getenv)
+	if errors.Is(err, editor.ErrNoEditor) {
+		m.promptFirstLine(n)
+		return
+	}
+	if err != nil {
+		m.setError(err)
+		return
+	}
+	id := n.ID
+	m.after = tea.ExecProcess(edit.Cmd, func(err error) tea.Msg {
+		return editorDoneMsg{id: id, edit: edit, err: err}
+	})
+}
+
+// editorDoneMsg carries the outcome of an editor session.
+type editorDoneMsg struct {
+	id   string
+	edit *editor.Edit
+	err  error
+}
+
+// editorDone saves what the editor returned. The entry is looked up again by
+// id: the tree may have been reloaded while the editor had the terminal.
+func (m *Model) editorDone(msg editorDoneMsg) {
+	if msg.err != nil {
+		msg.edit.Cleanup()
+		m.setError(fmt.Errorf("the editor exited with an error, so nothing was saved: %w", msg.err))
+		return
+	}
+
+	n := m.sess.State.Get(msg.id)
+	if n == nil || n.Deleted {
+		// The text is kept on disk rather than lost with the entry.
+		m.setError(fmt.Errorf("the entry was deleted while you edited it; your text is in %s", msg.edit.Path))
+		return
+	}
+	body, err := msg.edit.Finish()
+	if err != nil {
+		m.setError(err)
+		return
+	}
+	if err := m.sess.SetBody(n, body); err != nil {
+		m.setError(err)
+		return
+	}
+	m.commit("saved")
+}
+
+// promptFirstLine edits the first line of the body on the status line, for
+// when no editor is configured. The rest of the body is kept as it was.
+func (m *Model) promptFirstLine(n *state.Node) {
+	first, rest, multiline := strings.Cut(n.Body, "\n")
+	m.ask("body (set $EDITOR for the whole text): ", first, func(m *Model, line string) error {
 		body := line
-		if rest != "" {
+		if multiline {
 			body += "\n" + rest
 		}
 		if err := m.sess.SetBody(n, body); err != nil {
@@ -435,32 +520,34 @@ func (m *Model) promptDelete() {
 			return err
 		}
 		m.commit("deleted " + n.Title + "  (press u to undo)")
+		if !m.statusErr {
+			m.deleted = append(m.deleted, n.ID)
+		}
 		return nil
 	})
 }
 
-// undoDelete restores the most recently deleted node.
+// undoDelete restores the newest deletion made in this interface that is
+// still deleted. Deletions by anyone else, or from before the interface
+// opened, are left to 'gnotes restore'.
 func (m *Model) undoDelete() {
-	var newest *state.Node
-	for _, n := range m.sess.State.List(state.Filter{IncludeDeleted: true, Kinds: everyKind}, state.OrderUpdated) {
-		if n.Deleted {
-			// OrderUpdated is newest first, so the first hit is the one.
-			newest = n
-			break
-		}
-	}
-	if newest == nil {
-		m.setStatus("nothing to undo")
-		return
-	}
-	if err := m.sess.Restore(newest.ID); err != nil {
-		m.setError(err)
-		return
-	}
-	m.commit("restored " + newest.Title)
-}
+	for len(m.deleted) > 0 {
+		id := m.deleted[len(m.deleted)-1]
+		m.deleted = m.deleted[:len(m.deleted)-1]
 
-var everyKind = []state.Kind{state.KindNotebook, state.KindNote, state.KindTask}
+		n := m.sess.State.Get(id)
+		if n == nil || !n.Deleted {
+			continue // restored some other way since
+		}
+		if err := m.sess.Restore(id); err != nil {
+			m.setError(err)
+			return
+		}
+		m.commit("restored " + n.Title)
+		return
+	}
+	m.setStatus("nothing to undo")
+}
 
 // selected returns whatever the focused pane points at.
 func (m *Model) selected() *state.Node {

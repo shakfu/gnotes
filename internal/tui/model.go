@@ -8,11 +8,12 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/shakfu/gnotes/internal/search"
 	"github.com/shakfu/gnotes/internal/session"
@@ -65,6 +66,11 @@ type Model struct {
 	scroll       int
 	detailScroll int
 
+	// nbScroll is the first visible notebook, and helpScroll the first
+	// visible line of the key reference.
+	nbScroll   int
+	helpScroll int
+
 	// input backs whichever line is being typed into.
 	input input
 
@@ -95,8 +101,31 @@ type Model struct {
 
 	now func() time.Time
 
+	// getenv reads the environment, for the editor setting; tests replace it.
+	getenv func(string) string
+
 	// quitting suppresses a final redraw once the program is closing.
 	quitting bool
+
+	// deleted holds the ids this interface deleted, newest last, for undo. Only
+	// its own deletions: undo must not reach back into other people's.
+	deleted []string
+
+	// syncing is set while a sync runs in the background.
+	syncing bool
+
+	// after is a command queued by a ':' command for Update to return.
+	after tea.Cmd
+}
+
+// pollInterval is how often the logs are checked for other writers.
+const pollInterval = time.Second
+
+// pollMsg asks the model to check the logs for outside writes.
+type pollMsg struct{}
+
+func poll() tea.Cmd {
+	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return pollMsg{} })
 }
 
 // prompt is a question awaiting a typed answer.
@@ -112,8 +141,9 @@ type prompt struct {
 // New builds a model over an open session.
 func New(s *session.Session) *Model {
 	m := &Model{
-		sess: s,
-		now:  s.Now,
+		sess:   s,
+		now:    s.Now,
+		getenv: os.Getenv,
 		// A fresh terminal reports its size immediately, but a value here
 		// keeps the first frame from being computed against a zero height.
 		width:  80,
@@ -124,9 +154,29 @@ func New(s *session.Session) *Model {
 	return m
 }
 
-// Init satisfies tea.Model. There is nothing to do asynchronously at startup:
-// the log is already loaded.
-func (m *Model) Init() tea.Cmd { return nil }
+// Init satisfies tea.Model. The log is already loaded; it starts the poll that
+// notices writes by the command line, the browser view, an agent or a sync.
+func (m *Model) Init() tea.Cmd { return poll() }
+
+// pollDisk reloads when another process has written. It waits while a command
+// or prompt is being typed, since a prompt holds the node it will act on.
+func (m *Model) pollDisk() {
+	if m.mode == modeCommand || m.mode == modePrompt || m.syncing {
+		return
+	}
+	changed, err := m.sess.Refresh()
+	if err != nil {
+		// Reported once rather than every second; the next poll retries.
+		if !m.statusErr {
+			m.setError(fmt.Errorf("could not read the log: %w", err))
+		}
+		return
+	}
+	if changed {
+		m.reindex()
+		m.refresh()
+	}
+}
 
 // reindex rebuilds the search index from the current tree.
 func (m *Model) reindex() {
@@ -162,7 +212,17 @@ func (m *Model) currentEntry() *state.Node {
 // It runs after every change rather than on demand, because every pane's
 // contents derive from the tree and keeping a stale list would be the easiest
 // way to show something that no longer exists.
+//
+// The selection follows the entry, not the row: after a filter, sort or
+// reload moves it, the cursor moves with it, so the next key acts on what the
+// user was looking at. An entry that left the list closes the detail view
+// rather than silently showing its neighbour.
 func (m *Model) refresh() {
+	var keep string
+	if n := m.currentEntry(); n != nil {
+		keep = n.ID
+	}
+
 	f := m.filter
 	f.Now = m.now()
 
@@ -185,11 +245,31 @@ func (m *Model) refresh() {
 		m.entries = m.sess.State.List(f, m.order)
 	}
 
+	if i := indexOfNode(m.entries, keep); keep != "" && i >= 0 {
+		m.entry = i
+	} else if keep != "" && m.mode == modeDetail {
+		m.mode = modeNormal
+	}
+
 	// Keep the cursor inside the list and the viewport around the cursor.
 	if m.entry >= len(m.entries) {
 		m.entry = max(0, len(m.entries)-1)
 	}
 	m.clampScroll()
+}
+
+// resetCursor puts the entry cursor back at the top of a list that is about to
+// change, for the cases where following the old selection is not wanted.
+func (m *Model) resetCursor() {
+	m.entries, m.entry, m.scroll = nil, 0, 0
+}
+
+// selectID moves the entry cursor to a node, if it is listed.
+func (m *Model) selectID(id string) {
+	if i := indexOfNode(m.entries, id); i >= 0 {
+		m.entry = i
+		m.clampScroll()
+	}
 }
 
 // matchesFilter applies the persistent filter to a search result, which
@@ -276,6 +356,10 @@ func (m *Model) setError(err error) {
 	// the one place that can guarantee a half-staged command is dropped before
 	// the next keystroke commits it.
 	m.sess.Rollback()
+	// The rollback replaced the tree, so the list must be rebuilt from it or
+	// it would keep showing changes that were never written.
+	m.reindex()
+	m.refresh()
 	m.status, m.statusErr = err.Error(), true
 }
 
@@ -293,14 +377,17 @@ func (m *Model) commit(describe string) {
 	}
 }
 
-// reload re-reads the log from disk, picking up another process's writes.
-func (m *Model) reload() {
+// reload re-reads the log from disk, picking up another process's writes. A
+// failure is shown on the status line and returned, so the caller does not
+// report success over it.
+func (m *Model) reload() error {
 	if err := m.sess.Reload(); err != nil {
 		m.setError(err)
-		return
+		return err
 	}
 	m.reindex()
 	m.refresh()
+	return nil
 }
 
 // ask puts the interface into a one-off prompt.
@@ -311,67 +398,38 @@ func (m *Model) ask(label, initial string, action func(*Model, string) error) {
 }
 
 // truncate shortens a string to n display columns, ending in an ellipsis when
-// it had to cut. Measured in runes, so a title with accents does not break the
-// column alignment.
+// it had to cut. Columns, not runes or bytes: a wide character takes two, and
+// escape sequences take none.
 func truncate(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= n {
+	if ansi.StringWidth(s) <= n {
 		return s
 	}
 	if n == 1 {
 		return "."
 	}
-	return string(runes[:n-1]) + "…"
+	return ansi.Truncate(s, n, "…")
 }
 
-// pad extends a plain string to n display columns. It must not be given a
-// styled string: escape sequences would be counted as visible characters.
+// pad extends a string to n display columns.
 func pad(s string, n int) string {
-	if d := n - len([]rune(s)); d > 0 {
+	if d := n - ansi.StringWidth(s); d > 0 {
 		return s + strings.Repeat(" ", d)
 	}
 	return s
 }
 
-// clip shortens a possibly styled string to n visible columns.
-//
-// Escape sequences are copied through without counting towards the width, and
-// a reset is appended so that a colour cut short does not bleed into the rest
-// of the line. truncate would count every byte of an escape sequence as a
-// character and cut a styled line to a fraction of its width.
+// clip shortens a possibly styled string to n visible columns. A reset is
+// appended when it cuts, so a colour cut short does not bleed into the rest of
+// the line.
 func clip(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
-	if lipgloss.Width(s) <= n {
+	if ansi.StringWidth(s) <= n {
 		return s
 	}
-
-	var b strings.Builder
-	visible, escaping := 0, false
-
-	for _, r := range s {
-		switch {
-		case r == 0x1b:
-			escaping = true
-			b.WriteRune(r)
-		case escaping:
-			b.WriteRune(r)
-			// A CSI sequence ends at its first letter.
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				escaping = false
-			}
-		case visible < n-1:
-			b.WriteRune(r)
-			visible++
-		default:
-			b.WriteString("…\x1b[0m")
-			return b.String()
-		}
-	}
-	b.WriteString("\x1b[0m")
-	return b.String()
+	return ansi.Truncate(s, n, "…") + "\x1b[0m"
 }

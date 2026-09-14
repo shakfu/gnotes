@@ -40,7 +40,7 @@ func writeEvents(t *testing.T, p *Project, a Actor, n int, root string) []event.
 		out = append(out, e)
 		ref = e.ID
 	}
-	if err := Append(p, a, out); err != nil {
+	if _, err := Append(p, a, out); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	return out
@@ -272,7 +272,7 @@ func TestSanitizeRemovesPathSeparatorsAndCase(t *testing.T) {
 	}
 	// Writing it must land inside the events directory and nowhere else.
 	p := initProject(t)
-	if err := Append(p, a, []event.Event{{ID: ulid.NewGenerator().New(), Action: event.AddNote}}); err != nil {
+	if _, err := Append(p, a, []event.Event{{ID: ulid.NewGenerator().New(), Action: event.AddNote}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(p.EventsDir(), name)); err != nil {
@@ -522,7 +522,7 @@ func TestAppendRejectsUnconfiguredActor(t *testing.T) {
 		"no name":    {ID: ulid.NewGenerator().New()},
 		"blank name": {ID: ulid.NewGenerator().New(), Name: "   "},
 	} {
-		if err := Append(p, a, e); err == nil {
+		if _, err := Append(p, a, e); err == nil {
 			t.Errorf("%s: Append accepted an invalid actor", name)
 		}
 	}
@@ -532,7 +532,7 @@ func TestAppendOfNothingIsANoOp(t *testing.T) {
 	p := initProject(t)
 	a := testActor(t, "sa")
 
-	if err := Append(p, a, nil); err != nil {
+	if _, err := Append(p, a, nil); err != nil {
 		t.Fatalf("Append(nil): %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(p.EventsDir(), LogName(a))); !os.IsNotExist(err) {
@@ -574,7 +574,8 @@ func TestConcurrentAppendsKeepBatchesIntact(t *testing.T) {
 				batch[i] = event.Event{ID: g.New(), Ref: ref, Action: event.AddNote}
 				ref = batch[i].ID
 			}
-			done <- Append(p, a, batch)
+			_, err := Append(p, a, batch)
+			done <- err
 		}()
 	}
 	for w := 0; w < writers; w++ {
@@ -612,7 +613,7 @@ func BenchmarkLoad(b *testing.B) {
 			}
 			ref = batch[i].ID
 		}
-		if err := Append(p, a, batch); err != nil {
+		if _, err := Append(p, a, batch); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -745,5 +746,71 @@ func TestAppendKeepsACompleteRecordThatLostItsNewline(t *testing.T) {
 	}
 	if len(got.Torn) != 0 {
 		t.Fatalf("Torn = %v, want none", got.Torn)
+	}
+}
+
+// Append reports its net effect on the file size, which is how a session tells
+// its own write from someone else's.
+func TestAppendReportsHowMuchTheLogGrew(t *testing.T) {
+	p := initProject(t)
+	a := testActor(t, "sa")
+	path := filepath.Join(p.EventsDir(), LogName(a))
+
+	size := func() int64 {
+		info, err := os.Stat(path)
+		if err != nil {
+			return 0
+		}
+		return info.Size()
+	}
+	appendOne := func() {
+		t.Helper()
+		before := size()
+		e := event.Event{ID: ulid.NewGenerator().New(), Action: event.AddNote, Payload: event.Payload{ID: "n", Title: "t"}}
+		grew, err := Append(p, a, []event.Event{e})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := size() - before; got != grew {
+			t.Fatalf("Append reported %d bytes, the file grew by %d", grew, got)
+		}
+	}
+
+	appendOne() // creates the file
+	appendOne()
+	tornWrite(t, p, a)
+	appendOne() // removes the torn tail first
+}
+
+func TestSnapshotNoticesAWrite(t *testing.T) {
+	p := initProject(t)
+	a := testActor(t, "sa")
+	writeEvents(t, p, a, 1, "")
+
+	before := Snap(p)
+	if !before.Equal(Snap(p)) {
+		t.Fatal("two snapshots of an unchanged project differ")
+	}
+	writeEvents(t, p, testActor(t, "bob"), 1, "")
+	if before.Equal(Snap(p)) {
+		t.Fatal("a new author's log did not change the snapshot")
+	}
+}
+
+func TestGlobalLocationRoundTrip(t *testing.T) {
+	t.Setenv("GNOTES_HOME", t.TempDir())
+
+	if dir, err := LoadGlobal(); err != nil || dir != "" {
+		t.Fatalf("LoadGlobal before setup = %q, %v; want empty", dir, err)
+	}
+	if err := SaveGlobal("notes"); err == nil {
+		t.Fatal("a relative global location was accepted")
+	}
+	want := filepath.Join(t.TempDir(), "notes")
+	if err := SaveGlobal(want); err != nil {
+		t.Fatal(err)
+	}
+	if dir, err := LoadGlobal(); err != nil || dir != want {
+		t.Fatalf("LoadGlobal = %q, %v; want %q", dir, err, want)
 	}
 }
