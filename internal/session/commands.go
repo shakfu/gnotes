@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/shakfu/gnotes/internal/display"
 	"github.com/shakfu/gnotes/internal/event"
 	"github.com/shakfu/gnotes/internal/rank"
 	"github.com/shakfu/gnotes/internal/state"
+	"github.com/shakfu/gnotes/internal/store"
 	"github.com/shakfu/gnotes/internal/ulid"
 )
 
@@ -388,17 +390,20 @@ func (s *Session) Restore(id string) error {
 	return err
 }
 
-// At returns the tree as it stood at a past moment, replayed from the same
-// log. Nothing is stored for this; it is a prefix of the events already in
-// memory.
-func (s *Session) At(cutoff int64) (*state.State, []state.Problem) {
-	before, _ := event.SplitAt(s.log, uint64(cutoff), uint64(s.now().UnixMilli()))
-	return state.Materialize(before)
+// At returns the tree as it stood at cutoff, replayed from the recorded
+// changes.
+func (s *Session) At(cutoff time.Time) (*state.State, error) {
+	rows, err := store.RowsAt(s.Project, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	st, _ := state.Build(rows.Nodes, rows.Contributors)
+	return st, nil
 }
 
 // singleLine refuses control characters in a one-line field. Every front end
-// renders these fields on one line, and a newline or escape sequence in one
-// would reach other people's terminals through the synced log.
+// renders these fields on one line, where a newline or escape sequence would
+// break the layout or drive the terminal.
 func singleLine(what, s string) error {
 	if strings.ContainsFunc(s, display.Control) {
 		return fmt.Errorf("%s cannot contain control characters such as newlines or tabs", what)

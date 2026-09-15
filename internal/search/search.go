@@ -1,14 +1,12 @@
-// Package search provides full-text search over note bodies, titles and tags.
+// Package search turns typed text into full-text queries and shows why a
+// result matched.
 //
-// The index is built in memory from a materialized tree and never written to
-// disk. A personal project's text measures in megabytes, so building the index
-// costs a few milliseconds, and an index on disk would be one more thing to
-// keep in step with the log, invalidate on sync, and merge between machines.
-// Rebuilding is simply cheaper than maintaining.
+// The index itself is an FTS5 table in the project database; see package
+// store. This package keeps the tokenizer, so a query and a snippet split
+// words the same way.
 package search
 
 import (
-	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -16,92 +14,30 @@ import (
 	"github.com/shakfu/gnotes/internal/state"
 )
 
-// Field weights. A hit in a title says far more about relevance than a hit
-// buried in a body, so the same word counts for more depending on where it is.
-const (
-	weightTitle = 8
-	weightTag   = 5
-	weightBody  = 1
-
-	// A node whose title contains the query as a whole phrase is almost always
-	// the one being looked for, so it outranks any accumulation of scattered
-	// term hits.
-	bonusTitlePhrase = 40
-
-	// Matching a term only by prefix is weaker evidence than matching it
-	// whole, so a prefix hit scores a fraction of an exact one.
-	prefixDivisor = 3
-)
-
-// Index is a searchable snapshot of a set of nodes.
-type Index struct {
-	// docs are the indexed nodes, addressed by position in postings.
-	docs []*state.Node
-
-	// postings maps a term to the documents containing it, with the weighted
-	// count of how often. Sorted by document for a cheap merge during search.
-	postings map[string][]posting
-
-	// terms is every indexed term, sorted, so a prefix query can be answered
-	// with a binary search instead of a scan.
-	terms []string
-}
-
-// posting is one term occurrence record.
-type posting struct {
-	doc   int32
-	score int32
-}
-
-// Build indexes the given nodes. Deleted nodes are skipped, since a search
-// that turned up tombstones would be worse than useless.
-func Build(nodes []*state.Node) *Index {
-	ix := &Index{
-		docs:     make([]*state.Node, 0, len(nodes)),
-		postings: make(map[string][]posting, len(nodes)*8),
-	}
-
-	// Accumulate per document, then flush, so each term gets one posting per
-	// document rather than one per occurrence.
-	scores := make(map[string]int32, 64)
-
-	for _, n := range nodes {
-		if n == nil || n.Deleted {
-			continue
+// Query turns typed text into an FTS5 MATCH expression, or "" when the text has
+// no words.
+//
+// Every word must match. The last also matches by prefix, so typing into a
+// live search box narrows results before the word is finished; its exact form
+// is ORed in so that an exact hit scores above a prefix hit. Words are quoted,
+// so FTS5 operators in the text are searched as plain words.
+func Query(text string) string {
+	terms := Tokenize(text)
+	var b strings.Builder
+	for i, t := range terms {
+		// A term holds only letters, digits and apostrophes, so quoting cannot
+		// be broken out of.
+		q := `"` + t + `"`
+		if i > 0 {
+			b.WriteString(" AND ")
 		}
-		doc := int32(len(ix.docs))
-		ix.docs = append(ix.docs, n)
-
-		clear(scores)
-		addTokens(scores, n.Title, weightTitle)
-		addTokens(scores, n.Body, weightBody)
-		for _, tag := range n.Tags {
-			addTokens(scores, tag, weightTag)
-		}
-
-		for term, score := range scores {
-			ix.postings[term] = append(ix.postings[term], posting{doc: doc, score: score})
+		if i < len(terms)-1 {
+			b.WriteString(q)
+		} else {
+			b.WriteString("(" + q + " OR " + q + "*)")
 		}
 	}
-
-	ix.terms = make([]string, 0, len(ix.postings))
-	for term := range ix.postings {
-		ix.terms = append(ix.terms, term)
-	}
-	sort.Strings(ix.terms)
-
-	return ix
-}
-
-// Len reports how many documents are indexed.
-func (ix *Index) Len() int { return len(ix.docs) }
-
-// Terms reports how many distinct terms are indexed.
-func (ix *Index) Terms() int { return len(ix.terms) }
-
-// addTokens folds every token of text into scores at the given weight.
-func addTokens(scores map[string]int32, text string, weight int32) {
-	tokenize(text, func(tok string) { scores[tok] += weight })
+	return b.String()
 }
 
 // Tokenize splits text into lowercase search terms.
@@ -164,142 +100,6 @@ func tokenize(text string, fn func(string)) {
 		}
 	}
 	flush(len(text))
-}
-
-// Result is one matching node and why it matched.
-type Result struct {
-	Node *state.Node
-
-	// Score is the weighted relevance. It is comparable only within one search.
-	Score int
-
-	// Matched lists the query terms this node actually matched, so the
-	// interface can highlight them.
-	Matched []string
-}
-
-// Search returns the nodes matching every term of the query, best first.
-//
-// Terms are combined with AND rather than OR, because a search that returns
-// everything containing any word is noise. The final term also matches by
-// prefix, which is what makes typing into a live search box narrow results as
-// it goes rather than only at word boundaries.
-//
-// A limit of zero returns every match.
-func (ix *Index) Search(query string, limit int) []Result {
-	terms := Tokenize(query)
-	if len(terms) == 0 {
-		return nil
-	}
-
-	// scores accumulates only over documents that matched every term so far,
-	// so the working set shrinks with each additional term.
-	var scores map[int32]int32
-	matched := make(map[int32][]string, 16)
-
-	for i, term := range terms {
-		// The last term is treated as a prefix so that a partially typed word
-		// still matches. Earlier terms are complete by construction: the user
-		// typed a space after them.
-		hits := ix.lookup(term, i == len(terms)-1)
-		if len(hits) == 0 {
-			return nil
-		}
-
-		if scores == nil {
-			scores = make(map[int32]int32, len(hits))
-			for doc, score := range hits {
-				scores[doc] = score
-				matched[doc] = append(matched[doc], term)
-			}
-			continue
-		}
-
-		// Intersect: drop anything the new term did not also hit.
-		for doc := range scores {
-			score, ok := hits[doc]
-			if !ok {
-				delete(scores, doc)
-				delete(matched, doc)
-				continue
-			}
-			scores[doc] += score
-			matched[doc] = append(matched[doc], term)
-		}
-		if len(scores) == 0 {
-			return nil
-		}
-	}
-
-	phrase := strings.ToLower(strings.TrimSpace(query))
-	out := make([]Result, 0, len(scores))
-	for doc, score := range scores {
-		n := ix.docs[doc]
-		if strings.Contains(strings.ToLower(n.Title), phrase) {
-			score += bonusTitlePhrase
-		}
-		out = append(out, Result{Node: n, Score: int(score), Matched: matched[doc]})
-	}
-
-	// Ties break on id so repeating a search never reshuffles the results.
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Score != out[j].Score {
-			return out[i].Score > out[j].Score
-		}
-		return out[i].Node.ID < out[j].Node.ID
-	})
-
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
-	}
-	return out
-}
-
-// lookup returns the documents hit by a term, optionally including every term
-// it prefixes.
-func (ix *Index) lookup(term string, allowPrefix bool) map[int32]int32 {
-	hits := make(map[int32]int32, 8)
-
-	for _, p := range ix.postings[term] {
-		hits[p.doc] += p.score
-	}
-
-	if !allowPrefix {
-		return hits
-	}
-
-	// terms is sorted, so everything sharing a prefix is one contiguous run.
-	start := sort.SearchStrings(ix.terms, term)
-	for i := start; i < len(ix.terms) && strings.HasPrefix(ix.terms[i], term); i++ {
-		if ix.terms[i] == term {
-			continue // already counted at full weight above
-		}
-		for _, p := range ix.postings[ix.terms[i]] {
-			hits[p.doc] += p.score / prefixDivisor
-		}
-	}
-	return hits
-}
-
-// Complete returns up to limit indexed terms starting with prefix, for
-// suggesting completions as a query is typed.
-func (ix *Index) Complete(prefix string, limit int) []string {
-	prefix = strings.ToLower(strings.TrimSpace(prefix))
-	if prefix == "" {
-		return nil
-	}
-
-	var out []string
-	for i := sort.SearchStrings(ix.terms, prefix); i < len(ix.terms); i++ {
-		if !strings.HasPrefix(ix.terms[i], prefix) {
-			break
-		}
-		out = append(out, ix.terms[i])
-		if limit > 0 && len(out) == limit {
-			break
-		}
-	}
-	return out
 }
 
 // Snippet returns a fragment of a node's body around the first query term

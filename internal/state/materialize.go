@@ -38,20 +38,21 @@ type State struct {
 	// a bulk replay defer all the sorting to the end while a single applied
 	// event still leaves the tree correctly ordered.
 	dirty []string
+
+	// changed and changedContributors hold what has been modified since the
+	// last TakeChanged, which is what a commit writes.
+	changed             map[string]bool
+	changedContributors map[string]bool
 }
 
-// Problem is an event that could not be applied.
-//
-// A rejected event is not a crash. Logs merge from machines running different
-// versions and syncing at different times, so replay routinely meets an event
-// whose target has not arrived, or two people who deleted the same node. The
-// event stays on disk and the reader is told, rather than the tool refusing to
-// open the project.
+// Problem is an event that could not be applied, or a stored node that does
+// not fit the tree. Either is reported rather than refusing to open the
+// project.
 type Problem struct {
-	// EventID is the offending event.
-	EventID string
+	// ID is the offending event, or the node when Action is empty.
+	ID string
 
-	// Action is what it tried to do.
+	// Action is what the event tried to do, empty for a stored node.
 	Action event.Action
 
 	// Reason is a human-readable explanation.
@@ -59,27 +60,61 @@ type Problem struct {
 }
 
 func (p Problem) String() string {
-	return fmt.Sprintf("event %s (%s): %s", ulid.Short(p.EventID, 6), p.Action, p.Reason)
+	if p.Action == "" {
+		return fmt.Sprintf("entry %s: %s", ulid.Short(p.ID, 6), p.Reason)
+	}
+	return fmt.Sprintf("event %s (%s): %s", ulid.Short(p.ID, 6), p.Action, p.Reason)
+}
+
+// newState returns an empty tree sized for about n nodes.
+func newState(n int) *State {
+	return &State{
+		Nodes:               make(map[string]*Node, n+8),
+		Contributors:        make(map[string]*Contributor, 4),
+		children:            make(map[string][]string, n/2+8),
+		tags:                make(map[string]int, 16),
+		aliases:             make(map[string]string, 1),
+		changed:             make(map[string]bool),
+		changedContributors: make(map[string]bool),
+	}
+}
+
+// TakeChanged returns the nodes and contributors modified since the last call,
+// ordered by id, and forgets them.
+func (s *State) TakeChanged() ([]*Node, []*Contributor) {
+	nodes := make([]*Node, 0, len(s.changed))
+	for id := range s.changed {
+		if n, ok := s.Nodes[id]; ok {
+			nodes = append(nodes, n)
+		}
+	}
+	slices.SortFunc(nodes, func(a, b *Node) int { return strings.Compare(a.ID, b.ID) })
+
+	contributors := make([]*Contributor, 0, len(s.changedContributors))
+	for id := range s.changedContributors {
+		if c, ok := s.Contributors[id]; ok {
+			contributors = append(contributors, c)
+		}
+	}
+	slices.SortFunc(contributors, func(a, b *Contributor) int { return strings.Compare(a.ID, b.ID) })
+
+	clear(s.changed)
+	clear(s.changedContributors)
+	return nodes, contributors
 }
 
 // Materialize replays events, which must already be in canonical order, and
 // returns the resulting tree along with any events that could not be applied.
 func Materialize(events []event.Event) (*State, []Problem) {
-	s := &State{
-		Nodes:        make(map[string]*Node, len(events)/4+8),
-		Contributors: make(map[string]*Contributor, 4),
-		children:     make(map[string][]string, len(events)/8+8),
-		tags:         make(map[string]int, 16),
-		aliases:      make(map[string]string, 1),
-	}
+	s := newState(len(events) / 4)
 
 	var problems []Problem
 	for i := range events {
 		if err := s.apply(&events[i]); err != nil {
 			problems = append(problems, Problem{
-				EventID: events[i].ID,
-				Action:  events[i].Action,
-				Reason:  err.Error(),
+				ID:     events[i].ID,
+				Action: events[i].Action,
+				Reason: err.Error(),
 			})
 		}
 	}
@@ -222,7 +257,7 @@ func (s *State) apply(e *event.Event) error {
 			// Two people deleting the same node is agreement, not a conflict.
 			return nil
 		}
-		s.setDeleted(n, true, e.ID)
+		s.setDeleted(n, true, e.ID, at)
 		s.touch(n, e, at)
 		return nil
 
@@ -239,7 +274,7 @@ func (s *State) apply(e *event.Event) error {
 		if parent, ok := s.Nodes[n.Parent]; ok && parent.Deleted {
 			return fmt.Errorf("its %s was deleted; restore that first", parent.Kind)
 		}
-		s.setDeleted(n, false, n.deletedBy)
+		s.setDeleted(n, false, n.Deletion, at)
 		s.touch(n, e, at)
 		return nil
 
@@ -258,6 +293,7 @@ func (s *State) apply(e *event.Event) error {
 				continue
 			}
 			n.Rank = r
+			s.changed[n.ID] = true
 			applied++
 		}
 		if applied == 0 {
@@ -417,6 +453,7 @@ func (s *State) apply(e *event.Event) error {
 			return nil
 		}
 		s.Contributors[p.ID] = &Contributor{ID: p.ID, Name: p.Name}
+		s.changedContributors[p.ID] = true
 		return nil
 
 	case event.RenameContributor:
@@ -428,6 +465,7 @@ func (s *State) apply(e *event.Event) error {
 			return fmt.Errorf("a contributor name cannot be empty")
 		}
 		c.Name = p.Name
+		s.changedContributors[p.ID] = true
 		return nil
 	}
 
@@ -469,9 +507,10 @@ func (s *State) addNode(e *event.Event, at time.Time, kind Kind, parent, title s
 	// Refusing it would lose the entry for good, and whether it was refused
 	// would depend on which of the two branches happened to sort first.
 	if container := s.Nodes[parent]; container != nil && container.Deleted {
-		n.Deleted, n.deletedBy = true, container.deletedBy
+		n.Deleted, n.DeletedAt, n.Deletion = true, container.DeletedAt, container.Deletion
 	}
 	s.Nodes[n.ID] = n
+	s.changed[n.ID] = true
 	if parent != "" {
 		s.children[parent] = append(s.children[parent], n.ID)
 		s.markDirty(parent)
@@ -584,18 +623,19 @@ func (s *State) unlinkChild(parent, child string) {
 // cause is the delete event responsible. Deleting skips nodes that are already
 // deleted, so they keep their own cause; restoring only touches nodes with the
 // matching cause, so it undoes exactly what that delete did.
-func (s *State) setDeleted(n *Node, deleted bool, cause string) {
+func (s *State) setDeleted(n *Node, deleted bool, cause string, at time.Time) {
 	if deleted {
 		if n.Deleted {
 			return
 		}
-		n.Deleted, n.deletedBy = true, cause
+		n.Deleted, n.DeletedAt, n.Deletion = true, at, cause
 	} else {
-		if !n.Deleted || n.deletedBy != cause {
+		if !n.Deleted || n.Deletion != cause {
 			return
 		}
-		n.Deleted, n.deletedBy = false, ""
+		n.Deleted, n.DeletedAt, n.Deletion = false, time.Time{}, ""
 	}
+	s.changed[n.ID] = true
 
 	for _, tag := range n.Tags {
 		if deleted {
@@ -606,7 +646,7 @@ func (s *State) setDeleted(n *Node, deleted bool, cause string) {
 	}
 	for _, id := range s.children[n.ID] {
 		if child, ok := s.Nodes[id]; ok {
-			s.setDeleted(child, deleted, cause)
+			s.setDeleted(child, deleted, cause, at)
 		}
 	}
 }
@@ -625,6 +665,7 @@ func (s *State) dropTag(tag string) {
 func (s *State) touch(n *Node, e *event.Event, at time.Time) {
 	n.Updated = at
 	n.UpdatedBy = e.UserID
+	s.changed[n.ID] = true
 }
 
 // deref follows a superseded workspace id to the surviving one, leaving every

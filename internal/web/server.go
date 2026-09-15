@@ -41,7 +41,7 @@ type Options struct {
 	// Token authorises API requests. One is generated when this is empty.
 	Token string
 
-	// PollInterval is how often the event logs are checked for changes made by
+	// PollInterval is how often the database is checked for changes made by
 	// another process. Zero selects a sensible default.
 	PollInterval time.Duration
 }
@@ -71,9 +71,6 @@ type Server struct {
 	// anyHost accepts any Host header. It is set when the listener is not on a
 	// loopback address, where the names a client may use cannot be listed.
 	anyHost bool
-
-	// syncing serialises git syncs, which would otherwise race on the index.
-	syncing sync.Mutex
 }
 
 // New builds a server over an open session.
@@ -149,7 +146,6 @@ func (s *Server) routes() {
 	mux.Handle("POST /api/node/{id}/restore", s.guard(s.handleRestoreNode))
 	mux.Handle("POST /api/node/{id}/move", s.guard(s.handleMoveNode))
 	mux.Handle("POST /api/node/{id}/link", s.guard(s.handleLinkNode))
-	mux.Handle("POST /api/sync", s.guard(s.handleSync))
 
 	s.mux = mux
 }
@@ -275,12 +271,10 @@ func (s *Server) Run(ln net.Listener) error {
 	return nil
 }
 
-// watch polls the log files and reloads when another process has written.
+// watch polls the database and reloads when another process has written.
 //
-// Polling rather than filesystem notifications: the set of files is small and
-// changes rarely, the check is a handful of stat calls, and it avoids a
-// dependency plus the platform differences that come with watching a directory
-// that git may replace wholesale during a merge.
+// Polling rather than filesystem notifications: the check is one indexed query,
+// and it avoids a dependency plus the platform differences of watching files.
 func (s *Server) watch(stop <-chan struct{}) {
 	ticker := time.NewTicker(s.pollInterval)
 	defer ticker.Stop()

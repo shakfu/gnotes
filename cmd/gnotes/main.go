@@ -1,9 +1,8 @@
-// Command gnotes is a git-backed notes and tasks tool.
+// Command gnotes is a notes and tasks tool for a single user.
 //
-// Notes and tasks live in an append-only event log inside the repository they
-// belong to. Every view is replayed from that log, so history is complete,
-// concurrent edits from several machines merge without conflict, and the state
-// of the project at any past moment is a matter of replaying a prefix.
+// Notes and tasks live in a SQLite database, .gnotes/gnotes.db, committed with
+// the repository they belong to. Every change is recorded in the database, so
+// the project can be viewed as it stood at any past moment.
 package main
 
 import (

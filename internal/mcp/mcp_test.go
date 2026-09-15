@@ -2,13 +2,13 @@ package mcp
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/event"
 	"github.com/shakfu/gnotes/internal/session"
 	"github.com/shakfu/gnotes/internal/state"
 	"github.com/shakfu/gnotes/internal/store"
@@ -245,10 +245,14 @@ func TestRepliesAreOneLineEach(t *testing.T) {
 	if err := f.sess.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	// The session refuses a multi-line title, but one can still arrive in
-	// another author's synced log.
-	rename := event.Event{ID: ulid.NewGenerator().New(), Action: event.EditTitle, Payload: event.Payload{ID: n.ID, Title: "multi\nline\nbody test"}}
-	if _, err := store.Append(f.sess.Project, store.Actor{ID: ulid.NewGenerator().New(), Name: "bob"}, []event.Event{rename}); err != nil {
+	// The session refuses a multi-line title, but another SQLite client can
+	// write one.
+	db, err := sql.Open("sqlite", f.sess.Project.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE nodes SET title = ? WHERE id = ?`, "multi\nline\nbody test", n.ID); err != nil {
 		t.Fatal(err)
 	}
 

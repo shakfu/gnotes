@@ -3,8 +3,6 @@ package event
 import (
 	"slices"
 	"strings"
-
-	"github.com/shakfu/gnotes/internal/ulid"
 )
 
 // Sort reorders events into the single canonical order that every machine
@@ -186,89 +184,4 @@ func permute(events []Event, dest []int32) {
 // it when the caller does not own the slice; otherwise prefer Sort.
 func Sorted(events []Event) []Event {
 	return Sort(append([]Event(nil), events...))
-}
-
-// EdgeRef returns the id of the last event in a sorted log, which a new event
-// takes as its ref. Passing an unsorted log would produce an arbitrary
-// reference and a tree that reshapes on the next load.
-func EdgeRef(sorted []Event) string {
-	if len(sorted) == 0 {
-		return ""
-	}
-	return sorted[len(sorted)-1].ID
-}
-
-// SplitAt divides a sorted log into the events at or before cutoffMS and those
-// after it, for viewing the state as it stood at a past moment.
-//
-// An event is held back when its own timestamp is past the cutoff, and also
-// when anything it refs was held back. That second rule is what makes the
-// result a state the data actually passed through: a clock that ran ahead
-// could otherwise let an event through while its causal ancestor was excluded,
-// materialising a mix that never existed. Ordering already guarantees an
-// event's ref precedes it, so one forward pass decides every event.
-//
-// nowMS is the reader's clock. An event dated after it cannot have been written
-// yet, so the clock that dated it was wrong, and it is dated instead by the
-// earliest event that came causally after it, when there is one. Otherwise one
-// machine with a clock years ahead would hold back every later event, by
-// anyone, until that date arrived. An event dated in the past cannot be shown
-// to be wrong, so it keeps its own date.
-func SplitAt(sorted []Event, cutoffMS, nowMS uint64) (before, after []Event) {
-	dated := effectiveTimes(sorted, nowMS)
-	var held map[string]struct{}
-
-	for i, e := range sorted {
-		// An id that will not decode cannot be dated, so it cannot be shown as
-		// part of a past state. Holding it back is the conservative choice.
-		ms, ok := dated[i], dated[i] != undatable
-		keep := ok && ms <= cutoffMS
-
-		if _, refHeld := held[e.Ref]; !keep || (e.Ref != "" && refHeld) {
-			if held == nil {
-				held = make(map[string]struct{})
-			}
-			held[e.ID] = struct{}{}
-			after = append(after, e)
-			continue
-		}
-		before = append(before, e)
-	}
-	return before, after
-}
-
-// undatable marks an event whose id carries no timestamp.
-const undatable = ^uint64(0)
-
-// effectiveTimes dates each event of a sorted log for SplitAt. A walk from the
-// end sees every event after the events that ref it.
-func effectiveTimes(sorted []Event, nowMS uint64) []uint64 {
-	dated := make([]uint64, len(sorted))
-	var earliestAfter map[string]uint64
-
-	for i := len(sorted) - 1; i >= 0; i-- {
-		e := &sorted[i]
-		ms, err := ulid.Time(e.ID)
-		if err != nil {
-			dated[i] = undatable
-			continue
-		}
-		if ms > nowMS {
-			if next, ok := earliestAfter[e.ID]; ok && next < ms {
-				ms = next
-			}
-		}
-		dated[i] = ms
-
-		if e.Ref == "" {
-			continue
-		}
-		if earliestAfter == nil {
-			earliestAfter = make(map[string]uint64)
-		}
-		if next, ok := earliestAfter[e.Ref]; !ok || ms < next {
-			earliestAfter[e.Ref] = ms
-		}
-	}
-	return dated
 }

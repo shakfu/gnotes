@@ -21,8 +21,8 @@ Register it with Claude Code from inside the project:
     claude mcp add gnotes -- gnotes mcp
 
 The agent gets the same rules as every other view: task fields are refused on
-notes, deletion is recoverable, and writes append to the same event log the
-command line reads.
+notes, deletion is recoverable, and writes go to the same database the command
+line reads.
 
 Everything on standard output is protocol. Diagnostics go to standard error,
 where the client will surface them if it shows anything at all.`,

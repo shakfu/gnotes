@@ -10,7 +10,6 @@
 
 ### Global notes
 
-- [ ] `-g init` does not run `git init`, so `-g sync` needs the repository set up by hand. Candidates: `-g init --git`, or `-g init --clone <url>` for a second machine.
 - [ ] Nothing marks the global notes in the terminal interface or browser view beyond the workspace name. A new project is named `global`; an adopted clone keeps its own name.
 - [ ] `-g` is read only before the command. `gnotes ls -g` fails with "flag provided but not defined: -g" and no hint.
 - [ ] A quoted `~` is not expanded: `gnotes -g init "~/notes"` creates a directory named `~`.

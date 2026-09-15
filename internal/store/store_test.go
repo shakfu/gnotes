@@ -1,623 +1,480 @@
 package store
 
 import (
-	"bytes"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/shakfu/gnotes/internal/event"
+	"github.com/shakfu/gnotes/internal/rank"
+	"github.com/shakfu/gnotes/internal/state"
 	"github.com/shakfu/gnotes/internal/ulid"
 )
+
+var clock = time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 
 func testActor(t *testing.T, name string) Actor {
 	t.Helper()
 	return Actor{ID: ulid.NewGenerator().New(), Name: name}
 }
 
-func initProject(t *testing.T) *Project {
+func initAt(t *testing.T, root, name string) *Project {
 	t.Helper()
-	p, err := Init(t.TempDir(), "demo", time.Now())
+	p, err := Init(root, name, clock)
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}
+	t.Cleanup(func() { p.Close() })
 	return p
 }
 
-// writeEvents appends a chain of events, each referring to the one before it,
-// as a real session would.
-func writeEvents(t *testing.T, p *Project, a Actor, n int, root string) []event.Event {
+func initProject(t *testing.T) *Project {
 	t.Helper()
-
-	g := ulid.NewGenerator()
-	out := make([]event.Event, 0, n)
-	ref := root
-	for i := 0; i < n; i++ {
-		e := event.Event{ID: g.New(), Ref: ref, Action: event.AddNote, Payload: event.Payload{ID: "n", Title: "t"}}
-		out = append(out, e)
-		ref = e.ID
-	}
-	if _, err := Append(p, a, out); err != nil {
-		t.Fatalf("Append: %v", err)
-	}
-	return out
+	return initAt(t, t.TempDir(), "demo")
 }
 
-func TestInitCreatesLayout(t *testing.T) {
-	root := t.TempDir()
-	p, err := Init(root, "demo", time.Now())
+func discover(t *testing.T, dir string) *Project {
+	t.Helper()
+	p, err := Discover(dir)
 	if err != nil {
-		t.Fatalf("Init: %v", err)
+		t.Fatalf("Discover: %v", err)
 	}
+	t.Cleanup(func() { p.Close() })
+	return p
+}
 
-	if p.Dir != filepath.Join(root, DirName) {
-		t.Fatalf("Dir = %q", p.Dir)
+func mkdir(t *testing.T, parts ...string) string {
+	t.Helper()
+	dir := filepath.Join(parts...)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if p.Root() != root {
-		t.Fatalf("Root = %q, want %q", p.Root(), root)
+	return dir
+}
+
+func writeFile(t *testing.T, path, body string) {
+	t.Helper()
+	mkdir(t, filepath.Dir(path))
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	for _, path := range []string{p.ConfigPath(), p.EventsDir()} {
-		if _, err := os.Stat(path); err != nil {
-			t.Errorf("expected %s to exist: %v", path, err)
+}
+
+func loadRows(t *testing.T, p *Project) Rows {
+	t.Helper()
+	rows, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return rows
+}
+
+// external runs a statement as another SQLite client would.
+func external(t *testing.T, p *Project, query string, args ...any) {
+	t.Helper()
+	db, err := sql.Open("sqlite", p.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(query, args...); err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+}
+
+// tree builds a workspace, a notebook and a task with every field set, the way
+// a session would, and returns the changed nodes and contributors.
+func tree(t *testing.T, a Actor) (*state.State, []*state.Node, []*state.Contributor) {
+	t.Helper()
+	g := ulid.NewGeneratorAt(func() time.Time { return clock })
+	ws, nb, task := g.New(), g.New(), g.New()
+	st, _ := state.Materialize(nil)
+	for _, e := range []event.Event{
+		{Action: event.InitWorkspace, Payload: event.Payload{ID: ws, Name: "demo", Rank: rank.Mid()}},
+		{Action: event.CreateContributor, Payload: event.Payload{ID: a.ID, Name: a.Name}},
+		{Action: event.AddNotebook, Payload: event.Payload{ID: nb, Parent: ws, Name: "work", Rank: rank.Mid()}},
+		{Action: event.AddTask, Payload: event.Payload{ID: task, Parent: nb, Title: "fix the lexer", Rank: rank.Mid()}},
+		{Action: event.EditBody, Payload: event.Payload{ID: task, Body: "it breaks"}},
+		{Action: event.SetStatus, Payload: event.Payload{ID: task, Status: "doing"}},
+		{Action: event.SetPriority, Payload: event.Payload{ID: task, Priority: "high"}},
+		{Action: event.SetDue, Payload: event.Payload{ID: task, Due: "2026-08-21"}},
+		{Action: event.AddTag, Payload: event.Payload{ID: task, Tag: "parser"}},
+		{Action: event.AddTag, Payload: event.Payload{ID: task, Tag: "bug"}},
+		{Action: event.LinkNode, Payload: event.Payload{ID: task, Target: nb}},
+		{Action: event.AddAssignee, Payload: event.Payload{ID: task, Assignee: a.ID}},
+	} {
+		e.ID, e.UserID = g.New(), a.ID
+		if err := st.Apply(&e); err != nil {
+			t.Fatalf("%s: %v", e.Action, err)
 		}
 	}
-	if p.Config.Name != "demo" {
-		t.Errorf("Name = %q", p.Config.Name)
+	nodes, contributors := st.TakeChanged()
+	return st, nodes, contributors
+}
+
+func write(t *testing.T, p *Project, a Actor, at time.Time, nodes []*state.Node, contributors []*state.Contributor) (Snapshot, Snapshot) {
+	t.Helper()
+	prev, head, err := Write(p, a, at, nodes, contributors)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
 	}
-	if p.Config.Created == "" {
-		t.Error("Created was not stamped")
+	return prev, head
+}
+
+func TestInitCreatesTheDatabaseAndItsGitFiles(t *testing.T) {
+	root := t.TempDir()
+	p := initAt(t, root, "demo")
+
+	if want := filepath.Join(root, DirName, DBFile); p.Path != want || p.Root != root {
+		t.Fatalf("Path, Root = %q, %q; want %q, %q", p.Path, p.Root, want, root)
+	}
+	for name, want := range map[string]string{".gitignore": gitignore, ".gitattributes": gitattributes} {
+		if raw, err := os.ReadFile(filepath.Join(root, DirName, name)); err != nil || string(raw) != want {
+			t.Fatalf("%s = %q, %v; want %q", name, raw, err, want)
+		}
+	}
+	if again := discover(t, root); again.Config.Name != "demo" || again.Config.Created == "" {
+		t.Fatalf("Config = %+v", again.Config)
+	}
+}
+
+// The committed file must hold every write, so there is no WAL beside it.
+func TestTheDatabaseFileIsCompleteAfterAWrite(t *testing.T) {
+	p := initProject(t)
+	a := testActor(t, "sa")
+	_, nodes, contributors := tree(t, a)
+	write(t, p, a, clock, nodes, contributors)
+
+	var mode string
+	if err := p.db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil || mode != "delete" {
+		t.Fatalf("journal_mode = %q, %v; want delete", mode, err)
+	}
+	for _, suffix := range []string{"-wal", "-journal"} {
+		if _, err := os.Stat(p.Path + suffix); !os.IsNotExist(err) {
+			t.Errorf("%s%s exists after the write", DBFile, suffix)
+		}
 	}
 }
 
 func TestInitDefaultsNameToDirectory(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "my-project")
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	p, err := Init(root, "", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Config.Name != "my-project" {
+	root := mkdir(t, t.TempDir(), "my-project")
+	if p := initAt(t, root, ""); p.Config.Name != "my-project" {
 		t.Fatalf("Name = %q, want the directory name", p.Config.Name)
 	}
 }
 
 func TestInitRefusesToOverwrite(t *testing.T) {
 	root := t.TempDir()
-	if _, err := Init(root, "first", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Init(root, "second", time.Now()); !errors.Is(err, ErrExists) {
+	initAt(t, root, "first")
+	if _, err := Init(root, "second", clock); !errors.Is(err, ErrExists) {
 		t.Fatalf("second Init = %v, want ErrExists", err)
 	}
-
-	// The original descriptor must be untouched.
-	p, err := Open(filepath.Join(root, DirName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Config.Name != "first" {
+	if p := discover(t, root); p.Config.Name != "first" {
 		t.Fatalf("Name = %q, the existing project was overwritten", p.Config.Name)
 	}
 }
 
-func TestDiscoverFindsNearestProjectFromNestedDirectory(t *testing.T) {
+func TestDiscoverFindsTheNearestProject(t *testing.T) {
 	root := t.TempDir()
-	if _, err := Init(root, "outer", time.Now()); err != nil {
-		t.Fatal(err)
+	initAt(t, root, "outer")
+	if p := discover(t, mkdir(t, root, "a", "b")); p.Config.Name != "outer" {
+		t.Fatalf("from below: Name = %q", p.Config.Name)
 	}
-
-	deep := filepath.Join(root, "a", "b", "c")
-	if err := os.MkdirAll(deep, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	p, err := Discover(deep)
-	if err != nil {
-		t.Fatalf("Discover: %v", err)
-	}
-	if p.Config.Name != "outer" {
-		t.Fatalf("Name = %q", p.Config.Name)
-	}
-}
-
-func TestDiscoverPrefersTheNearestProject(t *testing.T) {
-	root := t.TempDir()
-	if _, err := Init(root, "outer", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	inner := filepath.Join(root, "sub")
-	if err := os.MkdirAll(inner, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Init(inner, "inner", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-
-	p, err := Discover(inner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Config.Name != "inner" {
+	inner := mkdir(t, root, "sub")
+	initAt(t, inner, "inner")
+	if p := discover(t, inner); p.Config.Name != "inner" {
 		t.Fatalf("Name = %q, want the nearest project", p.Config.Name)
 	}
 }
 
-// A bare directory left by a partial checkout must not shadow a real project
-// further up the tree.
-func TestDiscoverIgnoresDirectoryWithoutConfig(t *testing.T) {
+// An empty .gnotes left by a partial checkout must not shadow a real project
+// further up.
+func TestDiscoverSkipsADirectoryWithoutADatabase(t *testing.T) {
 	root := t.TempDir()
-	if _, err := Init(root, "outer", time.Now()); err != nil {
-		t.Fatal(err)
+	initAt(t, root, "outer")
+	mkdir(t, root, "a", DirName)
+	if p := discover(t, filepath.Join(root, "a")); p.Config.Name != "outer" {
+		t.Fatalf("Name = %q, want the outer project", p.Config.Name)
 	}
-
-	empty := filepath.Join(root, "sub", DirName)
-	if err := os.MkdirAll(empty, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	p, err := Discover(filepath.Join(root, "sub"))
-	if err != nil {
-		t.Fatalf("Discover: %v", err)
-	}
-	if p.Config.Name != "outer" {
-		t.Fatalf("Name = %q, an empty directory shadowed the real project", p.Config.Name)
-	}
-}
-
-func TestDiscoverReportsNotFound(t *testing.T) {
 	if _, err := Discover(t.TempDir()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Discover = %v, want ErrNotFound", err)
 	}
 }
 
-func TestOpenRejectsMalformedConfig(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), DirName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+func TestOpenRefusesANewerSchema(t *testing.T) {
+	root := t.TempDir()
+	p := initAt(t, root, "demo")
+	if _, err := p.db.Exec(`PRAGMA user_version = 99`); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ConfigFile), []byte("{not json"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := Open(dir); err == nil {
-		t.Fatal("Open accepted a malformed config")
+	if _, err := OpenAt(root); err == nil || !strings.Contains(err.Error(), "newer gnotes") {
+		t.Fatalf("OpenAt = %v, want a newer-schema refusal", err)
 	}
 }
 
-// EventsRoot is the seam that lets the logs move into a worktree on another
-// branch later without touching load or replay.
-func TestEventsRootRelocatesTheLogs(t *testing.T) {
-	p := initProject(t)
-
-	if got, want := p.EventsDir(), filepath.Join(p.Dir, EventsDirName); got != want {
-		t.Fatalf("default EventsDir = %q, want %q", got, want)
-	}
-
-	p.Config.EventsRoot = "../elsewhere"
-	rel := p.EventsDir()
-	if !strings.HasSuffix(rel, filepath.Join("elsewhere", EventsDirName)) {
-		t.Fatalf("relative EventsRoot gave %q", rel)
-	}
-
-	abs := filepath.Join(t.TempDir(), "worktree")
-	p.Config.EventsRoot = abs
-	if got, want := p.EventsDir(), filepath.Join(abs, EventsDirName); got != want {
-		t.Fatalf("absolute EventsRoot gave %q, want %q", got, want)
-	}
-}
-
-func TestLogNameRoundTripsTheAuthorID(t *testing.T) {
-	a := testActor(t, "Shakeeb Alireza")
-	name := LogName(a)
-
-	if !strings.HasSuffix(name, LogExt) {
-		t.Fatalf("LogName = %q, missing extension", name)
-	}
-	got, ok := ParseLogName(name)
-	if !ok {
-		t.Fatalf("ParseLogName(%q) failed", name)
-	}
-	if got != a.ID {
-		t.Fatalf("author id = %q, want %q", got, a.ID)
-	}
-}
-
-// A display name may contain dots, so only the first one separates the id.
-func TestLogNameHandlesDottedDisplayName(t *testing.T) {
-	a := testActor(t, "J. R. Hacker")
-
-	got, ok := ParseLogName(LogName(a))
-	if !ok || got != a.ID {
-		t.Fatalf("ParseLogName = %q, %v; want %q", got, ok, a.ID)
-	}
-}
-
-// A case-folding filesystem must not split one person into two authors.
-func TestParseLogNameRestoresCanonicalCase(t *testing.T) {
-	a := testActor(t, "sa")
-	lowered := strings.ToLower(LogName(a))
-
-	got, ok := ParseLogName(lowered)
-	if !ok {
-		t.Fatalf("ParseLogName(%q) failed", lowered)
-	}
-	if got != a.ID {
-		t.Fatalf("author id = %q, want the canonical %q", got, a.ID)
-	}
-}
-
-func TestParseLogNameRejectsNonLogs(t *testing.T) {
-	for _, in := range []string{"notes.md", "README", "events.jsonl", "backup.jsonl~", ".jsonl"} {
-		if _, ok := ParseLogName(in); ok {
-			t.Errorf("ParseLogName(%q) accepted a non-log", in)
-		}
-	}
-}
-
-func TestSanitizeRemovesPathSeparatorsAndCase(t *testing.T) {
-	a := Actor{ID: ulid.NewGenerator().New(), Name: "../../etc/pa ss wd"}
-	name := LogName(a)
-
-	if strings.ContainsAny(name, `/\`) {
-		t.Fatalf("LogName = %q leaks a path separator", name)
-	}
-	if name != strings.ToLower(name) {
-		t.Fatalf("LogName = %q is not lowercased", name)
-	}
-	// Writing it must land inside the events directory and nowhere else.
-	p := initProject(t)
-	if _, err := Append(p, a, []event.Event{{ID: ulid.NewGenerator().New(), Action: event.AddNote}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(p.EventsDir(), name)); err != nil {
-		t.Fatalf("log did not land in the events directory: %v", err)
-	}
-}
-
-func TestAppendAndLoadRoundTrip(t *testing.T) {
+func TestWriteAndLoadRoundTripEveryField(t *testing.T) {
 	p := initProject(t)
 	a := testActor(t, "sa")
-	want := writeEvents(t, p, a, 5, "")
+	st, nodes, contributors := tree(t, a)
+	write(t, p, a, clock, nodes, contributors)
 
-	got, err := Load(p)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	rows := loadRows(t, p)
+	got, problems := state.Build(rows.Nodes, rows.Contributors)
+	if len(rows.Problems)+len(problems) != 0 {
+		t.Fatalf("problems: %v %v", rows.Problems, problems)
 	}
-	if len(got.Events) != len(want) {
-		t.Fatalf("loaded %d events, want %d", len(got.Events), len(want))
-	}
-	for i := range want {
-		if got.Events[i].ID != want[i].ID {
-			t.Fatalf("event %d = %s, want %s", i, got.Events[i].ID, want[i].ID)
+	for id, want := range st.Nodes {
+		n := got.Get(id)
+		if n == nil {
+			t.Fatalf("node %s missing", id)
 		}
-		if got.Events[i].UserID != a.ID {
-			t.Fatalf("event %d author = %q, want %q", i, got.Events[i].UserID, a.ID)
-		}
-	}
-}
-
-func TestLoadOnEmptyProject(t *testing.T) {
-	p := initProject(t)
-
-	got, err := Load(p)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(got.Events) != 0 {
-		t.Fatalf("empty project loaded %d events", len(got.Events))
-	}
-}
-
-// A project whose events directory has not been created yet is valid, not an
-// error: a fresh clone can arrive that way.
-func TestLoadWithMissingEventsDirectory(t *testing.T) {
-	p := initProject(t)
-	if err := os.RemoveAll(p.EventsDir()); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := Load(p); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-}
-
-// The point of per-author files: two people's work merges into one ordering
-// without either file being touched.
-func TestLoadMergesMultipleAuthors(t *testing.T) {
-	p := initProject(t)
-	alice := testActor(t, "alice")
-	bob := testActor(t, "bob")
-
-	shared := writeEvents(t, p, alice, 2, "")
-	writeEvents(t, p, bob, 3, shared[len(shared)-1].ID)
-
-	got, err := Load(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Events) != 5 {
-		t.Fatalf("loaded %d events, want 5", len(got.Events))
-	}
-
-	authors := map[string]int{}
-	for _, e := range got.Events {
-		authors[e.UserID]++
-	}
-	if authors[alice.ID] != 2 || authors[bob.ID] != 3 {
-		t.Fatalf("authorship lost: %v", authors)
-	}
-	// Bob branched from Alice's last event, so her run must come first.
-	if got.Events[0].UserID != alice.ID || got.Events[2].UserID != bob.ID {
-		t.Fatalf("merged order is wrong: %v", authors)
-	}
-}
-
-// Load must not depend on the order the filesystem happens to list files in.
-func TestLoadIsDeterministicAcrossAuthorCount(t *testing.T) {
-	p := initProject(t)
-
-	root := ""
-	for i := 0; i < 6; i++ {
-		a := testActor(t, string(rune('a'+i)))
-		ev := writeEvents(t, p, a, 4, root)
-		root = ev[len(ev)-1].ID
-	}
-
-	first, err := Load(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for trial := 0; trial < 20; trial++ {
-		again, err := Load(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for i := range first.Events {
-			if first.Events[i].ID != again.Events[i].ID {
-				t.Fatalf("trial %d diverged at %d", trial, i)
-			}
+		if n.Kind != want.Kind || n.Parent != want.Parent || n.Rank != want.Rank || n.Title != want.Title ||
+			n.Body != want.Body || n.Status != want.Status || n.Priority != want.Priority ||
+			!n.Due.Equal(want.Due) || !n.Created.Equal(want.Created) || n.CreatedBy != want.CreatedBy ||
+			strings.Join(n.Tags, ",") != strings.Join(want.Tags, ",") ||
+			strings.Join(n.Links, ",") != strings.Join(want.Links, ",") ||
+			strings.Join(n.Assignees, ",") != strings.Join(want.Assignees, ",") {
+			t.Fatalf("round trip of %q:\n got %+v\nwant %+v", want.Title, *n, *want)
 		}
 	}
+	if got.Contributor(a.ID) != "sa" {
+		t.Fatalf("contributor = %q", got.Contributor(a.ID))
+	}
 }
 
-func TestLoadIgnoresForeignFiles(t *testing.T) {
+// Writing a node again writes only what differs, and a removed set member
+// leaves its table.
+func TestWriteRecordsOnlyWhatChanged(t *testing.T) {
 	p := initProject(t)
 	a := testActor(t, "sa")
-	writeEvents(t, p, a, 2, "")
+	st, nodes, contributors := tree(t, a)
+	_, head := write(t, p, a, clock, nodes, contributors)
 
-	for name, body := range map[string]string{
-		"README.md":       "hello",
-		"scratch.jsonl":   `{"v":1,"id":"x"}`,
-		"notes.txt":       "hello",
-		".DS_Store":       "",
-		"backup.jsonl.sw": "",
+	task, _ := st.Resolve("fix the lexer")
+	later := clock.Add(time.Hour)
+	for _, e := range []event.Event{
+		{Action: event.RemoveTag, Payload: event.Payload{ID: task.ID, Tag: "bug"}},
+		{Action: event.EditTitle, Payload: event.Payload{ID: task.ID, Title: "fix the lexer"}},
 	} {
-		if err := os.WriteFile(filepath.Join(p.EventsDir(), name), []byte(body), 0o644); err != nil {
+		e.ID, e.UserID = ulid.NewGeneratorAt(func() time.Time { return later }).New(), a.ID
+		if err := st.Apply(&e); err != nil {
 			t.Fatal(err)
 		}
 	}
+	nodes, contributors = st.TakeChanged()
+	prev, next := write(t, p, a, later, nodes, contributors)
 
-	got, err := Load(p)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	if prev != head {
+		t.Fatalf("prev = %d, want the head of the first write, %d", prev, head)
 	}
-	if len(got.Events) != 2 {
-		t.Fatalf("loaded %d events, want only the 2 real ones", len(got.Events))
-	}
-}
-
-// A corrupt line is a real problem and must be reported with its location,
-// not silently dropped.
-func TestLoadReportsCorruptLineWithLocation(t *testing.T) {
-	p := initProject(t)
-	a := testActor(t, "sa")
-	writeEvents(t, p, a, 2, "")
-
-	path := filepath.Join(p.EventsDir(), LogName(a))
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	changes, err := History(p, task.ID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString("{ this is not json\n"); err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-
-	_, err = Load(p)
-	if err == nil {
-		t.Fatal("Load accepted a corrupt line")
-	}
-	if !strings.Contains(err.Error(), ":3:") {
-		t.Fatalf("error does not name the line: %v", err)
-	}
-}
-
-// Events from a newer gnotes must be stepped over, not treated as corruption,
-// and must be counted so the user can be told to upgrade.
-func TestLoadSkipsUnknownActionsAndCountsThem(t *testing.T) {
-	p := initProject(t)
-	a := testActor(t, "sa")
-	writeEvents(t, p, a, 2, "")
-
-	path := filepath.Join(p.EventsDir(), LogName(a))
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	g := ulid.NewGenerator()
-	for i := 0; i < 3; i++ {
-		if _, err := f.WriteString(`{"v":1,"id":"` + g.New() + `","a":"teleport.node"}` + "\n"); err != nil {
-			t.Fatal(err)
+	var recent []Change
+	for _, c := range changes {
+		if c.Seq > int64(head) {
+			recent = append(recent, c)
 		}
 	}
-	f.Close()
-
-	got, err := Load(p)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+	if len(recent) != 1 || recent[0].Field != "tag" || recent[0].Old != "bug" || recent[0].New != "" ||
+		!recent[0].At.Equal(later) || recent[0].Author != a.ID || int64(next) != recent[0].Seq {
+		t.Fatalf("changes after the second write = %+v, want one tag removal at %v by %s", recent, later, a.ID)
 	}
-	if len(got.Events) != 2 {
-		t.Fatalf("loaded %d events, want the 2 understood ones", len(got.Events))
-	}
-	if got.Skipped["teleport.node"] != 3 {
-		t.Fatalf("Skipped = %v, want 3 teleport.node", got.Skipped)
+	if n := loadRows(t, p).Nodes; len(n) != 3 {
+		t.Fatalf("loaded %d nodes, want 3", len(n))
 	}
 }
 
-func TestLoadToleratesBlankLines(t *testing.T) {
+func TestWriteRefusesAnUnconfiguredActor(t *testing.T) {
 	p := initProject(t)
-	a := testActor(t, "sa")
-	writeEvents(t, p, a, 2, "")
-
-	path := filepath.Join(p.EventsDir(), LogName(a))
-	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-	f.WriteString("\n\n   \n")
-	f.Close()
-
-	got, err := Load(p)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(got.Events) != 2 {
-		t.Fatalf("loaded %d events, want 2", len(got.Events))
-	}
-}
-
-// A log whose final line has no newline, as a crashed writer might leave,
-// must still parse.
-func TestLoadReadsFinalLineWithoutNewline(t *testing.T) {
-	p := initProject(t)
-	a := testActor(t, "sa")
-
-	line, err := event.Encode(event.Event{ID: ulid.NewGenerator().New(), Action: event.AddNote})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(p.EventsDir(), LogName(a)), line, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := Load(p)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(got.Events) != 1 {
-		t.Fatalf("loaded %d events, want 1", len(got.Events))
-	}
-}
-
-func TestAppendRejectsUnconfiguredActor(t *testing.T) {
-	p := initProject(t)
-	e := []event.Event{{ID: ulid.NewGenerator().New(), Action: event.AddNote}}
-
 	for name, a := range map[string]Actor{
 		"no id":      {Name: "sa"},
 		"bad id":     {ID: "nope", Name: "sa"},
-		"no name":    {ID: ulid.NewGenerator().New()},
 		"blank name": {ID: ulid.NewGenerator().New(), Name: "   "},
 	} {
-		if _, err := Append(p, a, e); err == nil {
-			t.Errorf("%s: Append accepted an invalid actor", name)
+		if _, _, err := Write(p, a, clock, nil, nil); err == nil {
+			t.Errorf("%s: Write accepted an invalid actor", name)
 		}
 	}
 }
 
-func TestAppendOfNothingIsANoOp(t *testing.T) {
+// A write is one transaction: a node the schema refuses takes the whole write
+// with it, and the writer row is left clear.
+func TestWriteIsAllOrNothing(t *testing.T) {
 	p := initProject(t)
 	a := testActor(t, "sa")
+	_, nodes, contributors := tree(t, a)
+	orphan := &state.Node{ID: "orphan", Kind: state.KindNote, Parent: "missing", Title: "no parent", Created: clock, Updated: clock}
 
-	if _, err := Append(p, a, nil); err != nil {
-		t.Fatalf("Append(nil): %v", err)
+	if _, _, err := Write(p, a, clock, append(nodes, orphan), contributors); err == nil {
+		t.Fatal("a node with a missing parent was written")
 	}
-	if _, err := os.Stat(filepath.Join(p.EventsDir(), LogName(a))); !os.IsNotExist(err) {
-		t.Fatal("an empty append created a log file")
+	if rows := loadRows(t, p); len(rows.Nodes) != 0 || rows.Head != 0 {
+		t.Fatalf("after the failed write: %d nodes, head %d", len(rows.Nodes), rows.Head)
+	}
+	var at sql.NullString
+	if err := p.db.QueryRow(`SELECT at FROM writer`).Scan(&at); err != nil || at.Valid {
+		t.Fatalf("writer.at = %v, %v; want NULL", at, err)
 	}
 }
 
-func TestAppendIsAdditive(t *testing.T) {
+func TestTheSchemaRefusesTaskFieldsOnANote(t *testing.T) {
 	p := initProject(t)
 	a := testActor(t, "sa")
+	_, nodes, contributors := tree(t, a)
+	write(t, p, a, clock, nodes, contributors)
+	if _, err := p.db.Exec(`UPDATE nodes SET status = 'done' WHERE kind = 'notebook'`); err == nil {
+		t.Fatal("a notebook took a status")
+	}
+}
 
-	first := writeEvents(t, p, a, 2, "")
-	writeEvents(t, p, a, 3, first[len(first)-1].ID)
+// A change made with another client is recorded at the wall clock with no
+// author, and moves the Snapshot; a statement that changes nothing does not.
+func TestAnExternalEditIsRecorded(t *testing.T) {
+	p := initProject(t)
+	a := testActor(t, "sa")
+	_, nodes, contributors := tree(t, a)
+	write(t, p, a, clock, nodes, contributors)
 
-	got, err := Load(p)
+	before := Snap(p)
+	external(t, p, `UPDATE nodes SET title = title`)
+	if Snap(p) != before {
+		t.Fatal("a statement that changed nothing moved the snapshot")
+	}
+	start := time.Now().Add(-time.Second)
+	external(t, p, `UPDATE nodes SET title = 'renamed' WHERE kind = 'task'`)
+	if Snap(p) == before {
+		t.Fatal("an external edit did not move the snapshot")
+	}
+
+	changes, err := History(p, "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Events) != 5 {
-		t.Fatalf("loaded %d events, want 5; the second append overwrote the first", len(got.Events))
+	c := changes[0]
+	if c.Field != "title" || c.Old != "fix the lexer" || c.New != "renamed" || c.Author != "" || c.At.Before(start) {
+		t.Fatalf("change = %+v, want an unattributed title edit at the wall clock", c)
 	}
 }
 
-// Two processes appending as the same person must not interleave a batch,
-// because a half-written command would replay as a different operation.
-func TestConcurrentAppendsKeepBatchesIntact(t *testing.T) {
+func TestRowsAtReplaysTheChanges(t *testing.T) {
 	p := initProject(t)
 	a := testActor(t, "sa")
+	_, nodes, contributors := tree(t, a)
+	write(t, p, a, clock, nodes, contributors)
 
-	const writers, perBatch = 8, 4
-	done := make(chan error, writers)
+	external(t, p, `UPDATE nodes SET title = 'renamed', status = 'done' WHERE kind = 'task'`)
+	external(t, p, `DELETE FROM tags WHERE tag = 'bug'`)
+	external(t, p, `INSERT INTO tags (node, tag) SELECT id, 'later' FROM nodes WHERE kind = 'task'`)
 
-	for w := 0; w < writers; w++ {
-		go func() {
-			g := ulid.NewGenerator()
-			batch := make([]event.Event, perBatch)
-			ref := ""
-			for i := range batch {
-				batch[i] = event.Event{ID: g.New(), Ref: ref, Action: event.AddNote}
-				ref = batch[i].ID
-			}
-			_, err := Append(p, a, batch)
-			done <- err
-		}()
+	past, err := RowsAt(p, clock)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for w := 0; w < writers; w++ {
-		if err := <-done; err != nil {
-			t.Fatalf("concurrent Append: %v", err)
+	st, problems := state.Build(past.Nodes, past.Contributors)
+	if len(problems) != 0 {
+		t.Fatalf("problems: %v", problems)
+	}
+	task, err := st.Resolve("fix the lexer")
+	if err != nil {
+		t.Fatalf("the task as it stood: %v", err)
+	}
+	if task.Status != state.StatusDoing || strings.Join(task.Tags, ",") != "bug,parser" || !task.Due.Equal(time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("task then = %+v", *task)
+	}
+	if st.Contributor(a.ID) != "sa" {
+		t.Fatal("the contributor is missing from the past")
+	}
+	if early, _ := RowsAt(p, clock.Add(-time.Hour)); len(early.Nodes) != 0 {
+		t.Fatalf("%d nodes before anything was written", len(early.Nodes))
+	}
+}
+
+func TestSearchIndexesNotesAndTasksWithTheirTags(t *testing.T) {
+	p := initProject(t)
+	a := testActor(t, "sa")
+	st, nodes, contributors := tree(t, a)
+	write(t, p, a, clock, nodes, contributors)
+	task, _ := st.Resolve("fix the lexer")
+
+	for match, want := range map[string]int{`"parser"`: 1, `"breaks"`: 1, `"lex"*`: 1, `"work"`: 0} {
+		hits, err := Search(p, match)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(hits) != want || (want == 1 && hits[0].ID != task.ID) {
+			t.Errorf("%s = %+v, want %d hit", match, hits, want)
 		}
 	}
-
-	got, err := Load(p)
-	if err != nil {
-		t.Fatalf("Load after concurrent appends: %v", err)
+	external(t, p, `DELETE FROM nodes WHERE kind = 'task'`)
+	if hits, _ := Search(p, `"parser"`); len(hits) != 0 {
+		t.Fatalf("a removed row is still indexed: %+v", hits)
 	}
-	if len(got.Events) != writers*perBatch {
-		t.Fatalf("loaded %d events, want %d; a batch was torn", len(got.Events), writers*perBatch)
+}
+
+// Separate processes writing at once must each land whole.
+func TestConcurrentWritesAllLand(t *testing.T) {
+	root := t.TempDir()
+	p := initAt(t, root, "demo")
+	a := testActor(t, "sa")
+	st, nodes, contributors := tree(t, a)
+	write(t, p, a, clock, nodes, contributors)
+	nb, _ := st.Resolve("work", state.KindNotebook)
+
+	const writers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(title string) {
+			defer wg.Done()
+			other, err := OpenAt(root)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer other.Close()
+			n := &state.Node{ID: ulid.NewGenerator().New(), Kind: state.KindNote, Parent: nb.ID, Title: title, Tags: []string{"x", "y"}, Created: clock, Updated: clock}
+			_, _, err = Write(other, a, clock, []*state.Node{n}, nil)
+			errs <- err
+		}(string(rune('a' + w)))
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Write: %v", err)
+		}
+	}
+	if n := len(loadRows(t, p).Nodes); n != 3+writers {
+		t.Fatalf("loaded %d nodes, want %d", n, 3+writers)
 	}
 }
 
 func BenchmarkLoad(b *testing.B) {
-	dir := b.TempDir()
-	p, err := Init(dir, "bench", time.Now())
+	p, err := Init(b.TempDir(), "bench", clock)
 	if err != nil {
 		b.Fatal(err)
 	}
-
-	// Four collaborators, 5000 events each: a large but plausible project.
+	defer p.Close()
+	a := Actor{ID: ulid.NewGenerator().New(), Name: "sa"}
 	g := ulid.NewGenerator()
-	for w := 0; w < 4; w++ {
-		a := Actor{ID: g.New(), Name: string(rune('a' + w))}
-		batch := make([]event.Event, 5000)
-		ref := ""
-		for i := range batch {
-			batch[i] = event.Event{
-				ID: g.New(), Ref: ref, Action: event.AddNote,
-				Payload: event.Payload{ID: g.New(), Parent: g.New(), Rank: "7fffffffffffffffffffffff", Title: "a note about something"},
-			}
-			ref = batch[i].ID
-		}
-		if _, err := Append(p, a, batch); err != nil {
-			b.Fatal(err)
-		}
+	ws := &state.Node{ID: g.New(), Kind: state.KindWorkspace, Title: "bench", Created: clock, Updated: clock}
+	nb := &state.Node{ID: g.New(), Kind: state.KindNotebook, Parent: ws.ID, Title: "work", Created: clock, Updated: clock}
+	nodes := []*state.Node{ws, nb}
+	for i := 0; i < 5000; i++ {
+		nodes = append(nodes, &state.Node{ID: g.New(), Kind: state.KindTask, Parent: nb.ID, Rank: "7fffffffffffffffffffffff",
+			Title: "a task about something", Body: strings.Repeat("words ", 40), Tags: []string{"one", "two"}, Created: clock, Updated: clock})
 	}
-
+	if _, _, err := Write(p, a, clock, nodes, nil); err != nil {
+		b.Fatal(err)
+	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -627,173 +484,145 @@ func BenchmarkLoad(b *testing.B) {
 	}
 }
 
-// tornWrite simulates a process that died mid-append: a complete log with the
-// first half of one more record on the end and no final newline.
-func tornWrite(t *testing.T, p *Project, a Actor) string {
+// legacyProject writes a pre-database project under root and returns its
+// events directory.
+func legacyProject(t *testing.T, root, config string) string {
 	t.Helper()
-
-	path := filepath.Join(p.EventsDir(), LogName(a))
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatalf("open the log: %v", err)
-	}
-	if _, err := f.WriteString(`{"id":"01M0TORNTORNTORNTORN0000","ref":"","act`); err != nil {
-		t.Fatalf("write the torn tail: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("close the log: %v", err)
-	}
-	return path
+	writeFile(t, filepath.Join(root, DirName, legacyConfigFile), config)
+	return mkdir(t, root, DirName, legacyEventsDir)
 }
 
-func TestLoadDropsATornFinalRecord(t *testing.T) {
-	p := initProject(t)
-	a := testActor(t, "sa")
-	want := writeEvents(t, p, a, 3, "")
-	tornWrite(t, p, a)
-
-	got, err := Load(p)
-	if err != nil {
-		t.Fatalf("Load refused a project with a torn tail: %v", err)
-	}
-	if len(got.Events) != len(want) {
-		t.Fatalf("loaded %d events, want %d", len(got.Events), len(want))
-	}
-	if len(got.Torn) != 1 || got.Torn[0] != LogName(a) {
-		t.Fatalf("Torn = %v, want [%s]", got.Torn, LogName(a))
-	}
-}
-
-// Reading is tolerant, but the partial record still has to leave the file
-// before the next batch lands behind it: fused together they would form one
-// terminated line, which is malformed rather than torn and so fatal for good.
-func TestAppendDiscardsATornTailBeforeWriting(t *testing.T) {
-	p := initProject(t)
-	a := testActor(t, "sa")
-	first := writeEvents(t, p, a, 3, "")
-	path := tornWrite(t, p, a)
-
-	second := writeEvents(t, p, a, 2, first[len(first)-1].ID)
-
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read the log: %v", err)
-	}
-	if strings.Contains(string(raw), "01M0TORNTORNTORNTORN0000") {
-		t.Fatal("the torn record survived the next append")
-	}
-
-	got, err := Load(p)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if want := len(first) + len(second); len(got.Events) != want {
-		t.Fatalf("loaded %d events, want %d", len(got.Events), want)
-	}
-	if len(got.Torn) != 0 {
-		t.Fatalf("Torn = %v, want none once the tail is gone", got.Torn)
-	}
-}
-
-// A record damaged anywhere but the end is still fatal: the tolerance is for a
-// write that was cut short, not for corruption in general.
-func TestLoadRefusesAMalformedInteriorRecord(t *testing.T) {
-	p := initProject(t)
-	a := testActor(t, "sa")
-	writeEvents(t, p, a, 3, "")
-
-	path := filepath.Join(p.EventsDir(), LogName(a))
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read the log: %v", err)
-	}
-	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
-	lines[1] = `{"id":"01M0BADBADBADBADBADB0000","act`
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
-		t.Fatalf("rewrite the log: %v", err)
-	}
-
-	if _, err := Load(p); err == nil {
-		t.Fatal("Load accepted a malformed interior record")
-	}
-}
-
-// A write cut exactly on a record boundary leaves a whole event with no
-// newline. Load already keeps it, so the next append must terminate it rather
-// than truncate it, or an event a command reported would disappear.
-func TestAppendKeepsACompleteRecordThatLostItsNewline(t *testing.T) {
-	p := initProject(t)
-	a := testActor(t, "sa")
-	first := writeEvents(t, p, a, 2, "")
-
-	path := filepath.Join(p.EventsDir(), LogName(a))
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read the log: %v", err)
-	}
-	if err := os.WriteFile(path, bytes.TrimRight(raw, "\n"), 0o644); err != nil {
-		t.Fatalf("rewrite the log: %v", err)
-	}
-
-	second := writeEvents(t, p, a, 1, first[len(first)-1].ID)
-
-	got, err := Load(p)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if want := len(first) + len(second); len(got.Events) != want {
-		t.Fatalf("loaded %d events, want %d", len(got.Events), want)
-	}
-	if len(got.Torn) != 0 {
-		t.Fatalf("Torn = %v, want none", got.Torn)
-	}
-}
-
-// Append reports its net effect on the file size, which is how a session tells
-// its own write from someone else's.
-func TestAppendReportsHowMuchTheLogGrew(t *testing.T) {
-	p := initProject(t)
-	a := testActor(t, "sa")
-	path := filepath.Join(p.EventsDir(), LogName(a))
-
-	size := func() int64 {
-		info, err := os.Stat(path)
-		if err != nil {
-			return 0
-		}
-		return info.Size()
-	}
-	appendOne := func() {
-		t.Helper()
-		before := size()
-		e := event.Event{ID: ulid.NewGenerator().New(), Action: event.AddNote, Payload: event.Payload{ID: "n", Title: "t"}}
-		grew, err := Append(p, a, []event.Event{e})
+func encode(t *testing.T, events ...event.Event) string {
+	t.Helper()
+	var b strings.Builder
+	for _, e := range events {
+		line, err := event.Encode(e)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := size() - before; got != grew {
-			t.Fatalf("Append reported %d bytes, the file grew by %d", grew, got)
-		}
+		b.Write(line)
+		b.WriteByte('\n')
 	}
-
-	appendOne() // creates the file
-	appendOne()
-	tornWrite(t, p, a)
-	appendOne() // removes the torn tail first
+	return b.String()
 }
 
-func TestSnapshotNoticesAWrite(t *testing.T) {
-	p := initProject(t)
-	a := testActor(t, "sa")
-	writeEvents(t, p, a, 1, "")
-
-	before := Snap(p)
-	if !before.Equal(Snap(p)) {
-		t.Fatal("two snapshots of an unchanged project differ")
+// legacyEvents is a small project written by two authors over two hours.
+func legacyEvents(alice, bob Actor) (ws, task string, byAlice, byBob []event.Event) {
+	g := ulid.NewGeneratorAt(func() time.Time { return clock })
+	later := ulid.NewGeneratorAt(func() time.Time { return clock.Add(2 * time.Hour) })
+	ws, nb, task := g.New(), g.New(), g.New()
+	byAlice = []event.Event{
+		{ID: g.New(), Action: event.InitWorkspace, Payload: event.Payload{ID: ws, Name: "old", Rank: rank.Mid()}},
+		{Action: event.CreateContributor, Payload: event.Payload{ID: alice.ID, Name: "alice"}},
+		{Action: event.AddNotebook, Payload: event.Payload{ID: nb, Parent: ws, Name: "work", Rank: rank.Mid()}},
+		{Action: event.AddTask, Payload: event.Payload{ID: task, Parent: nb, Title: "fix the lexer", Rank: rank.Mid()}},
 	}
-	writeEvents(t, p, testActor(t, "bob"), 1, "")
-	if before.Equal(Snap(p)) {
-		t.Fatal("a new author's log did not change the snapshot")
+	for i := 1; i < len(byAlice); i++ {
+		byAlice[i].ID, byAlice[i].Ref = g.New(), byAlice[i-1].ID
+	}
+	byBob = []event.Event{
+		{ID: later.New(), Ref: byAlice[len(byAlice)-1].ID, Action: event.CreateContributor, Payload: event.Payload{ID: bob.ID, Name: "bob"}},
+	}
+	byBob = append(byBob, event.Event{ID: later.New(), Ref: byBob[0].ID, Action: event.EditTitle, Payload: event.Payload{ID: task, Title: "fix the lexer properly"}})
+	return ws, task, byAlice, byBob
+}
+
+func TestLegacyProjectIsImportedOnceWithItsHistory(t *testing.T) {
+	root := t.TempDir()
+	dir := legacyProject(t, root, `{"name":"old","created":"2026-08-01T00:00:00Z"}`)
+	alice, bob := testActor(t, "alice"), testActor(t, "bob")
+	_, task, byAlice, byBob := legacyEvents(alice, bob)
+
+	future := `{"v":1,"id":"` + ulid.NewGenerator().New() + `","a":"teleport.node"}` + "\n"
+	writeFile(t, filepath.Join(dir, alice.ID+".alice"+LogExt), encode(t, byAlice...)+"\n  \n"+future)
+	writeFile(t, filepath.Join(dir, strings.ToLower(bob.ID)+".b.o.b"+LogExt), encode(t, byBob...)+`{"v":1,"id":"01M0TORN`)
+	writeFile(t, filepath.Join(dir, "README.md"), "not a log")
+	writeFile(t, filepath.Join(dir, "scratch"+LogExt), `{"v":1,"id":"x"}`)
+
+	p := discover(t, root)
+	imp := p.Imported
+	if imp == nil || imp.Events != 6 || imp.Unknown != 1 || imp.Unapplied != 0 || imp.From != dir {
+		t.Fatalf("Imported = %+v, want 6 events and 1 unknown from %s", imp, dir)
+	}
+	if len(imp.Torn) != 1 || !strings.HasPrefix(imp.Torn[0], strings.ToLower(bob.ID)) {
+		t.Fatalf("Torn = %v, want bob's log", imp.Torn)
+	}
+	if p.Config.Name != "old" || p.Config.Created != "2026-08-01T00:00:00Z" {
+		t.Fatalf("Config = %+v, want the legacy descriptor", p.Config)
+	}
+
+	st, _ := state.Build(loadRows(t, p).Nodes, loadRows(t, p).Contributors)
+	if n := st.Get(task); n == nil || n.Title != "fix the lexer properly" || n.UpdatedBy != bob.ID {
+		t.Fatalf("imported task = %+v", n)
+	}
+	changes, err := History(p, task, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := changes[len(changes)-1]
+	if last.Field != "title" || last.Author != bob.ID || !last.At.Equal(clock.Add(2*time.Hour)) {
+		t.Fatalf("last change = %+v, want bob's rename at its own time", last)
+	}
+
+	if again := discover(t, root); again.Imported != nil {
+		t.Fatal("the legacy logs were imported a second time")
+	}
+	external(t, p, `DELETE FROM tags; DELETE FROM links; DELETE FROM assignees; DELETE FROM nodes`)
+	if again := discover(t, root); again.Imported != nil {
+		t.Fatal("emptying the database brought the legacy logs back")
+	}
+	if _, err := os.Stat(filepath.Join(dir, alice.ID+".alice"+LogExt)); err != nil {
+		t.Fatalf("the legacy log was removed: %v", err)
+	}
+}
+
+func TestLegacyEventsRootIsHonoured(t *testing.T) {
+	root := t.TempDir()
+	legacyProject(t, root, `{"name":"old","eventsRoot":"../elsewhere"}`)
+	a := testActor(t, "sa")
+	_, _, byAlice, _ := legacyEvents(a, a)
+	writeFile(t, filepath.Join(root, "elsewhere", legacyEventsDir, a.ID+".sa"+LogExt), encode(t, byAlice...))
+
+	if p := discover(t, root); p.Imported == nil || p.Imported.Events != len(byAlice) {
+		t.Fatalf("Imported = %+v, want the relocated logs", p.Imported)
+	}
+}
+
+// A record damaged anywhere but the end refuses the import, and the failed
+// import leaves nothing behind that would stop a retry.
+func TestLegacyCorruptRecordRefusesTheImportUntilFixed(t *testing.T) {
+	root := t.TempDir()
+	dir := legacyProject(t, root, `{"name":"old"}`)
+	a := testActor(t, "sa")
+	_, _, byAlice, _ := legacyEvents(a, a)
+	log := filepath.Join(dir, a.ID+".sa"+LogExt)
+	lines := encode(t, byAlice...)
+	writeFile(t, log, strings.Replace(lines, "\n", "\n{ not json\n", 1))
+
+	if _, err := Discover(root); err == nil || !strings.Contains(err.Error(), ":2:") {
+		t.Fatalf("Discover = %v, want an error naming line 2", err)
+	}
+	writeFile(t, log, lines)
+	if p := discover(t, root); p.Imported == nil || p.Imported.Events != len(byAlice) {
+		t.Fatalf("Imported = %+v after the fix", p.Imported)
+	}
+}
+
+func TestParseLogName(t *testing.T) {
+	a := testActor(t, "sa")
+	for _, name := range []string{
+		a.ID + ".sa" + LogExt,
+		a.ID + ".j.-r.-hacker" + LogExt,
+		strings.ToLower(a.ID) + ".sa" + LogExt,
+	} {
+		if got, ok := ParseLogName(name); !ok || got != a.ID {
+			t.Errorf("ParseLogName(%q) = %q, %v; want %q", name, got, ok, a.ID)
+		}
+	}
+	for _, in := range []string{"notes.md", "README", "events.jsonl", "backup.jsonl~", ".jsonl"} {
+		if _, ok := ParseLogName(in); ok {
+			t.Errorf("ParseLogName(%q) accepted a non-log", in)
+		}
 	}
 }
 

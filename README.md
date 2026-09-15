@@ -1,8 +1,10 @@
 # gnotes
 
-Git-backed notes and tasks, kept in the repository they belong to.
+Notes and tasks for one person, kept in a SQLite database in the repository they belong to.
 
-gnotes stores everything as an append-only event log inside your project. Every view is replayed from that log, which means the full history is always recoverable, edits made on several machines merge without conflicts, and you can look at the project as it stood at any past moment.
+gnotes stores everything in `.gnotes/gnotes.db`, which you commit like any other file. Notes and tasks are rows with typed columns, so any SQLite client can read, query and edit them. Every change, including one made outside gnotes, is recorded, so you can look at the project as it stood at any past moment.
+
+It is built for one user. git cannot merge two copies of a database file, so edits made on two machines without committing in between cannot be combined.
 
 Notes and tasks are distinct kinds sharing one tree. A note has a title, a markdown body and tags. A task has those plus a status, a priority, a due date and assignees. They sit side by side in a notebook, in whatever order you put them.
 
@@ -38,14 +40,14 @@ gnotes                            # open the interactive interface
 
 ```sh
 gnotes -g init                    # a project of your own, in ~/notes
-gnotes -g init ~/sync/notes       # or wherever you choose
+gnotes -g init ~/work/notes       # or wherever you choose
 gnotes -g task "renew passport"   # from any directory
 gnotes -g                         # the interactive interface, on global notes
 ```
 
 Global notes belong to you, not to a repository. Only a leading `-g` reaches them. Without it, a command outside a project fails as before, so a note run in the wrong directory never lands in global notes.
 
-The global notes are an ordinary project. `gnotes -g sync` works once the directory is a git repository; `-g init` does not create one. On a second machine, clone the repository and run `gnotes -g init <clone>`. A second `-g init` prints the recorded location, which is kept in `global.json` beside your identity.
+The global notes are an ordinary project, in `.gnotes/gnotes.db` under the directory given. A second `-g init` prints the recorded location, which is kept in `global.json` beside your identity.
 
 ## The browser view
 
@@ -53,7 +55,7 @@ The global notes are an ordinary project. `gnotes -g sync` works once the direct
 gnotes serve
 ```
 
-Opens a three-pane page in your browser: notebooks, entries, and one entry in full. It refreshes by itself when you write from the command line, from the terminal interface, or when a sync pulls in someone else's work.
+Opens a three-pane page in your browser: notebooks, entries, and one entry in full. It refreshes by itself when you write from the command line, from the terminal interface, or from an agent.
 
 `--no-open` prints the address without opening anything. No browser is launched where there is evidently no desktop to launch it on — over SSH, under a CI runner, or on a Unix session with no display server — since it would otherwise open on the wrong machine or hang on a headless one. `--open` forces the attempt anyway.
 
@@ -61,7 +63,7 @@ The whole page is compiled into the binary, so there is nothing to install and i
 
 The address gnotes prints carries an access token, and the API will not answer without it. That token, not the loopback binding, is the protection: any page open in your browser can make requests to `127.0.0.1`, so without a secret one of them could read and rewrite your notes. Because the page reads the token from its own URL and sends it in a header, a script on another origin cannot obtain it.
 
-The detail pane ends with the events that produced the entry you are looking at. Nothing here stores a note; a note is the sum of those lines, and the page says so rather than hiding it.
+The detail pane ends with the recorded changes to the entry you are looking at.
 
 ```
 3S2YEP  fix the lexer
@@ -71,11 +73,11 @@ STATUS    open        TAGS  #bug ×  #parser ×  + tag
 PRIORITY  high
 DUE       2026-08-21
 
-HISTORY · 7 EVENTS
-3S2YEQ  add.task                    Aug 17, 01:51 PM
-QVMFXR  add.tag bug                 Aug 17, 01:51 PM
-WPN5G1  set.due 2026-08-21          Aug 17, 01:51 PM
-MZGDN3  link.node design sketch     Aug 17, 01:52 PM
+HISTORY · 4 CHANGES
+12      add.task                    Aug 17, 01:51 PM
+18      set.due 2026-08-21          Aug 17, 01:51 PM
+19      add.tag bug                 Aug 17, 01:51 PM
+23      link.node design sketch     Aug 17, 01:52 PM
 ```
 
 `j` `k` move, `/` searches, `n` and `t` create, `space` toggles a task, `u` undoes the last delete, `esc` steps back out.
@@ -89,7 +91,7 @@ claude mcp add gnotes -- gnotes mcp
 claude mcp add gnotes-global -- gnotes -g mcp   # the global notes
 ```
 
-Registers the project with Claude Code over the Model Context Protocol. The agent gets eight tools — list, search, get, create, update, delete, restore and sync — and the same rules as every other view: task fields are refused on notes, an ambiguous reference lists the candidates rather than guessing, and deletion is recoverable.
+Registers the project with Claude Code over the Model Context Protocol. The agent gets seven tools — list, search, get, create, update, delete and restore — and the same rules as every other view: task fields are refused on notes, an ambiguous reference lists the candidates rather than guessing, and deletion is recoverable.
 
 Entries are addressed by the same six-character handle the command line prints, so a handle you read in your terminal can be pasted straight to the agent.
 
@@ -138,15 +140,12 @@ gnotes mv lexer --top                       # or --bottom, --before X, --after X
 gnotes rm lexer                gnotes restore lexer
 ```
 
-History and sync:
+History and other views:
 
 ```sh
-gnotes log                                  # the raw events
+gnotes log                                  # the recorded changes
 gnotes ls --at 2026-08-01                   # the project as it stood at the start of that day
 gnotes ls --at 3d
-gnotes sync                                 # commit the logs to git
-gnotes sync --push                          # and exchange with origin
-gnotes export | sqlite3 notes.db            # the project as a SQL database
 gnotes serve                                # the browser view
 gnotes serve --no-open                      # just print the address
 gnotes mcp                                  # serve to an agent (clients run this)
@@ -158,32 +157,49 @@ Add `--json` to `ls`, `show` or `search` for machine-readable output.
 
 ## SQL
 
-```sh
-gnotes export | sqlite3 notes.db
-```
-
-Renders the whole project as a SQL script: the tree, the tags and links, the raw event log, a full-text index, and a history table holding every value each field has ever held. Anything that reads SQLite can then read your notes.
+The database is the project; there is nothing to export.
 
 ```sh
-sqlite3 notes.db "SELECT title, due FROM nodes WHERE status = 'open'"
-duckdb -c "ATTACH 'notes.db' AS n (TYPE sqlite); SELECT * FROM n.events"
+sqlite3 .gnotes/gnotes.db "SELECT title, due FROM nodes WHERE status = 'open' AND deleted_at IS NULL"
+duckdb -c "ATTACH '.gnotes/gnotes.db' AS n (TYPE sqlite); SELECT tag, count(*) FROM n.tags GROUP BY tag"
 ```
 
-This is for the questions the command line cannot ask. Which tags occur together, how long tasks take from creation to done, who has been writing and when. The history table makes one more possible: the project as it stood at any past event, as an index lookup rather than a replay.
+| table | holds |
+|---|---|
+| `nodes` | the workspace, notebooks, notes and tasks: `kind`, `parent`, `rank`, `title`, `body`, `status`, `priority`, `due`, `deleted_at`, and who created and last changed each |
+| `tags`, `links`, `assignees` | one row per tag, link and assignee |
+| `contributors` | the people who have written |
+| `changes` | every change to the tables above: `at`, `author`, `node`, `field`, `old_value`, `new_value` |
+| `nodes_fts` | the FTS5 full-text index over titles, bodies and tags |
+
+Triggers keep `changes` and `nodes_fts` current, whichever client writes. The schema refuses what the tree cannot hold, such as a status on a note. A row that breaks the tree another way, such as a note inside a note, is reported and left out.
 
 ```sql
-SELECT node, value AS title FROM node_history
- WHERE field = 'title'
-   AND from_seq <= 120 AND (to_seq IS NULL OR to_seq > 120);
+-- how long each task took from creation to done
+SELECT n.title, julianday(c.at) - julianday(n.created_at) AS days
+  FROM nodes n JOIN changes c ON c.node = n.id AND c.field = 'status' AND c.new_value = 'done';
+
+-- ranked full-text search
+SELECT n.title FROM nodes_fts JOIN nodes n ON n.num = nodes_fts.rowid
+ WHERE nodes_fts MATCH 'lexer' ORDER BY bm25(nodes_fts, 8.0, 1.0, 5.0);
 ```
 
-The script is emitted rather than the database, so gnotes carries no database driver: the command costs 65 KB of binary where a driver would have cost several megabytes, more than the browser view. The script ends with worked queries for each of the above.
+A running `gnotes serve` or terminal interface picks up an outside edit within a second. The edit is recorded with no author.
 
-The database is derived and disposable. The event logs stay the only source of truth, a stale copy is fixed by exporting again, and exporting the same log twice produces the same bytes. `--no-history` drops the point-in-time table; `--no-fts` drops the index, for a SQLite built without FTS5.
+### Diffs
+
+git sees `gnotes.db` as binary. `.gnotes/.gitattributes` assigns it a diff driver named `gnotes`, and git config defines the driver, once per machine:
+
+```sh
+git config --global diff.gnotes.textconv \
+  'echo .dump meta contributors nodes tags links assignees changes | sqlite3 -readonly'
+```
+
+`git diff`, `git log -p` and `git show` then print the changed rows as SQL. The full-text index is left out of the dump, since its rows are binary. Without the setting, or without `sqlite3` on the path, git falls back to "Binary files differ".
 
 ## The interactive interface
 
-Run `gnotes` with no arguments. Notebooks on the left, their notes and tasks on the right. Writes from the command line, the browser, an agent or a sync appear within a second.
+Run `gnotes` with no arguments. Notebooks on the left, their notes and tasks on the right. Writes from the command line, the browser or an agent appear within a second.
 
 | key | |
 |---|---|
@@ -199,45 +215,37 @@ Run `gnotes` with no arguments. Notebooks on the left, their notes and tasks on 
 | `:` | command line, with history and tab completion |
 | `?` | full key reference |
 
-`:filter kind task`, `:filter status open`, `:sort due`, `:sync push` and `:help` are the commands you will reach for most. `esc` clears the search, then the filter.
+`:filter kind task`, `:filter status open`, `:sort due` and `:help` are the commands you will reach for most. `esc` clears the search, then the filter.
 
 ## How it works
 
 The design follows [epiq](https://github.com/ljtn/epiq), a git-backed issue tracker, reimplemented in Go for notes and tasks.
 
-**Everything is an event.** `.gnotes/events/<your-id>.<your-name>.jsonl` holds one JSON object per line, appended and never rewritten. Deleting a note appends a deletion; it does not remove anything.
+**The tables are the notes.** A command changes the in-memory tree first, checked against the rules: a task field on a note is refused, a notebook cannot nest. Commit then writes the rows that changed, in one transaction. A command that fails partway writes nothing.
 
-```json
-{"v":1,"id":"01M07S0S1X…","ref":"01M07S0S1M…","a":"add.notebook","node":"01M07S…","parent":"01M07S…","rank":"7fffffffffffffffffffffff","name":"work"}
-```
+**History is recorded by triggers.** Each changed field becomes one row in `changes`. A write from gnotes is dated by the session's clock and carries your id; a write from any other client is dated by the wall clock. Nothing depends on gnotes being the writer.
 
-**One file per author, so git never conflicts.** Two people working offline append to different paths, so a merge is a union of files rather than a textual conflict. One person on two machines does append to one file; the logs carry a `merge=union` git attribute, so a merge keeps the lines of both sides, and replay orders them.
+**The file is complete after every write.** The database uses a rollback journal rather than WAL, so there is no second file holding recent writes. What you commit is what you have. `.gnotes/.gitignore` keeps out the journal, which exists only during a write.
 
-**Causal ordering, not timestamps.** Every event names the last event its author had seen. Those references form a tree, and a depth-first walk of it — with siblings ordered by ULID — produces one canonical sequence that every machine agrees on. Sorting by wall clock would not: two machines with skewed clocks would replay the same data differently. The references make the order a property of the data.
+**Projects from before the database are imported.** A `.gnotes/events` directory of JSONL logs is replayed into the tables the first time it opens, each change dated by its original event, so history survives. The logs are left in place, for you to remove.
 
-Two edits to the same field resolve by that order, not by when each was made: a branch replays whole before a sibling branch that started later. Work written offline for a long time, starting before someone else's, therefore loses its conflicts with theirs, even for edits made after.
+**Fractional ranks.** Sibling order is a fixed-width 96-bit hex string, so comparing two of them is a string comparison and inserting between two is a midpoint. When repeated insertion at one spot exhausts the space, every sibling is respaced.
 
-**Fractional ranks.** Sibling order is a fixed-width 96-bit hex string, so comparing two of them is a string comparison and inserting between two is a midpoint. When repeated insertion at one spot exhausts the space, a rebalance event respaces every sibling — recorded, so every machine arrives at the same ranks.
+**Time travel replays `changes`.** `ls --at` folds the changes up to a cutoff into the rows as they stood then.
 
-**Time travel is free.** An event id is a ULID, so it carries its own timestamp. Viewing the past means replaying the events before a cutoff. Nothing is stored for it. An event dated later than your clock came from a machine whose clock was wrong; it is dated by the first event written after it, so it cannot hide later history.
+**Search is FTS5.** Every word must match and the last matches by prefix, so a partly typed word narrows results. A title containing the whole query ranks first, then BM25 with titles weighted 8, tags 5 and bodies 1. Typed text is quoted, so `c++` or `foo-bar` is searched as words rather than read as query syntax.
 
-**Search is rebuilt, not maintained.** The inverted index is built from the tree at startup, in a few milliseconds. An index on disk would be one more thing to invalidate on sync and merge between machines.
+**The browser page keeps no model.** Every change is a request, and the server answers with the state to render. Holding a local copy in step with a database written by four front ends is exactly the class of bug that avoids.
 
-**The browser page keeps no model.** Every change is a request, and the server answers with the state to render. Holding a local copy in step with an append-only log written by four front ends and by other machines is exactly the class of bug that avoids.
-
-**Every front end is a shell over one write path.** The command line, the terminal interface, the browser and the agent all call the same session layer, which is the only place that mints events, chains their references and resolves ranks. A rule added there holds everywhere at once; a rule added in a front end would hold in one place and quietly not in the other three.
+**Every front end is a shell over one write path.** The command line, the terminal interface, the browser and the agent all call the same session layer, which is the only place that mints ids, checks the rules and resolves ranks. A rule added there holds everywhere at once; a rule added in a front end would hold in one place and quietly not in the other three.
 
 ### Differences from epiq
 
 - **Domain**: notebooks holding notes and tasks as peers, rather than boards, swimlanes and issues.
 
-- **Wire format**: the action is a fixed field and the payload is inlined, rather than the action being the payload's key. epiq's shape forces a map decode on every line just to discover which action it is; this one decodes into a single struct in one pass.
+- **Tags are plain strings**, not registry entries with ids. A registry buys renaming a tag everywhere at once, which is not worth a layer of indirection. Contributors do keep a registry, because their identity has to outlive their display name.
 
-- **Tags are plain strings**, not registry entries with ids. A registry buys renaming a tag everywhere at once, which is not worth an extra event and a layer of indirection. Contributors do keep a registry, because their identity has to outlive their display name.
-
-- **State lives on your working branch** by default, so notes travel with the code and appear in your diffs. `eventsRoot` in `.gnotes/project.json` is the seam for moving them into a worktree on a separate branch later.
-
-- **Sync is explicit about the remote.** `gnotes sync` commits only the `.gnotes` paths, leaving whatever you have staged untouched. Pulling and pushing needs `--push`, because the logs are on your working branch and moving it is your decision.
+- **Storage is a database, not a log.** epiq's append-only logs merge across authors; gnotes keeps typed rows for one user, and gives up that merge.
 
 - **The browser view is one page of vanilla HTML, CSS and JavaScript** with no build step and no framework, pushed live over server-sent events rather than a websocket. The traffic is one-way and tiny, and the browser reconnects on its own.
 
@@ -245,18 +253,22 @@ Two edits to the same field resolve by that order, not by when each was made: a 
 
 ### Performance
 
-Measured on an M-series laptop.
+Old JSONL build against the SQLite build, on the same projects: each task has a body, two tags and a priority, five events as JSONL. Median of 50 runs, process start included, on a 16-thread Linux machine.
 
-| | |
-|---|---|
-| load and replay 20,000 events | 17 ms |
-| canonical sort, 100,000 events | 14 ms |
-| build the search index, 400,000 tokens | 23 ms |
-| decode one event | 1.7 µs, 11 allocations |
-| binary, everything | 7.4 MB |
-| binary, `-tags noweb` | 4.2 MB |
+| tasks | `ls` JSONL / SQLite | `search` | `show` | `note` | on disk |
+|---|---|---|---|---|---|
+| 5 | 2.9 / 4.1 ms | 3.2 / 4.4 ms | 3.0 / 4.3 ms | 3.6 / 6.8 ms | 6 KB / 116 KB |
+| 100 | 4.0 / 4.8 ms | 4.4 / 5.2 ms | 3.9 / 4.8 ms | 4.6 / 7.9 ms | 120 KB / 472 KB |
+| 500 | 9.4 / 7.9 ms | 10.9 / 8.3 ms | 9.2 / 7.2 ms | 10.0 / 10.3 ms | 572 KB / 1.9 MB |
+| 1,000 | 15.4 / 13.2 ms | 18.0 / 13.2 ms | 14.6 / 11.5 ms | 15.1 / 14.9 ms | 1.1 MB / 3.7 MB |
+| 5,000 | 65.3 / 45.4 ms | 77.4 / 45.2 ms | 59.9 / 39.4 ms | 64.2 / 43.2 ms | 5.6 MB / 18.7 MB |
 
-Author logs are parsed in parallel; the canonical sort works in place; the tokenizer hands back substrings of the input rather than allocating per word.
+Reads cross over between 100 and 500 tasks. Writes are within 3% of each other at 500 and 1,000 tasks, and faster in SQLite at 5,000. Below 1,000 tasks the two differ by at most 3.3 ms. SQLite writes sync to disk (`synchronous=FULL`); the JSONL build did not. git stores the full database file in each commit that changes it.
+
+| binary | JSONL | SQLite |
+|---|---|---|
+| everything | 8.9 MB | 12.8 MB |
+| `-tags noweb` | 5.2 MB | 9.2 MB |
 
 ## Development
 

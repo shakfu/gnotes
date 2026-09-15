@@ -1,9 +1,9 @@
-// Package state turns an ordered event log into the tree of notebooks, notes
-// and tasks that the rest of gnotes reads.
+// Package state holds the tree of notebooks, notes and tasks that the rest of
+// gnotes reads, and the rules for changing it.
 //
-// Nothing here is persisted. Materialize is a pure function of the events it
-// is given, which is what makes viewing the project as it stood at a past
-// moment a matter of replaying a prefix rather than storing snapshots.
+// Build assembles a tree from stored rows. Apply changes it by one operation,
+// checked against the rules, and TakeChanged reports what to write. Nothing
+// here touches the database.
 package state
 
 import (
@@ -156,17 +156,18 @@ type Node struct {
 	// Body is markdown content. Notebooks and the workspace leave it empty.
 	Body string
 
-	// Deleted marks a node removed. The node stays in the tree because
-	// deletion is a forward event, not a rewrite: the log still contains
-	// everything that ever referred to it, and a restore has to be able to put
-	// it back.
+	// Deleted marks a node removed. The node stays in the tree so that a
+	// restore can put it back.
 	Deleted bool
 
-	// deletedBy is the delete event that tombstoned this node, directly or by
-	// deleting its parent. A restore brings back only the nodes its matching
-	// delete took, so an entry deleted on its own stays deleted when its
-	// notebook is restored.
-	deletedBy string
+	// DeletedAt is when the node was deleted, zero while it is live.
+	DeletedAt time.Time
+
+	// Deletion identifies the delete that removed this node, directly or with
+	// its notebook. A restore brings back only the nodes its matching delete
+	// took, so an entry deleted on its own stays deleted when its notebook is
+	// restored.
+	Deletion string
 
 	// Tags are normalised tag strings, sorted and deduplicated.
 	Tags []string

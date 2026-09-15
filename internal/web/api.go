@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/event"
-	"github.com/shakfu/gnotes/internal/gitsync"
 	"github.com/shakfu/gnotes/internal/rank"
 	"github.com/shakfu/gnotes/internal/search"
 	"github.com/shakfu/gnotes/internal/state"
@@ -57,7 +55,7 @@ type nodeJSON struct {
 }
 
 // linkJSON is one end of a cross-reference. A link may point at a node that
-// has not synced yet, which the page renders differently rather than hiding.
+// no longer exists, which the page renders differently rather than hiding.
 type linkJSON struct {
 	ID      string `json:"id"`
 	Ref     string `json:"ref"`
@@ -165,7 +163,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 
 	out := stateJSON{
 		Project:  s.sess.Project.Config.Name,
-		Location: s.sess.Project.Dir,
+		Location: s.sess.Project.Path,
 		Version:  s.version.Load(),
 		Me:       s.sess.Actor.Name,
 	}
@@ -198,11 +196,14 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		// in is the usual reason to search for it, so the notebook constraint
 		// is deliberately dropped.
 		filter.Notebook = ""
-		index := search.Build(st.List(state.Filter{IncludeDeleted: filter.IncludeDeleted}, state.OrderRank))
-
-		for _, res := range index.Search(query, intParam(r, "limit", 200)) {
-			if matches(res.Node, filter, now) {
-				nodes = append(nodes, res.Node)
+		results, err := s.sess.Search(query, intParam(r, "limit", 200), filter.IncludeDeleted)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		for _, n := range results {
+			if matches(n, filter, now) {
+				nodes = append(nodes, n)
 			}
 		}
 	} else {
@@ -342,11 +343,7 @@ type detailJSON struct {
 	History   []eventJSON `json:"history"`
 }
 
-// eventJSON is one log entry that touched a node.
-//
-// The page shows these because they are what a note actually is: gnotes stores
-// no record of a note, only the events that add up to one. Every other view
-// hides that; this is the one place it is worth showing.
+// eventJSON is one history line for a node.
 type eventJSON struct {
 	Ref    string `json:"ref"`
 	Action string `json:"action"`
@@ -355,55 +352,28 @@ type eventJSON struct {
 	By     string `json:"by"`
 }
 
-// history returns the events that touched a node, oldest first. It is never
+// history returns the changes that touched a node, oldest first. It is never
 // nil, so the page can iterate it without a guard.
-func (s *Server) history(n *state.Node) []eventJSON {
+func (s *Server) history(n *state.Node) ([]eventJSON, error) {
+	entries, err := s.sess.History(n.ID, 0)
+	if err != nil {
+		return nil, err
+	}
 	out := []eventJSON{}
-
-	for _, e := range s.sess.Log() {
-		p := e.Payload
-		if p.ID != n.ID && p.Parent != n.ID && p.Target != n.ID {
-			continue
-		}
-		at, err := ulid.Timestamp(e.ID)
-		if err != nil {
-			continue
+	for _, e := range entries {
+		detail := e.Detail
+		if detail == n.Title {
+			detail = ""
 		}
 		out = append(out, eventJSON{
-			Ref:    ulid.Short(e.ID, refLen),
-			Action: string(e.Action),
-			Detail: describe(s.sess.State, p, n.Title),
-			At:     at.UTC().Format(time.RFC3339),
-			By:     s.sess.State.Contributor(e.UserID),
+			Ref:    fmt.Sprint(e.Seq),
+			Action: e.Action,
+			Detail: detail,
+			At:     e.At.UTC().Format(time.RFC3339),
+			By:     e.Author,
 		})
 	}
-	return out
-}
-
-// describe summarises the value an event set, skipping anything the row
-// already says.
-func describe(st *state.State, p event.Payload, subject string) string {
-	var parts []string
-
-	for _, v := range []string{p.Name, p.Title, p.Status, p.Priority, p.Due, p.Tag} {
-		if v != "" && v != subject {
-			parts = append(parts, v)
-		}
-	}
-	if p.Body != "" {
-		parts = append(parts, fmt.Sprintf("%d bytes", len(p.Body)))
-	}
-	if p.Assignee != "" {
-		parts = append(parts, st.Contributor(p.Assignee))
-	}
-	if p.Target != "" {
-		if target := st.Get(p.Target); target != nil {
-			parts = append(parts, target.Title)
-		} else {
-			parts = append(parts, ulid.Short(p.Target, refLen))
-		}
-	}
-	return strings.Join(parts, " ")
+	return out, nil
 }
 
 // handleNode returns one node in full.
@@ -417,11 +387,16 @@ func (s *Server) handleNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	history, err := s.history(n)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	out := detailJSON{
 		Node:      toNode(s.sess.State, n, s.sess.Now(), true),
 		Path:      s.sess.State.Path(n),
 		Backlinks: []linkJSON{},
-		History:   s.history(n),
+		History:   history,
 	}
 	for _, b := range s.sess.State.Backlinks(n.ID) {
 		out.Backlinks = append(out.Backlinks, linkJSON{ID: b.ID, Ref: ulid.Short(b.ID, refLen), Title: b.Title})
@@ -442,13 +417,13 @@ func (s *Server) mutate(w http.ResponseWriter, action func() (any, error)) {
 
 	if _, err := s.sess.Refresh(); err != nil {
 		s.mu.Unlock()
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("the event log could not be read: %w", err))
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("the database could not be read: %w", err))
 		return
 	}
 
 	result, err := action()
 	if err != nil {
-		// Nothing reached disk, but the in-memory tree may hold events staged
+		// Nothing reached disk, but the in-memory tree may hold operations staged
 		// before the failure, so the staging is dropped rather than left to be
 		// written by whichever request commits next.
 		s.sess.Rollback()
@@ -762,60 +737,6 @@ func (s *Server) handleLinkNode(w http.ResponseWriter, r *http.Request) {
 			return nil, err
 		}
 		return map[string]string{"id": from.ID}, s.sess.Link(from, to)
-	})
-}
-
-// syncRequest asks for a git sync.
-type syncRequest struct {
-	Push bool `json:"push"`
-}
-
-// handleSync commits the logs and optionally exchanges with the remote.
-func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
-	var req syncRequest
-	if err := decode(r, &req); err != nil {
-		writeError(w, statusFor(err), err)
-		return
-	}
-
-	if !s.syncing.TryLock() {
-		writeError(w, http.StatusConflict, errors.New("a sync is already running"))
-		return
-	}
-	defer s.syncing.Unlock()
-
-	s.mu.Lock()
-	message := fmt.Sprintf("gnotes: %d events", len(s.sess.Log()))
-	project := s.sess.Project
-	s.mu.Unlock()
-
-	// Outside the lock: a push contacts the network and can take seconds, and
-	// holding the session for that long would stall every other request.
-	res, err := gitsync.Sync(project, message, gitsync.Options{Push: req.Push, Unattended: true})
-	if err != nil {
-		if res.Committed {
-			err = fmt.Errorf("committed on %s, then: %w", res.Branch, err)
-		}
-		// git failed, not the request, which was well formed.
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	// A pull may have brought in another machine's events.
-	s.mu.Lock()
-	if err := s.sess.Reload(); err != nil {
-		s.mu.Unlock()
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	s.mu.Unlock()
-	s.bump()
-
-	writeJSON(w, map[string]any{
-		"committed": res.Committed,
-		"pulled":    res.Pulled,
-		"pushed":    res.Pushed,
-		"branch":    res.Branch,
 	})
 }
 

@@ -566,7 +566,7 @@ function detailFor({ node, path, backlinks, history }) {
     frag.append(section("Referenced by", linkList(backlinks)));
   }
   if (history?.length) {
-    frag.append(section(`History · ${history.length} events`, historyList(history)));
+    frag.append(section(`History · ${history.length} changes`, historyList(history)));
   }
 
   frag.append(footFor(node));
@@ -718,11 +718,11 @@ function linkList(links, fromID) {
     li.append(ref);
 
     if (link.pending) {
-      // A link may point at something written on another machine that has not
-      // synced yet. Saying so beats hiding it or showing a broken row.
+      // A link may name an entry that no longer exists. Saying so beats hiding
+      // it or showing a broken row.
       const pending = document.createElement("span");
       pending.className = "is-pending";
-      pending.textContent = "not synced yet";
+      pending.textContent = "missing";
       li.append(pending);
     } else {
       const open = document.createElement("button");
@@ -870,7 +870,7 @@ async function create(kind) {
 /* -------------------------------------------------------------- events */
 
 // The server pushes a version number whenever the project changes, including
-// when the change came from the command line or from another machine's sync.
+// when the change came from the command line, the terminal interface or an agent.
 function watch() {
   const stream = new EventSource(`/api/events?token=${encodeURIComponent(TOKEN)}`);
 
@@ -985,22 +985,6 @@ $("new-task").addEventListener("click", () => create("task"));
 $("new-notebook").addEventListener("click", async () => {
   const title = await ask("New notebook");
   if (title) run(() => api("POST", "/api/notebook", { title }), `Created ${title}`);
-});
-
-$("sync").addEventListener("click", async () => {
-  const button = $("sync");
-  button.disabled = true;
-  button.textContent = "Syncing";
-
-  try {
-    const res = await api("POST", "/api/sync", { push: false });
-    toast(res.committed ? `Committed on ${res.branch}` : "Nothing to commit");
-  } catch (err) {
-    toast(err.message, { error: true });
-  } finally {
-    button.disabled = false;
-    button.textContent = "Sync";
-  }
 });
 
 $("menu").addEventListener("click", () => {

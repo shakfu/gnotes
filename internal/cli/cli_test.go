@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shakfu/gnotes/internal/event"
+	"github.com/shakfu/gnotes/internal/rank"
 	"github.com/shakfu/gnotes/internal/store"
 	"github.com/shakfu/gnotes/internal/ulid"
 )
@@ -97,8 +99,8 @@ func (f *fixture) refOf(output string) string {
 func TestInitCreatesEverything(t *testing.T) {
 	f := newFixture(t)
 
-	if _, err := os.Stat(filepath.Join(f.dir, ".gnotes", "project.json")); err != nil {
-		t.Fatalf("no project file: %v", err)
+	if _, err := os.Stat(filepath.Join(f.dir, store.DirName, store.DBFile)); err != nil {
+		t.Fatalf("no database: %v", err)
 	}
 	out := f.mustRun("info")
 	if !strings.Contains(out, "demo") {
@@ -550,7 +552,7 @@ func TestHelp(t *testing.T) {
 	f := newFixture(t)
 
 	out := f.mustRun("help")
-	for _, want := range []string{"note", "task", "ls", "sync", "search"} {
+	for _, want := range []string{"note", "task", "ls", "log", "search"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help is missing %q", want)
 		}
@@ -730,9 +732,9 @@ func TestAmbiguousSplitsAreRefused(t *testing.T) {
 	}
 }
 
-// A title arriving through another author's synced log is untrusted. Printing
-// it must not pass terminal escape sequences or newlines through.
-func TestSyncedControlCharactersAreNotPrinted(t *testing.T) {
+// A title written by another SQLite client is untrusted. Printing it must not
+// pass terminal escape sequences or newlines through.
+func TestOutsideControlCharactersAreNotPrinted(t *testing.T) {
 	f := newFixture(t)
 	f.mustRun("note", "harmless", "-t", "x", "-m", "body")
 	id := f.showJSON("harmless")["id"].(string)
@@ -741,17 +743,8 @@ func TestSyncedControlCharactersAreNotPrinted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mallory := store.Actor{ID: ulid.NewGenerator().New(), Name: "mallory"}
-	g := ulid.NewGenerator()
-	evil := "evil\x1b]0;PWNED\x07\x1b[2J\nforged row"
-	events := []event.Event{
-		{ID: g.New(), Action: event.EditTitle, Payload: event.Payload{ID: id, Title: evil}},
-		{ID: g.New(), Action: event.EditBody, Payload: event.Payload{ID: id, Body: "line\x1b[2J\nnext"}},
-	}
-	events[1].Ref = events[0].ID
-	if _, err := store.Append(p, mallory, events); err != nil {
-		t.Fatal(err)
-	}
+	defer p.Close()
+	execSQL(t, p, `UPDATE nodes SET title = ?, body = ? WHERE id = ?`, "evil\x1b]0;PWNED\x07\x1b[2J\nforged row", "line\x1b[2J\nnext", id)
 
 	for _, args := range [][]string{{"ls"}, {"show", id[len(id)-6:]}, {"log"}, {"search", "evil"}} {
 		out := f.mustRun(args...)
@@ -846,7 +839,7 @@ func TestHelpFlagsAndUsageErrors(t *testing.T) {
 }
 
 func TestTyposGetASuggestion(t *testing.T) {
-	for typed, want := range map[string]string{"shwo": "show", "sycn": "sync", "tga": "tag"} {
+	for typed, want := range map[string]string{"shwo": "show", "sreach": "search", "tga": "tag"} {
 		if got := closest(typed); got != want {
 			t.Errorf("closest(%q) = %q, want %q", typed, got, want)
 		}
@@ -973,7 +966,7 @@ func TestGlobalInitDefaultsToHomeNotes(t *testing.T) {
 	home, _ := os.UserHomeDir()
 
 	f.mustRun("-g", "init")
-	if _, err := os.Stat(filepath.Join(home, "notes", ".gnotes", "project.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(home, "notes", store.DirName, store.DBFile)); err != nil {
 		t.Fatalf("no global project in ~/notes: %v", err)
 	}
 	if out := f.mustRun("-g", "info"); !strings.Contains(out, "global") {
@@ -998,5 +991,63 @@ func TestGlobalWithoutSetupSaysHow(t *testing.T) {
 	f := newFixture(t)
 	if _, stderr, code := f.run("-g", "ls"); code == 0 || !strings.Contains(stderr, "gnotes -g init") {
 		t.Fatalf("exit %d, stderr %q; want a pointer to -g init", code, stderr)
+	}
+}
+
+// A project from before the database is imported on first use, and says so once.
+func TestLegacyProjectIsImportedWithANotice(t *testing.T) {
+	f := newFixture(t)
+	legacy := t.TempDir()
+	events := filepath.Join(legacy, store.DirName, "events")
+	if err := os.MkdirAll(events, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, store.DirName, "project.json"), []byte(`{"name":"old"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	author := ulid.NewGenerator().New()
+	g := ulid.NewGenerator()
+	ws, nb := g.New(), g.New()
+	var log []byte
+	for _, e := range []event.Event{
+		{Action: event.InitWorkspace, Payload: event.Payload{ID: ws, Name: "old", Rank: rank.Mid()}},
+		{Action: event.CreateContributor, Payload: event.Payload{ID: author, Name: "sa"}},
+		{Action: event.AddNotebook, Payload: event.Payload{ID: nb, Parent: ws, Name: "inbox", Rank: rank.Mid()}},
+		{Action: event.AddNote, Payload: event.Payload{ID: g.New(), Parent: nb, Title: "written before the database", Rank: rank.Mid()}},
+	} {
+		e.ID = g.New()
+		line, err := event.Encode(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		log = append(append(log, line...), '\n')
+	}
+	if err := os.WriteFile(filepath.Join(events, author+".sa"+store.LogExt), log, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f.dir = legacy
+	out, stderr, code := f.run("ls")
+	if code != 0 || !strings.Contains(out, "written before the database") {
+		t.Fatalf("exit %d, stdout %q, stderr %q; want the imported note listed", code, out, stderr)
+	}
+	if !strings.Contains(stderr, "imported 4 events") {
+		t.Fatalf("stderr %q does not report the import", stderr)
+	}
+	if _, stderr, _ := f.run("ls"); strings.Contains(stderr, "imported") {
+		t.Fatalf("the second command reported the import again: %q", stderr)
+	}
+}
+
+// execSQL runs a statement as another SQLite client would.
+func execSQL(t *testing.T, p *store.Project, query string, args ...any) {
+	t.Helper()
+	db, err := sql.Open("sqlite", p.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(query, args...); err != nil {
+		t.Fatalf("%s: %v", query, err)
 	}
 }

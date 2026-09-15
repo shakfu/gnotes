@@ -1,4 +1,4 @@
-// Package display makes text from the event log safe to print to a terminal.
+// Package display makes stored text safe to print to a terminal.
 //
 // Titles, bodies, tags and names arrive from other people's logs through git,
 // so they are untrusted input. Printed raw, an escape sequence in a title can

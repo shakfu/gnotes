@@ -1,9 +1,11 @@
 // Package session is the write side of gnotes: it turns an intention like
-// "add a task to this notebook" into the events that record it.
+// "add a task to this notebook" into changes to the stored tree.
 //
-// It is the only place that mints event ids, chains references and resolves
-// ranks. Both the command line and the interactive interface go through it, so
-// the two cannot drift apart in what they write to the log.
+// A command stages operations, each applied at once to the in-memory tree and
+// checked against its rules, so a command sees its own earlier steps. Commit
+// writes the nodes those operations changed in one transaction. It is the only
+// place that mints ids and resolves ranks; every front end goes through it, so
+// none can mean something different by an operation.
 package session
 
 import (
@@ -19,44 +21,30 @@ import (
 	"github.com/shakfu/gnotes/internal/ulid"
 )
 
-// ClockTolerance is how far ahead of this machine's clock a new event may be
-// dated to keep it after the last event in the log.
-const ClockTolerance = 5 * time.Minute
-
 // Session is an open project together with the identity writing to it.
-//
-// Events are staged in memory and applied to the in-memory tree as they are
-// made, so a command that emits several events sees its own earlier ones.
-// Commit writes the batch to disk in one append, which is what makes a
-// multi-event command all-or-nothing.
 type Session struct {
 	Project *store.Project
 	Actor   store.Actor
 
-	// State is the materialized tree. It is replaced on Reload and mutated in
-	// place as events are staged.
+	// State is the tree. It is replaced on Reload and mutated in place as
+	// operations are staged.
 	State *state.State
 
-	// Problems are events that could not be applied during the last load.
+	// Problems are stored rows that did not fit the tree at the last load.
 	Problems []state.Problem
 
-	// Skipped counts events written by a newer gnotes.
-	Skipped map[event.Action]int
+	// pending counts the operations staged since the last Commit.
+	pending int
 
-	// Torn names the logs whose last record was incomplete when they were
-	// read. One event was lost from each; see store.Load.
-	Torn []string
+	// nodes, contributors and loadProblems are the stored rows as of the last
+	// load or commit, so Rollback can rebuild the tree without the database.
+	nodes        map[string]state.Node
+	contributors map[string]state.Contributor
+	loadProblems []state.Problem
 
-	// log is every event known to this session, staged ones included, in
-	// canonical order.
-	log []event.Event
-
-	// pending are the events staged since the last Commit.
-	pending []event.Event
-
-	// seen is the state of the logs on disk that the tree reflects: taken
-	// before the last successful load, and advanced past this session's own
-	// appends. Any other difference is a write by someone else.
+	// seen is the database head the tree reflects: read by the last successful
+	// load, and advanced past this session's own commits. Any other difference
+	// is a write by another process.
 	seen store.Snapshot
 
 	gen *ulid.Generator
@@ -65,8 +53,7 @@ type Session struct {
 	now func() time.Time
 }
 
-// Open discovers the project containing dir, loads its log and materializes
-// the tree.
+// Open discovers the project containing dir and loads it.
 func Open(dir string, actor store.Actor) (*Session, error) {
 	p, err := store.Discover(dir)
 	if err != nil {
@@ -86,36 +73,52 @@ func OpenProject(p *store.Project, actor store.Actor) (*Session, error) {
 	return s, s.Reload()
 }
 
-// Reload re-reads the log from disk, discarding any uncommitted events.
+// Reload re-reads the database, discarding any uncommitted operations.
 //
 // A failed load leaves the session as it was, still marked out of date, so the
 // next Refresh tries again.
 func (s *Session) Reload() error {
-	// Taken before reading, so a write that lands during the load is seen as a
-	// change next time rather than absorbed unread.
-	before := store.Snap(s.Project)
-	loaded, err := store.Load(s.Project)
+	rows, err := store.Load(s.Project)
 	if err != nil {
 		return err
 	}
-	s.seen = before
-	s.log = loaded.Events
-	s.Skipped = loaded.Skipped
-	s.Torn = loaded.Torn
-	s.pending = nil
-	s.State, s.Problems = state.Materialize(s.log)
+	s.seen = rows.Head
+	s.nodes = make(map[string]state.Node, len(rows.Nodes))
+	for _, n := range rows.Nodes {
+		s.nodes[n.ID] = n
+	}
+	s.contributors = make(map[string]state.Contributor, len(rows.Contributors))
+	for _, c := range rows.Contributors {
+		s.contributors[c.ID] = c
+	}
+	s.loadProblems = rows.Problems
+	s.rebuild()
 	return nil
 }
 
-// Changed reports whether the logs on disk differ from what the tree reflects,
-// which means another process or a sync has written.
+// rebuild replaces the tree with one built from the committed rows.
+func (s *Session) rebuild() {
+	nodes := make([]state.Node, 0, len(s.nodes))
+	for _, n := range s.nodes {
+		nodes = append(nodes, n)
+	}
+	contributors := make([]state.Contributor, 0, len(s.contributors))
+	for _, c := range s.contributors {
+		contributors = append(contributors, c)
+	}
+	st, problems := state.Build(nodes, contributors)
+	s.State, s.Problems, s.pending = st, append(slices.Clone(s.loadProblems), problems...), 0
+}
+
+// Changed reports whether the database differs from what the tree reflects,
+// which means another process has written.
 func (s *Session) Changed() bool {
-	return !store.Snap(s.Project).Equal(s.seen)
+	return store.Snap(s.Project) != s.seen
 }
 
 // Refresh reloads the session if another process has written, reporting
-// whether it did. Staged events are discarded by a reload, so call it between
-// commands, never inside one.
+// whether it did. Staged operations are discarded by a reload, so call it
+// between commands, never inside one.
 func (s *Session) Refresh() (bool, error) {
 	if !s.Changed() {
 		return false, nil
@@ -123,12 +126,8 @@ func (s *Session) Refresh() (bool, error) {
 	return true, s.Reload()
 }
 
-// SetClock replaces the session's clock.
-//
-// The event id generator is replaced along with it. An event's id encodes when
-// it happened, so a session whose clock was overridden only for parsing would
-// still stamp events with the wall clock, and its history would not match its
-// own idea of the present.
+// SetClock replaces the session's clock, and the id generator with it, so ids
+// and stored times agree with the session's idea of the present.
 func (s *Session) SetClock(f func() time.Time) {
 	s.now = f
 	s.gen = ulid.NewGeneratorAt(f)
@@ -137,113 +136,65 @@ func (s *Session) SetClock(f func() time.Time) {
 // Now returns the session's current time.
 func (s *Session) Now() time.Time { return s.now() }
 
-// Pending reports how many events are staged but not yet written.
-func (s *Session) Pending() int { return len(s.pending) }
+// Pending reports how many operations are staged but not yet written.
+func (s *Session) Pending() int { return s.pending }
 
-// Log returns every event this session knows about, in canonical order.
-func (s *Session) Log() []event.Event { return s.log }
-
-// Commit appends the staged events to the actor's log.
+// Commit writes every node and contributor the staged operations changed, in
+// one transaction.
 //
-// A failed append rolls the staging back, so the events of a command that
+// A failed write rolls the staging back, so the operations of a command that
 // could not be written are never carried into the next one.
 func (s *Session) Commit() error {
-	if len(s.pending) == 0 {
+	if s.pending == 0 {
 		return nil
 	}
-	before := store.Snap(s.Project)
-	grew, err := store.Append(s.Project, s.Actor, s.pending)
+	nodes, contributors := s.State.TakeChanged()
+	prev, head, err := store.Write(s.Project, s.Actor, s.now(), nodes, contributors)
 	if err != nil {
 		s.Rollback()
 		return err
 	}
-	s.pending = nil
-	s.absorb(before, grew)
+	// Only when nothing else was written since the load. Otherwise seen stays
+	// behind, and the next Refresh loads the other write.
+	if prev == s.seen {
+		s.seen = head
+	}
+	for _, n := range nodes {
+		c := *n
+		c.Tags, c.Links, c.Assignees = slices.Clone(n.Tags), slices.Clone(n.Links), slices.Clone(n.Assignees)
+		s.nodes[n.ID] = c
+	}
+	for _, c := range contributors {
+		s.contributors[c.ID] = *c
+	}
+	s.pending = 0
 	return nil
 }
 
-// absorb advances seen past this session's own append, but only when nothing
-// else changed: every other log must be as it was, and this author's log must
-// have grown by exactly what was written. Otherwise seen is left behind, so the
-// next Refresh reloads and picks up the other write.
-func (s *Session) absorb(before store.Snapshot, grew int64) {
-	if !before.Equal(s.seen) {
-		return
-	}
-	after := store.Snap(s.Project)
-	own := store.LogName(s.Actor)
-	if after[own].Size != before[own].Size+grew {
-		return
-	}
-	for name, stamp := range after {
-		if name != own && before[name] != stamp {
-			return
-		}
-	}
-	files := len(before)
-	if _, existed := before[own]; !existed {
-		files++
-	}
-	if len(after) != files {
-		return
-	}
-	s.seen = after
-}
-
-// Rollback discards the staged events and rebuilds the tree from what is
-// committed, undoing a command that failed partway through.
-//
-// It re-materializes from the in-memory log rather than re-reading the disk,
-// because a failed command wrote nothing: the committed prefix of the log is
-// already the truth, and re-deriving from it cannot itself fail. Picking up
-// another process's writes is Reload's job.
+// Rollback discards the staged operations and rebuilds the tree from the
+// committed rows, undoing a command that failed partway through.
 func (s *Session) Rollback() {
-	if len(s.pending) == 0 {
+	if s.pending == 0 {
 		return
 	}
-	s.log = s.log[:len(s.log)-len(s.pending)]
-	s.pending = nil
-	s.State, s.Problems = state.Materialize(s.log)
+	s.rebuild()
 }
 
-// emit stages one event: it mints the id, chains it to the current edge of the
-// log, applies it to the tree and records it for the next Commit.
-//
-// Applying immediately is what lets a command emit a creation event and then
-// operate on the node it just created without a round trip through disk.
+// emit stages one operation: it mints the id, applies it to the tree, and
+// counts it for the next Commit.
 func (s *Session) emit(action event.Action, p event.Payload) (*event.Event, error) {
-	ref := event.EdgeRef(s.log)
-
-	// The new id sorts after the edge, so a clock slightly behind the one that
-	// wrote the last event still dates events in order.
-	//
-	// The floor is capped at ClockTolerance past this machine's clock. An edge
-	// further ahead comes from a clock that is wrong, and following it would
-	// date every later event, by every author, in that future, which hides
-	// them from --at. Replay order does not depend on the floor: an event
-	// always follows the event it refs, whatever its id.
-	var floor uint64
-	if ref != "" {
-		if ms, err := ulid.Time(ref); err == nil {
-			floor = min(ms+1, uint64(s.now().Add(ClockTolerance).UnixMilli()))
-		}
-	}
-
-	e := event.Event{
-		ID:       s.gen.NewAfter(floor),
-		Ref:      ref,
+	e := &event.Event{
+		ID:       s.gen.New(),
 		Action:   action,
 		Payload:  p,
 		UserID:   s.Actor.ID,
 		UserName: s.Actor.Name,
 	}
-
-	if err := s.State.Apply(&e); err != nil {
+	if err := s.State.Apply(e); err != nil {
 		return nil, err
 	}
-	s.log = append(s.log, e)
-	s.pending = append(s.pending, e)
-	return &s.log[len(s.log)-1], nil
+	s.pending++
+	return e, nil
 }
 
 // Init creates the workspace and registers the actor, for a project whose log

@@ -3,19 +3,17 @@ package web
 import (
 	"bufio"
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/event"
 	"github.com/shakfu/gnotes/internal/session"
 	"github.com/shakfu/gnotes/internal/state"
 	"github.com/shakfu/gnotes/internal/store"
@@ -520,8 +518,8 @@ func TestHistoryShowsTheEventsThatComposedTheEntry(t *testing.T) {
 	}
 }
 
-// A link may point at something written on another machine that has not synced
-// yet, which the page shows rather than hides.
+// A link may name an entry that no longer exists,
+// which the page shows rather than hides.
 func TestPendingLinkIsMarkedNotDropped(t *testing.T) {
 	f := newFixture(t)
 	id := f.newTask("waiting")
@@ -664,12 +662,12 @@ func TestARejectedWriteStagesNothing(t *testing.T) {
 	f := newFixture(t)
 	id := f.newNote("just a note", "")
 
-	before := len(f.sess.Log())
+	before := store.Snap(f.sess.Project)
 	res := f.do("PATCH", "/api/node/"+id, map[string]any{"status": "done"})
 	res.Body.Close()
 
-	if got := len(f.sess.Log()); got != before {
-		t.Fatalf("the log grew by %d after a rejected write", got-before)
+	if got := store.Snap(f.sess.Project); got != before {
+		t.Fatalf("the database changed after a rejected write (%d -> %d)", before, got)
 	}
 	if f.sess.Pending() != 0 {
 		t.Fatalf("%d events left staged after a rejected write", f.sess.Pending())
@@ -884,23 +882,30 @@ func TestOutsideWriteBeforeAPageWriteIsNotLost(t *testing.T) {
 	}
 }
 
-// A log that cannot be read refuses writes, and the poll keeps retrying.
-func TestUnreadableLogRefusesWrites(t *testing.T) {
+// A database that cannot be read refuses writes, and the poll keeps retrying.
+func TestUnreadableDatabaseRefusesWrites(t *testing.T) {
 	f := newFixture(t)
 
-	bad := filepath.Join(f.sess.Project.EventsDir(), ulid.NewGenerator().New()+".mallory.jsonl")
-	if err := os.WriteFile(bad, []byte("not json\n{}\n"), 0o644); err != nil {
+	db, err := sql.Open("sqlite", f.sess.Project.Path)
+	if err != nil {
 		t.Fatal(err)
+	}
+	defer db.Close()
+	// A table the load reads goes missing, and a write moves the head.
+	for _, q := range []string{`ALTER TABLE assignees RENAME TO assignees_moved`, `UPDATE nodes SET title = 'moved on' WHERE kind = 'workspace'`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
 	}
 	f.srv.checkDisk()
 
 	res := f.do("POST", "/api/node", map[string]any{"kind": "note", "title": "blind", "notebook": f.work})
 	res.Body.Close()
 	if res.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500 while the log is unreadable", res.StatusCode)
+		t.Fatalf("status = %d, want 500 while the database is unreadable", res.StatusCode)
 	}
 
-	if err := os.Remove(bad); err != nil {
+	if _, err := db.Exec(`ALTER TABLE assignees_moved RENAME TO assignees`); err != nil {
 		t.Fatal(err)
 	}
 	f.newNote("after the repair", "")
@@ -1147,15 +1152,19 @@ func TestDecodeRejectsTrailingData(t *testing.T) {
 	}
 }
 
-// A link to an entry that has not synced yet is shown with a remove button, so
+// A link to an entry that no longer exists is shown with a remove button, so
 // removing it must work even though the target cannot be resolved.
-func TestRemovingALinkToAnUnsyncedEntry(t *testing.T) {
+func TestRemovingALinkToAMissingEntry(t *testing.T) {
 	f := newFixture(t)
 	from := f.newNote("from", "")
 
 	missing := ulid.NewGenerator().New()
-	link := event.Event{ID: ulid.NewGenerator().New(), Action: event.LinkNode, Payload: event.Payload{ID: from, Target: missing}}
-	if _, err := store.Append(f.sess.Project, store.Actor{ID: ulid.NewGenerator().New(), Name: "bob"}, []event.Event{link}); err != nil {
+	db, err := sql.Open("sqlite", f.sess.Project.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO links (src, dst) VALUES (?, ?)`, from, missing); err != nil {
 		t.Fatal(err)
 	}
 

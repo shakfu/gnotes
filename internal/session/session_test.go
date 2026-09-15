@@ -1,13 +1,12 @@
 package session
 
 import (
-	"os"
-	"path/filepath"
+	"database/sql"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/event"
 	"github.com/shakfu/gnotes/internal/rank"
 	"github.com/shakfu/gnotes/internal/state"
 	"github.com/shakfu/gnotes/internal/store"
@@ -35,6 +34,20 @@ func newSession(t *testing.T) *Session {
 		t.Fatalf("Init: %v", err)
 	}
 	return s
+}
+
+// execSQL runs a statement as another SQLite client would: its own connection,
+// default settings, no gnotes.
+func execSQL(t *testing.T, p *store.Project, query string, args ...any) {
+	t.Helper()
+	db, err := sql.Open("sqlite", p.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(query, args...); err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
 }
 
 // reopen commits and reloads from disk, proving that state survives the round
@@ -200,12 +213,6 @@ func TestSetDueResolvesRelativeWordsAtWriteTime(t *testing.T) {
 		t.Fatalf("SetDue: %v", err)
 	}
 
-	// The event on disk carries an absolute date, not the word.
-	for _, e := range s.Log() {
-		if e.Payload.Due != "" && strings.Contains(e.Payload.Due, "tomorrow") {
-			t.Fatal("the log stored a relative date")
-		}
-	}
 	if got := state.FormatDue(reopen(t, s).State.Get(task.ID).Due); got != "2026-08-18" {
 		t.Fatalf("Due = %q, want 2026-08-18", got)
 	}
@@ -278,7 +285,6 @@ func TestNoOpCommandsWriteNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	before := len(s.Log())
 	if err := s.SetTitle(task, "ship it"); err != nil {
 		t.Fatal(err)
 	}
@@ -295,9 +301,6 @@ func TestNoOpCommandsWriteNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := len(s.Log()); got != before {
-		t.Fatalf("%d events written for no-op commands", got-before)
-	}
 	if s.Pending() != 0 {
 		t.Fatalf("%d events pending after no-op commands", s.Pending())
 	}
@@ -428,6 +431,10 @@ func TestRankExhaustionTriggersARecordedRebalance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Committed first, so a rebalance shows as a later change to last's rank.
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Repeatedly insert straight after the first entry, which halves the gap
 	// between it and its neighbour each time. Appends and prepends step instead
@@ -442,18 +449,17 @@ func TestRankExhaustionTriggersARecordedRebalance(t *testing.T) {
 		}
 	}
 
-	rebalances := 0
-	for _, e := range s.Log() {
-		if e.Action == "rebalance.children" {
-			rebalances++
-		}
-	}
-	if rebalances == 0 {
-		t.Fatal("the rank space never ran out; the test is not exercising rebalancing")
-	}
-
 	// The order must survive the rebalance and the round trip.
 	again := reopen(t, s)
+
+	// last is never moved by hand, so a recorded move of it is a rebalance.
+	history, err := again.History(last.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(history, func(e Entry) bool { return e.Node == last.ID && e.Action == "move.node" }) {
+		t.Fatal("the rank space never ran out; the test is not exercising rebalancing")
+	}
 	kids := again.State.Children(nb.ID)
 	if len(kids) != 122 {
 		t.Fatalf("got %d children, want 122", len(kids))
@@ -478,15 +484,19 @@ func TestAppendingDoesNotRebalance(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, e := range s.Log() {
-		if e.Action == "rebalance.children" {
+	history, err := reopen(t, s).History("", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range history {
+		if e.Action == "move.node" {
 			t.Fatal("1000 appends triggered a rebalance")
 		}
 	}
 }
 
-// A malformed rank from another log must not block every insert under its
-// parent.
+// A malformed rank, such as one written by hand, must not block every insert
+// under its parent.
 func TestAMalformedSiblingRankIsRebalancedAway(t *testing.T) {
 	s := newSession(t)
 	nb, _ := s.NewNotebook("work")
@@ -494,11 +504,8 @@ func TestAMalformedSiblingRankIsRebalancedAway(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bad := event.Event{ID: ulid.NewGenerator().New(), Ref: event.EdgeRef(s.Log()), Action: event.AddNote,
-		Payload: event.Payload{ID: ulid.NewGenerator().New(), Parent: nb.ID, Title: "foreign", Rank: "NOT-A-RANK-zzzzzzzzzzzzzz"}}
-	if _, err := store.Append(s.Project, store.Actor{ID: ulid.NewGenerator().New(), Name: "bob"}, []event.Event{bad}); err != nil {
-		t.Fatal(err)
-	}
+	execSQL(t, s.Project, `INSERT INTO nodes (id, kind, parent, rank, title) VALUES (?, 'note', ?, 'NOT-A-RANK-zzzzzzzzzzzzzz', 'foreign')`,
+		ulid.NewGenerator().New(), nb.ID)
 	if err := s.Reload(); err != nil {
 		t.Fatal(err)
 	}
@@ -515,31 +522,6 @@ func TestAMalformedSiblingRankIsRebalancedAway(t *testing.T) {
 	for _, kid := range s.State.Children(nb.ID) {
 		if !rank.Valid(kid.Rank) {
 			t.Fatalf("%q still has malformed rank %q", kid.Title, kid.Rank)
-		}
-	}
-}
-
-// Events are chained, so replay order is a property of the data. Every event
-// this session wrote must refer to the one before it.
-func TestEmittedEventsFormAChain(t *testing.T) {
-	s := newSession(t)
-	nb, _ := s.NewNotebook("work")
-	s.NewNote(nb.ID, "one", "")
-	s.NewTask(nb.ID, "two", "")
-
-	log := s.Log()
-	if len(log) < 4 {
-		t.Fatalf("only %d events", len(log))
-	}
-	if log[0].Ref != "" {
-		t.Fatal("the first event has a reference")
-	}
-	for i := 1; i < len(log); i++ {
-		if log[i].Ref != log[i-1].ID {
-			t.Fatalf("event %d does not refer to its predecessor", i)
-		}
-		if log[i].ID <= log[i-1].ID {
-			t.Fatalf("event %d does not sort after its predecessor", i)
 		}
 	}
 }
@@ -598,9 +580,9 @@ func TestReloadDiscardsUncommittedWork(t *testing.T) {
 	}
 }
 
-// Two sessions writing as different people must both survive the merge; this
-// is the property the whole per-author-file design exists for.
-func TestTwoAuthorsMergeWithoutConflict(t *testing.T) {
+// Two sessions writing as different people, neither seeing the other's work,
+// must both be kept.
+func TestTwoSessionsBothKeepTheirWrites(t *testing.T) {
 	alice := newSession(t)
 	nb, _ := alice.NewNotebook("shared")
 	if err := alice.Commit(); err != nil {
@@ -647,62 +629,39 @@ func TestTwoAuthorsMergeWithoutConflict(t *testing.T) {
 	}
 }
 
-// A machine whose clock is a little behind must still write ids that sort after
-// what is already in the log, so dates read in order.
-func TestALaggingClockStillAppendsInOrder(t *testing.T) {
+// Time travel replays the recorded changes up to a cutoff.
+func TestAtReplaysAPastState(t *testing.T) {
 	s := newSession(t)
-	if _, err := s.NewNotebook("work"); err != nil {
-		t.Fatal(err)
-	}
+	nb, _ := s.NewNotebook("work")
+	early, _ := s.NewTask(nb.ID, "early", "")
+	s.AddTag(early, "first")
 	if err := s.Commit(); err != nil {
 		t.Fatal(err)
 	}
 
-	behind, err := OpenProject(s.Project, s.Actor)
-	if err != nil {
-		t.Fatal(err)
-	}
-	behind.SetClock(func() time.Time { return testClock().Add(-time.Minute) })
-
-	last := behind.Log()[len(behind.Log())-1].ID
-	if _, err := behind.NewNotebook("later"); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, e := range behind.Log() {
-		if e.Ref == last && e.ID <= last {
-			t.Fatalf("event %s does not sort after the edge %s", e.ID, last)
-		}
-	}
-}
-
-// Time travel is a prefix of the log, replayed. Nothing is stored for it.
-func TestAtReplaysAPastState(t *testing.T) {
-	s := newSession(t)
-	nb, _ := s.NewNotebook("work")
-	early, _ := s.NewNote(nb.ID, "early", "")
-
-	cutoff := early.Created.UnixMilli()
-
+	s.SetClock(func() time.Time { return testClock().Add(time.Hour) })
 	if _, err := s.NewNote(nb.ID, "later", ""); err != nil {
 		t.Fatal(err)
 	}
-
-	past, problems := s.At(cutoff)
-	if len(problems) != 0 {
-		t.Fatalf("problems: %v", problems)
-	}
-	if past.Get(early.ID) == nil {
-		t.Fatal("the past state is missing a node that existed then")
+	s.SetTitle(early, "renamed")
+	s.SetStatus(early, state.StatusDone)
+	s.RemoveTag(early, "first")
+	if err := s.Commit(); err != nil {
+		t.Fatal(err)
 	}
 
-	for _, n := range past.List(state.Filter{}, state.OrderTitle) {
-		if n.Title == "later" {
-			t.Fatal("the past state contains a node created afterwards")
-		}
+	past, err := s.At(testClock().Add(30 * time.Minute))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The present is unchanged.
-	if len(s.State.Children(nb.ID)) != 2 {
+	then := past.Get(early.ID)
+	if then == nil || then.Title != "early" || then.Status != state.StatusOpen || !then.HasTag("first") {
+		t.Fatalf("early as it stood = %+v, want its original title, status and tag", then)
+	}
+	if titled(past, "later") {
+		t.Fatal("the past state contains a node created afterwards")
+	}
+	if got := s.State.Get(early.ID); got.Title != "renamed" || got.HasTag("first") {
 		t.Fatal("time travel mutated the present")
 	}
 }
@@ -800,8 +759,8 @@ func TestCommitFailureDropsTheStagedEvents(t *testing.T) {
 		t.Fatalf("NewNote: %v", err)
 	}
 
-	// Append refuses to write for an actor with no name, which fails the
-	// commit without putting anything on disk to clean up.
+	// Write refuses an actor with no name, which fails the commit without
+	// putting anything on disk to clean up.
 	name := s.Actor.Name
 	s.Actor.Name = ""
 	if err := s.Commit(); err == nil {
@@ -830,7 +789,7 @@ func TestCommitFailureDropsTheStagedEvents(t *testing.T) {
 }
 
 // secondAuthor opens the same project as someone else, the way another
-// process or another machine's synced log would appear.
+// process would.
 func secondAuthor(t *testing.T, s *Session, name string) *Session {
 	t.Helper()
 	other, err := OpenProject(s.Project, store.Actor{ID: ulid.NewGenerator().New(), Name: name})
@@ -950,22 +909,19 @@ func TestFailedReloadIsRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bad := filepath.Join(s.Project.EventsDir(), ulid.NewGenerator().New()+".mallory.jsonl")
-	if err := os.WriteFile(bad, []byte("not json\n{}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// A table the load reads goes missing, and a write moves the head.
+	execSQL(t, s.Project, `ALTER TABLE assignees RENAME TO assignees_moved`)
+	execSQL(t, s.Project, `UPDATE nodes SET title = 'work, renamed' WHERE kind = 'notebook'`)
 	if _, err := s.Refresh(); err == nil {
-		t.Fatal("Refresh read a corrupt log without error")
+		t.Fatal("Refresh read a damaged database without error")
 	}
 	if !s.Changed() {
 		t.Fatal("a failed reload marked the session up to date")
 	}
 
-	if err := os.Remove(bad); err != nil {
-		t.Fatal(err)
-	}
+	execSQL(t, s.Project, `ALTER TABLE assignees_moved RENAME TO assignees`)
 	bob := secondAuthor(t, s, "bob")
-	bob.NewNote("work", "after the repair", "")
+	bob.NewNote("work, renamed", "after the repair", "")
 	if err := bob.Commit(); err != nil {
 		t.Fatal(err)
 	}
@@ -1016,11 +972,11 @@ func TestSetDueTwiceWithARelativeWordIsANoOp(t *testing.T) {
 	if err := s.SetDue(task, "friday"); err != nil {
 		t.Fatal(err)
 	}
-	before := len(s.Log())
+	before := s.Pending()
 	if err := s.SetDue(task, "friday"); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.Log()) != before {
+	if s.Pending() != before {
 		t.Fatal("setting the same due date again wrote an event")
 	}
 }
@@ -1030,18 +986,17 @@ func TestUnlinkingAMissingLinkWritesNothing(t *testing.T) {
 	s.NewNotebook("work")
 	a, _ := s.NewNote("work", "a", "")
 	b, _ := s.NewNote("work", "b", "")
-	before := len(s.Log())
+	before := s.Pending()
 	if err := s.Unlink(a, b.ID); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.Log()) != before {
+	if s.Pending() != before {
 		t.Fatal("removing a link that does not exist wrote an event")
 	}
 }
 
-// One machine with a clock years ahead must not date everyone's later events in
-// its future, which would hide them from time travel for good.
-func TestAFutureClockDoesNotDragLaterEventsWithIt(t *testing.T) {
+// A write dated years ahead must not hide later writes from time travel.
+func TestAFutureWriteDoesNotHideLaterOnes(t *testing.T) {
 	s := newSession(t)
 	s.NewNotebook("work")
 	if err := s.Commit(); err != nil {
@@ -1064,14 +1019,14 @@ func TestAFutureClockDoesNotDragLaterEventsWithIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if limit := testClock().Add(ClockTolerance); n.Created.After(limit) {
-		t.Fatalf("created %v, want no later than %v", n.Created, limit)
-	}
 	if err := s.Commit(); err != nil {
 		t.Fatal(err)
 	}
 
-	past, _ := s.At(testClock().Add(time.Hour).UnixMilli())
+	past, err := s.At(testClock().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if past.Get(n.ID) == nil {
 		t.Fatal("the note written now is hidden from a cutoff an hour from now")
 	}

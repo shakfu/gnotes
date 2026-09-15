@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/gitsync"
 	"github.com/shakfu/gnotes/internal/rank"
 	"github.com/shakfu/gnotes/internal/search"
 	"github.com/shakfu/gnotes/internal/state"
@@ -225,10 +224,9 @@ Marking a task done is the common case and needs only "ref" and "status".`,
 			Title: "Delete an entry",
 			Description: `Delete a note, task or notebook.
 
-Deleting a notebook deletes everything in it. The deletion is recorded as an
-event rather than applied, so gnotes_restore undoes it and the original stays
-recoverable from the log — but the entry disappears from every listing
-immediately, so confirm with the user before deleting anything they did not
+Deleting a notebook deletes everything in it. The entry is marked deleted
+rather than removed, so gnotes_restore undoes it — but it disappears from every
+listing immediately, so confirm with the user before deleting anything they did not
 explicitly ask you to remove.`,
 			Annotations: &annotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(false)},
 			InputSchema: props([]string{"ref"}, object{
@@ -253,26 +251,6 @@ the same one.`,
 			}),
 		},
 		run: (*Server).restoreEntry,
-	},
-
-	{
-		tool: tool{
-			Name:  "gnotes_sync",
-			Title: "Commit notes to git",
-			Description: `Commit the event log to git, and optionally exchange it with the remote.
-
-Only the .gnotes paths are staged and committed, so whatever else is staged or
-edited in the repository is left untouched. Call this when the user asks to save
-or sync their notes; ordinary writes are already durable on disk without it.
-
-Set "push" to also pull from and push to origin. That moves the current branch,
-so do not set it unless the user asked to publish.`,
-			Annotations: &annotations{DestructiveHint: ptr(false), OpenWorldHint: ptr(true)},
-			InputSchema: props(nil, object{
-				"push": boolean("Also pull from and push to origin. Defaults to false."),
-			}),
-		},
-		run: (*Server).syncProject,
 	},
 }
 
@@ -520,20 +498,20 @@ func (s *Server) searchEntries(raw json.RawMessage) (string, error) {
 		limit = 20
 	}
 
-	st := s.sess.State
-	index := search.Build(st.List(state.Filter{}, state.OrderRank))
-	results := index.Search(a.Query, limit)
-
+	results, err := s.sess.Search(a.Query, limit, false)
+	if err != nil {
+		return "", err
+	}
 	if len(results) == 0 {
 		return fmt.Sprintf("Nothing matches %q.", a.Query), nil
 	}
 
 	now := s.sess.Now()
 	var b strings.Builder
-	for _, r := range results {
-		b.WriteString(s.renderRow(r.Node, now))
+	for _, n := range results {
+		b.WriteString(s.renderRow(n, now))
 		b.WriteByte('\n')
-		if snippet := search.Snippet(r.Node, a.Query, 160); snippet != "" {
+		if snippet := search.Snippet(n, a.Query, 160); snippet != "" {
 			fmt.Fprintf(&b, "    %s\n", snippet)
 		}
 	}
@@ -603,7 +581,7 @@ func (s *Server) getEntry(raw json.RawMessage) (string, error) {
 				}
 				fmt.Fprintf(&b, "  %s  %s%s\n", ulid.Short(id, refLen), target.Title, deleted)
 			} else {
-				fmt.Fprintf(&b, "  %s  (not synced yet)\n", ulid.Short(id, refLen))
+				fmt.Fprintf(&b, "  %s  (missing)\n", ulid.Short(id, refLen))
 			}
 		}
 	}
@@ -616,25 +594,21 @@ func (s *Server) getEntry(raw json.RawMessage) (string, error) {
 
 	if a.History {
 		b.WriteString("\nhistory:\n")
-		for _, e := range s.sess.Log() {
-			p := e.Payload
-			if p.ID != n.ID && p.Parent != n.ID && p.Target != n.ID {
-				continue
-			}
-			at, err := ulid.Timestamp(e.ID)
-			if err != nil {
-				continue
-			}
-			// A notebook's history includes its children's events, which
-			// name the child they were about.
+		entries, err := s.sess.History(n.ID, 0)
+		if err != nil {
+			return "", err
+		}
+		for _, e := range entries {
+			// A notebook's history includes changes that moved or linked
+			// another entry to it, which name that entry.
 			about := ""
-			if p.ID != n.ID {
-				if other := st.Get(p.ID); other != nil {
+			if e.Node != n.ID {
+				if other := st.Get(e.Node); other != nil {
 					about = fmt.Sprintf("  (%s %s)", ulid.Short(other.ID, refLen), other.Title)
 				}
 			}
-			fmt.Fprintf(&b, "  %s  %-20s %s by %s%s\n",
-				ulid.Short(e.ID, refLen), e.Action, at.Format(time.RFC3339), st.Contributor(e.UserID), about)
+			fmt.Fprintf(&b, "  %-20s %s by %s  %s%s\n",
+				e.Action, e.At.Format(time.RFC3339), e.Author, e.Detail, about)
 		}
 	}
 
@@ -760,13 +734,13 @@ func (s *Server) updateEntry(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	// A field is reported only if it wrote an event: setting a status the
+	// A field is reported only if it staged a change: setting a status the
 	// task already has, or removing a link that is not there, changes nothing.
 	var changed, unchanged []string
 	given := 0
 	note := func(field string, before int) {
 		given++
-		if len(s.sess.Log()) > before {
+		if s.sess.Pending() > before {
 			changed = append(changed, field)
 		} else {
 			unchanged = append(unchanged, field)
@@ -774,21 +748,21 @@ func (s *Server) updateEntry(raw json.RawMessage) (string, error) {
 	}
 
 	if a.Title != nil {
-		before := len(s.sess.Log())
+		before := s.sess.Pending()
 		if err := s.sess.SetTitle(n, *a.Title); err != nil {
 			return "", err
 		}
 		note("title", before)
 	}
 	if a.Body != nil {
-		before := len(s.sess.Log())
+		before := s.sess.Pending()
 		if err := s.sess.SetBody(n, *a.Body); err != nil {
 			return "", err
 		}
 		note("body", before)
 	}
 	if a.Status != "" {
-		before := len(s.sess.Log())
+		before := s.sess.Pending()
 		status, ok := state.ParseStatus(a.Status)
 		if !ok {
 			return "", fmt.Errorf("unknown status %q; use open, doing or done", a.Status)
@@ -799,7 +773,7 @@ func (s *Server) updateEntry(raw json.RawMessage) (string, error) {
 		note("status", before)
 	}
 	if a.Priority != "" {
-		before := len(s.sess.Log())
+		before := s.sess.Pending()
 		p, ok := state.ParsePriority(a.Priority)
 		if !ok {
 			return "", fmt.Errorf("unknown priority %q", a.Priority)
@@ -810,28 +784,28 @@ func (s *Server) updateEntry(raw json.RawMessage) (string, error) {
 		note("priority", before)
 	}
 	if a.Due != nil {
-		before := len(s.sess.Log())
+		before := s.sess.Pending()
 		if err := s.sess.SetDue(n, *a.Due); err != nil {
 			return "", err
 		}
 		note("due", before)
 	}
 	for _, tag := range a.AddTags {
-		before := len(s.sess.Log())
+		before := s.sess.Pending()
 		if err := s.sess.AddTag(n, tag); err != nil {
 			return "", err
 		}
 		note("tag "+tag, before)
 	}
 	for _, tag := range a.RemoveTags {
-		before := len(s.sess.Log())
+		before := s.sess.Pending()
 		if err := s.sess.RemoveTag(n, tag); err != nil {
 			return "", err
 		}
 		note("untag "+tag, before)
 	}
 	if a.Notebook != "" {
-		before := len(s.sess.Log())
+		before := s.sess.Pending()
 		if n.Kind == state.KindNotebook {
 			return "", errors.New("a notebook cannot be moved into a notebook")
 		}
@@ -841,7 +815,7 @@ func (s *Server) updateEntry(raw json.RawMessage) (string, error) {
 		note("notebook", before)
 	}
 	if a.Link != "" {
-		before := len(s.sess.Log())
+		before := s.sess.Pending()
 		target, err := st.Resolve(a.Link)
 		if err != nil {
 			return "", err
@@ -852,7 +826,7 @@ func (s *Server) updateEntry(raw json.RawMessage) (string, error) {
 		note("link", before)
 	}
 	if a.Unlink != "" {
-		before := len(s.sess.Log())
+		before := s.sess.Pending()
 		target, err := st.LinkTarget(n, a.Unlink)
 		if err != nil {
 			return "", err
@@ -935,54 +909,6 @@ func (s *Server) restoreEntry(raw json.RawMessage) (string, error) {
 	}
 
 	return fmt.Sprintf("Restored %s %q.", ulid.Short(n.ID, refLen), n.Title), nil
-}
-
-type syncArgs struct {
-	Push bool `json:"push"`
-}
-
-func (s *Server) syncProject(raw json.RawMessage) (string, error) {
-	var a syncArgs
-	if err := decodeArgs(raw, &a); err != nil {
-		return "", err
-	}
-
-	message := fmt.Sprintf("gnotes: %d events", len(s.sess.Log()))
-	res, err := gitsync.Sync(s.sess.Project, message, gitsync.Options{Push: a.Push, Unattended: true})
-	if err != nil {
-		if res.Committed {
-			// The logs are committed locally; the agent should not retry as if
-			// nothing happened.
-			err = fmt.Errorf("committed on %s, then: %w", res.Branch, err)
-		}
-		return "", err
-	}
-
-	// A pull may have brought in another machine's events.
-	if err := s.sess.Reload(); err != nil {
-		return "", err
-	}
-
-	var parts []string
-	if res.Committed {
-		parts = append(parts, "committed on "+res.Branch)
-	} else {
-		parts = append(parts, "nothing to commit")
-	}
-	if res.Pulled {
-		parts = append(parts, "pulled from origin")
-	}
-	if res.Pushed {
-		parts = append(parts, "pushed to origin")
-	}
-	return strings.ToUpper(parts[0][:1]) + parts[0][1:] + suffix(parts[1:]) + ".", nil
-}
-
-func suffix(rest []string) string {
-	if len(rest) == 0 {
-		return ""
-	}
-	return ", " + strings.Join(rest, ", ")
 }
 
 // commit writes the events a tool staged.

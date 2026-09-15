@@ -27,10 +27,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pollDisk()
 		return m, poll()
 
-	case syncDoneMsg:
-		m.syncDone(msg)
-		return m, nil
-
 	case editorDoneMsg:
 		m.editorDone(msg)
 		return m, nil

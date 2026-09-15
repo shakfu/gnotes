@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"strings"
@@ -11,7 +12,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/shakfu/gnotes/internal/editor"
-	"github.com/shakfu/gnotes/internal/event"
 	"github.com/shakfu/gnotes/internal/session"
 	"github.com/shakfu/gnotes/internal/state"
 	"github.com/shakfu/gnotes/internal/store"
@@ -291,7 +291,7 @@ func TestCreateATask(t *testing.T) {
 // Abandoning a prompt must not write anything.
 func TestEscapingAPromptCreatesNothing(t *testing.T) {
 	m := withContent(t)
-	before := len(m.sess.Log())
+	before := store.Snap(m.sess.Project)
 
 	m = press(t, m, "n")
 	m = typeText(t, m, "never mind")
@@ -300,7 +300,7 @@ func TestEscapingAPromptCreatesNothing(t *testing.T) {
 	if m.mode != modeNormal {
 		t.Fatal("escape did not close the prompt")
 	}
-	if len(m.sess.Log()) != before {
+	if store.Snap(m.sess.Project) != before || m.sess.Pending() != 0 {
 		t.Fatal("escaping the prompt still wrote an event")
 	}
 }
@@ -308,11 +308,11 @@ func TestEscapingAPromptCreatesNothing(t *testing.T) {
 // An empty answer is a cancellation, not an entry with a blank title.
 func TestEmptyPromptAnswerCreatesNothing(t *testing.T) {
 	m := withContent(t)
-	before := len(m.sess.Log())
+	before := store.Snap(m.sess.Project)
 
 	m = press(t, m, "n", "enter")
 
-	if len(m.sess.Log()) != before {
+	if store.Snap(m.sess.Project) != before || m.sess.Pending() != 0 {
 		t.Fatal("an empty prompt created something")
 	}
 }
@@ -1187,38 +1187,13 @@ func TestPollPicksUpOutsideWrites(t *testing.T) {
 	}
 }
 
-// Sync runs in the background and reports when it finishes.
-func TestSyncRunsInTheBackground(t *testing.T) {
-	m := withContent(t)
-
-	m, cmd := command(t, m, "sync")
-	if cmd == nil || !m.syncing {
-		t.Fatal(":sync did not hand git to a background command")
-	}
-
-	// The temporary project is not a git repository, so the sync fails.
-	updated, _ := m.Update(cmd())
-	m = updated.(*Model)
-	if m.syncing || !m.statusErr {
-		t.Fatalf("after the sync: syncing=%v status=%q, want the failure shown", m.syncing, m.status)
-	}
-}
-
-// A title from another author's log must not send escape sequences or extra
-// lines to the terminal, in the list, the detail view or a prefilled prompt.
-func TestViewReplacesControlCharactersFromTheLog(t *testing.T) {
+// A title written by another SQLite client must not send escape sequences or
+// extra lines to the terminal, in the list, the detail view or a prefilled
+// prompt.
+func TestViewReplacesControlCharactersFromOutside(t *testing.T) {
 	m := withContent(t)
 	id := m.entries[indexOfTitle(m, "design sketch")].ID
-
-	mallory := store.Actor{ID: ulid.NewGenerator().New(), Name: "mallory"}
-	g := ulid.NewGenerator()
-	events := []event.Event{
-		{ID: g.New(), Action: event.EditTitle, Payload: event.Payload{ID: id, Title: "evil\x1b]0;PWNED\x07\nforged"}},
-	}
-	events = append(events, event.Event{ID: g.New(), Ref: events[0].ID, Action: event.EditBody, Payload: event.Payload{ID: id, Body: "x\x1b[2Jy"}})
-	if _, err := store.Append(m.sess.Project, mallory, events); err != nil {
-		t.Fatal(err)
-	}
+	execSQL(t, m.sess.Project, `UPDATE nodes SET title = ?, body = ? WHERE id = ?`, "evil\x1b]0;PWNED\x07\nforged", "x\x1b[2Jy", id)
 	m = press(t, m, "R")
 
 	m.focus = paneEntries
@@ -1329,13 +1304,13 @@ func TestFirstLineEditKeepsTheRestOfTheBody(t *testing.T) {
 	}
 	m.commit("")
 
-	before := len(m.sess.Log())
+	before := store.Snap(m.sess.Project)
 	m = press(t, m, "e")
 	m = press(t, m, "enter")
 	if got := m.sess.State.Get(n.ID).Body; got != "abc123 fix\n" {
 		t.Fatalf("body = %q, want it unchanged", got)
 	}
-	if len(m.sess.Log()) != before {
+	if store.Snap(m.sess.Project) != before || m.sess.Pending() != 0 {
 		t.Fatal("saving an unchanged first line wrote an event")
 	}
 }
@@ -1358,5 +1333,18 @@ func TestInputShowsTheCursorAndTheAnswer(t *testing.T) {
 	label := "delete notebook " + strings.Repeat("very long title ", 5) + "and its contents? (y/N) "
 	if out := stripANSI(in.render(label, 50)); !strings.Contains(out, "yes") {
 		t.Fatalf("a long label hid the answer: %q", out)
+	}
+}
+
+// execSQL runs a statement as another SQLite client would.
+func execSQL(t *testing.T, p *store.Project, query string, args ...any) {
+	t.Helper()
+	db, err := sql.Open("sqlite", p.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(query, args...); err != nil {
+		t.Fatalf("%s: %v", query, err)
 	}
 }

@@ -463,3 +463,72 @@ incremental fold before the cache is worth anything.
   web view, which was itself considered worth a build tag to remove. Step 1
   sidestepped this by emitting text, but V0 and V1 cannot: they need a driver
   in the binary, so the question returns in full at step 2.
+
+## 12. What was built (2026-09-15)
+
+A variant of V2 that keeps history: tables are the truth, and a `changes` table
+filled by triggers records every field change. This answers section 11 as
+single-user, committed to git as one file, with direct SQL edits allowed. The
+database is `.gnotes/gnotes.db` in rollback-journal mode, so the committed file
+is complete.
+
+- Sessions still stage operations (`event.Event`) against the in-memory tree,
+  so every rule in `state.apply` is kept; `Commit` writes only the rows those
+  operations changed. `event`, `rank` and the front ends are nearly untouched.
+- Time travel replays `changes`. History attribution uses a one-row `writer`
+  table that gnotes sets and clears inside its transaction, since a trigger
+  cannot see the connection's user; other clients' edits are unattributed.
+- `internal/search` became an FTS5 query builder; `internal/sqlexport` and
+  `internal/gitsync` were deleted.
+- Legacy JSONL projects are imported by replaying each event and writing its
+  changed rows at the event's time.
+
+The binary is 12.8 MB (9.2 MB with `noweb`), 3.9 MB above the JSONL build.
+Command timings against the JSONL build are in section 13.
+
+## 13. Crossover against the JSONL build (2026-09-15)
+
+Section 5 argued that speed is the weakest case for a database. Measured
+against the last JSONL build (commit 2203806), that holds: the SQLite build is
+slower on small projects and faster on large ones, and the difference is under
+4 ms until a project reaches thousands of entries.
+
+**Method.** A generated legacy project of N tasks, each with a ~250-byte body,
+two tags and a priority: five events per task. The JSONL build ran on the log;
+the SQLite build ran on a copy imported from it, so both hold the same data.
+Median of 50 runs per command, process start included, old and new runs
+alternated. 16-thread Linux machine, warm filesystem cache.
+
+| tasks | `ls` JSONL / SQLite | `search` | `show` | `note` | on disk |
+|---|---|---|---|---|---|
+| 5 | 2.9 / 4.1 ms | 3.2 / 4.4 ms | 3.0 / 4.3 ms | 3.6 / 6.8 ms | 6 KB / 116 KB |
+| 100 | 4.0 / 4.8 ms | 4.4 / 5.2 ms | 3.9 / 4.8 ms | 4.6 / 7.9 ms | 120 KB / 472 KB |
+| 500 | 9.4 / 7.9 ms | 10.9 / 8.3 ms | 9.2 / 7.2 ms | 10.0 / 10.3 ms | 572 KB / 1.9 MB |
+| 1,000 | 15.4 / 13.2 ms | 18.0 / 13.2 ms | 14.6 / 11.5 ms | 15.1 / 14.9 ms | 1.1 MB / 3.7 MB |
+| 5,000 | 65.3 / 45.4 ms | 77.4 / 45.2 ms | 59.9 / 39.4 ms | 64.2 / 43.2 ms | 5.6 MB / 18.7 MB |
+
+**Findings.**
+
+- Reads cross over between 100 and 500 tasks: 18-23% slower at 100, 16-24%
+  faster at 500, 31-42% faster at 5,000.
+- Writes are within 3% at 500 and 1,000 tasks, and 33% faster at 5,000. At 5
+  and 100 tasks a write costs 3-4 ms more. The SQLite build syncs each commit
+  (`synchronous=FULL`) and the JSONL build did not sync; the split between that
+  and opening the database was not profiled.
+- The database is 3.3-3.9 times the size of the JSONL log for the same
+  content, and git stores the whole file in each commit that changes it. This
+  is a larger cost than any timing difference in the table.
+- Both builds returned identical results at 5,000 tasks: 5,020 `ls` lines and
+  1,072 search hits.
+
+**Bearing on section 11.** Speed does not decide between per-project and
+global notes: below 1,000 entries neither build is perceptibly faster. The
+deciding factors remain the number of machines a project is written from and
+whether it is kept in git.
+
+**Limits.** One synthetic shape. Real projects with longer bodies or longer
+edit histories per entry would move the crossover; a longer history should
+lower it, since the JSONL build replays every event on each command, but that
+was not measured. The `note` runs added 50 entries to each copy during the
+run, which matters only at 5 tasks. The generator was a throwaway test and is
+not in the tree.

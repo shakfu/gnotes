@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -105,7 +103,7 @@ func init() {
 		cmdEdit, cmdStatus, cmdDue, cmdPriority,
 		cmdTag, cmdUntag, cmdAssign, cmdUnassign,
 		cmdLink, cmdUnlink, cmdMove, cmdRemove, cmdRestore,
-		cmdLog, cmdSync, cmdExport, cmdInfo, cmdWho, cmdUI, cmdServe, cmdMCP, cmdHelp,
+		cmdLog, cmdInfo, cmdWho, cmdUI, cmdServe, cmdMCP, cmdHelp,
 	}
 	for _, c := range commands {
 		byName[c.name] = c
@@ -267,25 +265,19 @@ func (a *App) open() (*session.Session, error) {
 	}
 	s.SetClock(a.Now)
 
-	// Events written by a newer build are stepped over rather than applied.
-	// Saying so once is the difference between a confusing absence and a
-	// known one.
-	if len(s.Skipped) > 0 {
-		var parts []string
-		for action, n := range s.Skipped {
-			parts = append(parts, fmt.Sprintf("%q x%d", action, n))
+	if imp := s.Project.Imported; imp != nil {
+		fmt.Fprintf(a.Stderr, "note: imported %d events from %s into %s; the JSONL logs are no longer read\n",
+			imp.Events, imp.From, s.Project.Path)
+		if imp.Unapplied+imp.Unknown > 0 {
+			fmt.Fprintf(a.Stderr, "warning: %d events could not be applied and %d name actions this version does not know; neither was imported\n",
+				imp.Unapplied, imp.Unknown)
 		}
-		sort.Strings(parts)
-		fmt.Fprintf(a.Stderr, "note: skipped events this version does not understand (%s); upgrade gnotes to apply them\n",
-			strings.Join(parts, ", "))
-	}
-
-	// A log whose last record was cut short lost the command that was being
-	// written when the process died. Nothing else is affected, but the loss is
-	// silent unless it is said.
-	if len(s.Torn) > 0 {
-		fmt.Fprintf(a.Stderr, "warning: %s ends in an incomplete record, from a gnotes that was interrupted mid-write; the last event in it was discarded\n",
-			strings.Join(s.Torn, ", "))
+		// A log whose last record was cut short lost the command being written
+		// when the process died.
+		if len(imp.Torn) > 0 {
+			fmt.Fprintf(a.Stderr, "warning: %s ended in an incomplete record, which was not imported\n",
+				strings.Join(imp.Torn, ", "))
+		}
 	}
 	return s, nil
 }
@@ -296,7 +288,7 @@ func loadGlobal() (dir string, p *store.Project, err error) {
 	if dir, err = store.LoadGlobal(); err != nil || dir == "" {
 		return dir, nil, err
 	}
-	p, err = store.Open(filepath.Join(dir, store.DirName))
+	p, err = store.OpenAt(dir)
 	if errors.Is(err, store.ErrNotFound) {
 		return dir, nil, nil
 	}

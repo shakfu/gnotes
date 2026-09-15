@@ -1,12 +1,10 @@
-// Package event defines the append-only log that is the sole source of truth
-// in gnotes. Nothing else is persisted; every view of the data is produced by
-// replaying these records.
+// Package event defines the operations a session applies to the tree, and the
+// JSONL wire format of the legacy event logs they were once stored as.
 //
-// Each event carries its own ULID and a reference to the last event its author
-// had seen. Those references form a tree, and a deterministic traversal of that
-// tree yields the same total order on every machine regardless of the order
-// files arrived in. That is what lets two people edit offline and converge
-// without a merge conflict or a CRDT.
+// Operations are no longer persisted: a commit writes the rows they changed.
+// The wire format and Sort remain for importing a legacy project, whose events
+// carry a reference to the last event their author had seen; Sort walks those
+// references into one order.
 package event
 
 import (

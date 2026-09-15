@@ -309,17 +309,17 @@ func (s *Server) initialize(raw json.RawMessage) (any, error) {
 // instructions tell the model what this server is for. It is the one piece of
 // prose the client puts in front of the model unprompted, so it says what the
 // project is and how entries are addressed rather than restating the tool list.
-const instructions = `This project's notes and tasks are stored in gnotes, an append-only event log
-kept in the repository. Notes hold markdown prose; tasks additionally have a
-status, priority, due date and assignees. Both live in notebooks.
+const instructions = `This project's notes and tasks are stored in gnotes, a SQLite database kept
+in the repository. Notes hold markdown prose; tasks additionally have a status,
+priority, due date and assignees. Both live in notebooks.
 
 Every entry has a six-character handle, shown as its "ref". Pass that handle to
 any tool that takes one. A title or a distinctive fragment of one also works,
 and an ambiguous reference reports the candidates rather than guessing.
 
-Reading is free of side effects. Writing appends an event, which is durable
-immediately and recoverable afterwards: deletion is recorded rather than
-applied, so nothing is ever truly lost.`
+Reading is free of side effects. Writing is durable immediately and recorded
+in the project's history. Deletion marks an entry deleted rather than removing
+it, so it can be restored.`
 
 // send writes one frame, terminated by the newline the transport frames on.
 func (s *Server) send(r response) {
@@ -344,7 +344,7 @@ func (s *Server) send(r response) {
 	}
 }
 
-// refresh reloads the project when another process has written to the log.
+// refresh reloads the project when another process has written to it.
 //
 // It runs before every tool call rather than on a timer. The check is a handful
 // of stat calls, and an agent that reads a stale tree acts on notes that no

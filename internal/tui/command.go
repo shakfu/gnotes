@@ -8,7 +8,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/shakfu/gnotes/internal/gitsync"
 	"github.com/shakfu/gnotes/internal/rank"
 	"github.com/shakfu/gnotes/internal/state"
 )
@@ -167,13 +166,8 @@ var tuiCommands = []*tuiCommand{
 		},
 	},
 	{
-		name: "sync", args: "[push]",
-		summary: "commit the logs to git, or exchange with origin",
-		run:     (*Model).startSync,
-	},
-	{
 		name: "reload", aliases: []string{"r"}, args: "",
-		summary: "re-read the log from disk",
+		summary: "re-read the database",
 		run: func(m *Model, args []string) error {
 			if err := m.reload(); err != nil {
 				return err
@@ -237,62 +231,6 @@ func (m *Model) runCommand(line string) (tea.Model, tea.Cmd) {
 	cmd := m.after
 	m.after = nil
 	return m, cmd
-}
-
-// syncDoneMsg carries the outcome of a background sync.
-type syncDoneMsg struct {
-	res gitsync.Result
-	err error
-}
-
-// startSync runs git in the background. A pull and push can take seconds, or
-// wait on the network, and the interface must keep drawing meanwhile.
-//
-// The sync only reads paths from the project, never the session, so running
-// it alongside Update is safe; the reload happens back in Update when it ends.
-func (m *Model) startSync(args []string) error {
-	if m.syncing {
-		return fmt.Errorf("a sync is already running")
-	}
-	opt := gitsync.Options{
-		Push:       len(args) > 0 && (args[0] == "push" || args[0] == "--push"),
-		Unattended: true,
-	}
-	message := fmt.Sprintf("gnotes: %d events", len(m.sess.Log()))
-	project := m.sess.Project
-
-	m.syncing = true
-	m.setStatus("syncing...")
-	m.after = func() tea.Msg {
-		res, err := gitsync.Sync(project, message, opt)
-		return syncDoneMsg{res: res, err: err}
-	}
-	return nil
-}
-
-// syncDone reports a finished sync and loads whatever it brought in.
-func (m *Model) syncDone(msg syncDoneMsg) {
-	m.syncing = false
-
-	// Reloaded whether or not the sync failed: a commit or a merge may have
-	// landed before the error.
-	if err := m.reload(); err != nil {
-		return
-	}
-
-	res := msg.res
-	switch {
-	case msg.err != nil && res.Committed:
-		m.setError(fmt.Errorf("committed on %s, then: %w", res.Branch, msg.err))
-	case msg.err != nil:
-		m.setError(msg.err)
-	case res.Pushed:
-		m.setStatus("synced with origin on %s", res.Branch)
-	case res.Committed:
-		m.setStatus("committed on %s", res.Branch)
-	default:
-		m.setStatus("nothing to commit")
-	}
 }
 
 // requireEntry returns the selected note or task, or explains that there is

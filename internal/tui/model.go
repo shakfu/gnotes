@@ -15,7 +15,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/shakfu/gnotes/internal/search"
 	"github.com/shakfu/gnotes/internal/session"
 	"github.com/shakfu/gnotes/internal/state"
 )
@@ -80,9 +79,6 @@ type Model struct {
 	// query filters the entry list; empty means show everything.
 	query string
 
-	// index is the search index, rebuilt whenever the log changes.
-	index *search.Index
-
 	// filter is the persistent filter set from the command line.
 	filter state.Filter
 	order  state.Order
@@ -110,9 +106,6 @@ type Model struct {
 	// deleted holds the ids this interface deleted, newest last, for undo. Only
 	// its own deletions: undo must not reach back into other people's.
 	deleted []string
-
-	// syncing is set while a sync runs in the background.
-	syncing bool
 
 	// after is a command queued by a ':' command for Update to return.
 	after tea.Cmd
@@ -149,38 +142,31 @@ func New(s *session.Session) *Model {
 		width:  80,
 		height: 24,
 	}
-	m.reindex()
 	m.refresh()
 	return m
 }
 
-// Init satisfies tea.Model. The log is already loaded; it starts the poll that
-// notices writes by the command line, the browser view, an agent or a sync.
+// Init satisfies tea.Model. The project is already loaded; it starts the poll that
+// notices writes by the command line, the browser view or an agent.
 func (m *Model) Init() tea.Cmd { return poll() }
 
 // pollDisk reloads when another process has written. It waits while a command
 // or prompt is being typed, since a prompt holds the node it will act on.
 func (m *Model) pollDisk() {
-	if m.mode == modeCommand || m.mode == modePrompt || m.syncing {
+	if m.mode == modeCommand || m.mode == modePrompt {
 		return
 	}
 	changed, err := m.sess.Refresh()
 	if err != nil {
 		// Reported once rather than every second; the next poll retries.
 		if !m.statusErr {
-			m.setError(fmt.Errorf("could not read the log: %w", err))
+			m.setError(fmt.Errorf("could not read the database: %w", err))
 		}
 		return
 	}
 	if changed {
-		m.reindex()
 		m.refresh()
 	}
-}
-
-// reindex rebuilds the search index from the current tree.
-func (m *Model) reindex() {
-	m.index = search.Build(m.sess.State.List(state.Filter{}, state.OrderRank))
 }
 
 // notebooks returns the notebook column's contents.
@@ -234,11 +220,14 @@ func (m *Model) refresh() {
 		// A search spans the whole project rather than the selected notebook:
 		// looking for something is precisely the case where you do not know
 		// where it is.
-		results := m.index.Search(m.query, 0)
+		results, err := m.sess.Search(m.query, 0, false)
+		if err != nil {
+			m.setError(err)
+		}
 		m.entries = m.entries[:0]
-		for _, r := range results {
-			if matchesFilter(r.Node, m.filter, f.Now) {
-				m.entries = append(m.entries, r.Node)
+		for _, n := range results {
+			if matchesFilter(n, m.filter, f.Now) {
+				m.entries = append(m.entries, n)
 			}
 		}
 	} else {
@@ -358,7 +347,6 @@ func (m *Model) setError(err error) {
 	m.sess.Rollback()
 	// The rollback replaced the tree, so the list must be rebuilt from it or
 	// it would keep showing changes that were never written.
-	m.reindex()
 	m.refresh()
 	m.status, m.statusErr = err.Error(), true
 }
@@ -370,14 +358,13 @@ func (m *Model) commit(describe string) {
 		m.setError(err)
 		return
 	}
-	m.reindex()
 	m.refresh()
 	if describe != "" {
 		m.setStatus("%s", describe)
 	}
 }
 
-// reload re-reads the log from disk, picking up another process's writes. A
+// reload re-reads the database, picking up another process's writes. A
 // failure is shown on the status line and returned, so the caller does not
 // report success over it.
 func (m *Model) reload() error {
@@ -385,7 +372,6 @@ func (m *Model) reload() error {
 		m.setError(err)
 		return err
 	}
-	m.reindex()
 	m.refresh()
 	return nil
 }

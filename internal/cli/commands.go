@@ -16,8 +16,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/shakfu/gnotes/internal/editor"
-	"github.com/shakfu/gnotes/internal/event"
-	"github.com/shakfu/gnotes/internal/gitsync"
 	"github.com/shakfu/gnotes/internal/rank"
 	"github.com/shakfu/gnotes/internal/search"
 	"github.com/shakfu/gnotes/internal/session"
@@ -96,11 +94,11 @@ var cmdInit = &command{
 	name:    "init",
 	args:    "[name] [--user <you>]",
 	summary: "create a project here, and set your name the first time",
-	help: `Creates a .gnotes directory in the current directory and starts its
-event log. The name defaults to the directory's own.
+	help: `Creates .gnotes/gnotes.db in the current directory, a SQLite database
+for you to commit. The name defaults to the directory's own.
 
 The first time you run it anywhere, it also records your name and mints the
-identity that every event you write is attributed to. That identity is stored
+identity that every change you make is attributed to. That identity is stored
 outside the project, so it follows you across all of them.
 
 'gnotes -g init [dir]' sets up the global notes instead: a project that belongs
@@ -161,11 +159,11 @@ in dir, such as a clone from another machine, is used as it is.`,
 			return err
 		}
 
-		if existing != nil && resolvedPath(existing.Root()) != here {
+		if existing != nil && resolvedPath(existing.Root) != here {
 			// A project above, in the same repository, would be shadowed for
 			// every command run below the new one.
-			if top, inGit := gitsync.Toplevel(a.Dir); !inGit || within(resolvedPath(existing.Root()), top) {
-				return fmt.Errorf("a gnotes project already covers this directory, at %s", existing.Root())
+			if top, inGit := store.GitRoot(a.Dir); !inGit || within(resolvedPath(existing.Root), resolvedPath(top)) {
+				return fmt.Errorf("a gnotes project already covers this directory, at %s", existing.Root)
 			}
 			existing = nil
 		}
@@ -223,19 +221,16 @@ in dir, such as a clone from another machine, is used as it is.`,
 				return err
 			}
 		}
-		a.printf("created %s\n", p.Dir)
+		a.printf("created %s\n", p.Path)
 		if a.Global {
 			if err := a.saveGlobal(p); err != nil {
 				return err
 			}
 		}
-
-		switch top, inGit := gitsync.Toplevel(a.Dir); {
-		case !inGit:
-			a.printf("%s\n", a.style(ansiDim, "note: this directory is not in a git repository, which 'gnotes sync' needs"))
-		case top != here:
+		if top, inGit := store.GitRoot(a.Dir); inGit && resolvedPath(top) != here {
 			a.printf("%s\n", a.style(ansiDim, "note: the repository's root is "+top+"; notes created here are only found from this directory down"))
 		}
+
 		g := ""
 		if a.Global {
 			g = "-g "
@@ -247,10 +242,10 @@ in dir, such as a clone from another machine, is used as it is.`,
 
 // saveGlobal records p as the global notes project.
 func (a *App) saveGlobal(p *store.Project) error {
-	if err := store.SaveGlobal(p.Root()); err != nil {
+	if err := store.SaveGlobal(p.Root); err != nil {
 		return err
 	}
-	a.printf("global notes: %s\n", p.Root())
+	a.printf("global notes: %s\n", p.Root)
 	return nil
 }
 
@@ -509,7 +504,8 @@ Filters combine, so this shows only the open, high-priority tasks tagged bug:
 
     gnotes ls -k task -s open -p high -t bug
 
---at replays the log as it stood at a past moment and lists that instead. It
+--at replays the recorded changes up to a past moment and lists the project as
+it stood then. It
 reads a date, a timestamp, or a duration ago. A date means the start of that
 day in your time zone:
 
@@ -547,7 +543,9 @@ day in your time zone:
 			if err != nil {
 				return err
 			}
-			view, _ = s.At(cutoff.UnixMilli())
+			if view, err = s.At(cutoff); err != nil {
+				return err
+			}
 			// Overdue as of then, not as of now.
 			listNow = cutoff
 			if !*asJSON {
@@ -683,13 +681,15 @@ matches.`,
 			return err
 		}
 
-		nodes := s.State.List(state.Filter{}, state.OrderRank)
-		results := search.Build(nodes).Search(query, *limit)
+		results, err := s.Search(query, *limit, false)
+		if err != nil {
+			return err
+		}
 
 		if *asJSON {
 			out := make([]jsonNode, len(results))
-			for i, r := range results {
-				out[i] = toJSON(s.State, r.Node)
+			for i, n := range results {
+				out[i] = toJSON(s.State, n)
 			}
 			return a.writeJSON(out)
 		}
@@ -698,9 +698,9 @@ matches.`,
 			return nil
 		}
 
-		for _, r := range results {
-			a.listNodes(s.State, []*state.Node{r.Node}, true, a.Now())
-			if snippet := search.Snippet(r.Node, query, 100); snippet != "" {
+		for _, n := range results {
+			a.listNodes(s.State, []*state.Node{n}, true, a.Now())
+			if snippet := search.Snippet(n, query, 100); snippet != "" {
 				a.printf("    %s\n", a.style(ansiDim, snippet))
 			}
 		}
@@ -1144,7 +1144,7 @@ var cmdUnlink = &command{
 		if err == nil {
 			target = to.ID
 		} else {
-			// The target may be deleted or not yet synced, which the resolver
+			// The target may be deleted or missing, which the resolver
 			// cannot find; the link itself still names it.
 			var linkErr error
 			if from, linkErr = s.State.Resolve(args[0]); linkErr != nil {
@@ -1314,14 +1314,15 @@ var cmdLog = &command{
 	name:    "log",
 	aliases: []string{"history"},
 	args:    "[-n <count>] [<ref>]",
-	summary: "show the event history",
-	help: `Prints the raw events, newest last. With a reference, only the events
+	summary: "show the change history",
+	help: `Prints recorded changes, newest last. With a reference, only the changes
 touching that entry.
 
-This is the actual stored data; everything else in gnotes is derived from it.`,
+Every change to the database is recorded by triggers in its changes table,
+including edits made with other SQLite clients.`,
 	run: func(a *App, args []string) error {
 		fs := a.flags("log")
-		count := fs.Int("n", 20, "how many events to show")
+		count := fs.Int("n", 20, "how many changes to show")
 		if err := parse(fs, args); err != nil {
 			return err
 		}
@@ -1340,117 +1341,29 @@ This is the actual stored data; everything else in gnotes is derived from it.`,
 			only = n.ID
 		}
 
-		log := s.Log()
-		var rows []int
-		for i, e := range log {
-			if only != "" && e.Payload.ID != only && e.Payload.Parent != only && e.Payload.Target != only {
-				continue
-			}
-			rows = append(rows, i)
-		}
-		if *count > 0 && len(rows) > *count {
-			rows = rows[len(rows)-*count:]
+		entries, err := s.History(only, *count)
+		if err != nil {
+			return err
 		}
 
 		var t table
-		for _, i := range rows {
-			e := log[i]
-			when, _ := ulid.Timestamp(e.ID)
+		for _, e := range entries {
+			handle, when := ulid.Short(e.Node, refLen), e.At.Local().Format("2006-01-02 15:04")
+			// The entry's current title leads, and a value equal to it is not
+			// repeated.
+			detail := e.Detail
+			if n := s.State.Get(e.Node); n != nil && e.Node != s.State.Workspace {
+				if detail == n.Title {
+					detail = ""
+				}
+				detail = strings.TrimSpace(strconv.Quote(n.Title) + " " + detail)
+			}
 			t.addStyled(
-				[]string{ulid.Short(e.ID, refLen), when.Local().Format("2006-01-02 15:04"), string(e.Action), describe(s, e.Payload), s.State.Contributor(e.UserID)},
-				[]string{a.style(ansiDim, ulid.Short(e.ID, refLen)), a.style(ansiDim, when.Local().Format("2006-01-02 15:04")), a.style(ansiBold, string(e.Action)), "", a.style(ansiDim, s.State.Contributor(e.UserID))},
+				[]string{handle, when, e.Action, detail, e.Author},
+				[]string{a.style(ansiDim, handle), a.style(ansiDim, when), a.style(ansiBold, e.Action), "", a.style(ansiDim, e.Author)},
 			)
 		}
 		t.write(a.Stdout)
-		return nil
-	},
-}
-
-// describe renders the part of an event payload worth seeing in a log line:
-// the entry it touched, and the value it set.
-func describe(s *session.Session, p event.Payload) string {
-	var parts []string
-
-	// The entry's current title, which is more use than its id for reading
-	// back what happened.
-	subject := ""
-	if p.ID != "" {
-		if n := s.State.Get(p.ID); n != nil {
-			subject = n.Title
-			parts = append(parts, strconv.Quote(subject))
-		} else {
-			parts = append(parts, ulid.Short(p.ID, refLen))
-		}
-	}
-	for _, v := range []string{p.Name, p.Title, p.Status, p.Priority, p.Due, p.Tag} {
-		// A creation event carries the same title it is already labelled
-		// with; printing it twice says nothing. A later rename does differ,
-		// and that is exactly the case worth seeing.
-		if v != "" && v != subject {
-			parts = append(parts, v)
-		}
-	}
-	if p.Body != "" {
-		parts = append(parts, fmt.Sprintf("%d bytes", len(p.Body)))
-	}
-	if p.Assignee != "" {
-		parts = append(parts, s.State.Contributor(p.Assignee))
-	}
-	if p.Target != "" {
-		parts = append(parts, "-> "+ulid.Short(p.Target, refLen))
-	}
-	if len(p.Ranks) > 0 {
-		parts = append(parts, plural(len(p.Ranks), "sibling"))
-	}
-	return strings.Join(parts, " ")
-}
-
-var cmdSync = &command{
-	name:    "sync",
-	args:    "[--push]",
-	summary: "commit the logs to git, and optionally exchange with origin",
-	help: `Commits the event logs. Only the .gnotes paths are staged and
-committed, so whatever else you have staged or edited is untouched.
-
---push also pulls from origin and pushes back. That is opt-in because the logs
-live on your working branch: pulling would move your branch and pushing would
-publish everything else on it.`,
-	run: func(a *App, args []string) error {
-		fs := a.flags("sync")
-		push := fs.Bool("push", false, "also pull from and push to origin")
-		if err := parse(fs, args); err != nil {
-			return err
-		}
-
-		s, err := a.open()
-		if err != nil {
-			return err
-		}
-
-		message := fmt.Sprintf("gnotes: %s", plural(len(s.Log()), "event"))
-		res, err := gitsync.Sync(s.Project, message, gitsync.Options{Push: *push})
-		if err != nil {
-			if res.Committed {
-				a.printf("committed the event logs on %s\n", res.Branch)
-			}
-			return err
-		}
-
-		switch {
-		case res.Committed:
-			a.printf("committed the event logs on %s\n", res.Branch)
-		default:
-			a.printf("nothing to commit\n")
-		}
-		if res.Pulled {
-			a.printf("pulled from origin\n")
-		}
-		if res.Pushed {
-			a.printf("pushed to origin\n")
-		}
-		if !*push && res.Committed {
-			a.printf("%s\n", a.style(ansiDim, "run 'gnotes sync --push' to exchange with origin"))
-		}
 		return nil
 	},
 }
@@ -1470,14 +1383,14 @@ var cmdInfo = &command{
 		c := s.State.Summary(a.Now())
 		var t table
 		t.add("project", s.Project.Config.Name)
-		t.add("location", s.Project.Dir)
+		t.add("location", s.Project.Path)
 		t.add("notebooks", fmt.Sprint(c.Notebooks))
 		t.add("notes", fmt.Sprint(c.Notes))
 		t.add("tasks", fmt.Sprintf("%d  (%d open, %d doing, %d done)", c.Tasks, c.Open, c.Doing, c.Done))
 		if c.Overdue > 0 {
 			t.add("overdue", a.style(ansiRed, fmt.Sprint(c.Overdue)))
 		}
-		t.add("events", fmt.Sprint(len(s.Log())))
+		t.add("changes", fmt.Sprint(store.Snap(s.Project)))
 		t.add("contributors", fmt.Sprint(len(s.State.Contributors)))
 		if len(s.Problems) > 0 {
 			t.add("unapplied", fmt.Sprint(len(s.Problems)))
@@ -1490,7 +1403,7 @@ var cmdInfo = &command{
 var cmdWho = &command{
 	name:    "whoami",
 	args:    "[--set <name>]",
-	summary: "show or change the name your events are attributed to",
+	summary: "show or change the name your changes are attributed to",
 	run: func(a *App, args []string) error {
 		fs := a.flags("whoami")
 		set := fs.String("set", "", "change your display name")
@@ -1546,7 +1459,7 @@ var cmdHelp = &command{
 			return nil
 		}
 
-		a.printf("gnotes is a git-backed notes and tasks tool.\n\n")
+		a.printf("gnotes keeps notes and tasks in a SQLite database in your project.\n\n")
 		a.printf("usage: gnotes <command> [arguments]\n")
 		a.printf("       gnotes -g <command>  use the global notes, not this directory's project\n")
 		a.printf("       gnotes               open the interactive interface\n\n")

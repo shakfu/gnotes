@@ -301,8 +301,8 @@ func (a *App) linkLabels(s sessionState, ids []string) []string {
 			out[i] = fmt.Sprintf("%s %s", ulid.Short(id, refLen), target.Title)
 			continue
 		}
-		// Links are allowed to point at nodes that have not synced yet.
-		out[i] = fmt.Sprintf("%s (not synced)", ulid.Short(id, refLen))
+		// A link may name an entry that no longer exists.
+		out[i] = fmt.Sprintf("%s (missing)", ulid.Short(id, refLen))
 	}
 	return out
 }
