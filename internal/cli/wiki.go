@@ -9,7 +9,9 @@ import (
 	"strings"
 
 	"github.com/shakfu/gnotes/internal/display"
+	"github.com/shakfu/gnotes/internal/lsp"
 	"github.com/shakfu/gnotes/internal/mcp"
+	"github.com/shakfu/gnotes/internal/tui"
 	"github.com/shakfu/gnotes/internal/wiki"
 )
 
@@ -35,7 +37,9 @@ rebuilt from the pages whenever it is missing or stale.
   orphans                   pages no other page links to
   tasks [-s status]         checklist items and task pages
   cache --rebuild           delete the cache and index every page again
+  ui                        the interactive interface
   mcp                       serve the wiki to an agent over MCP
+  lsp                       serve the wiki to an editor over LSP
 
   new <title> [--in dir] [--task] [-t tag]... [-m body | --stdin]
   edit <page> [-m body | --stdin]   replace the body, or open $EDITOR
@@ -86,6 +90,35 @@ var wikiCommands = map[string]func(*App, []string) error{
 	"reopen":    func(a *App, args []string) error { return wikiStatus(a, args, "open") },
 	"promote":   wikiPromote,
 	"mcp":       wikiMCP,
+	"ui":        wikiUI,
+	"lsp":       wikiLSP,
+}
+
+// wikiLSP serves the wiki to an editor on standard input and output. The
+// editor starts it; see the README for configuration.
+func wikiLSP(a *App, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("%w: lsp takes no arguments", errUsage)
+	}
+	s := lsp.New(func(root string) (*wiki.Wiki, error) {
+		if root == "" {
+			root = a.Dir
+		}
+		p, err := wiki.Discover(root)
+		if err != nil {
+			return nil, err
+		}
+		return wiki.Open(p)
+	}, "gnotes-wiki", Version)
+	defer s.Close()
+	return s.Serve(a.Stdin, a.Stdout, a.Stderr)
+}
+
+func wikiUI(a *App, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("%w: ui takes no arguments", errUsage)
+	}
+	return a.withWiki(tui.RunWiki)
 }
 
 // wikiMCP serves the wiki on standard input and output. Register it with

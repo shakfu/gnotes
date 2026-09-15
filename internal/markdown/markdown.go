@@ -2,7 +2,8 @@
 // and checklist items, each with its position in the source.
 //
 // Positions are byte offsets into the source as given, front matter included,
-// so a caller can rewrite a link in place. Nothing is rendered here.
+// so a caller can rewrite a link in place. Tree gives a renderer the parsed
+// tree.
 package markdown
 
 import (
@@ -95,25 +96,35 @@ var (
 	dueWord  = regexp.MustCompile(`(?:^|\s)due:(\d{4}-\d{2}-\d{2})\b`)
 )
 
-// Parse reads a page. It does not fail: markdown has no invalid input.
-func Parse(src []byte) *Page {
-	p := &Page{}
-	p.Front, p.BodyStart = splitFront(src)
+// Tree parses a page into goldmark's tree for a renderer. Node segments index
+// doc, which is src with the front matter blanked.
+func Tree(src []byte) (root ast.Node, doc []byte) {
+	_, bodyStart := splitFront(src)
+	return tree(src, bodyStart)
+}
 
+func tree(src []byte, bodyStart int) (ast.Node, []byte) {
 	// Front matter is blanked rather than cut, so offsets and line numbers from
 	// the parser are already offsets into src.
 	doc := src
-	if p.BodyStart > 0 {
+	if bodyStart > 0 {
 		doc = bytes.Clone(src)
-		for i := 0; i < p.BodyStart; i++ {
+		for i := 0; i < bodyStart; i++ {
 			if doc[i] != '\n' {
 				doc[i] = ' '
 			}
 		}
 	}
+	return md.Parser().Parse(text.NewReader(doc)), doc
+}
+
+// Parse reads a page. It does not fail: markdown has no invalid input.
+func Parse(src []byte) *Page {
+	p := &Page{}
+	p.Front, p.BodyStart = splitFront(src)
+	root, doc := tree(src, p.BodyStart)
 	lines := lineStarts(src)
 
-	root := md.Parser().Parse(text.NewReader(doc))
 	slugs := map[string]int{}
 	ast.Walk(root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {

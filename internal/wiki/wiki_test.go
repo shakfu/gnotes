@@ -420,3 +420,58 @@ func TestConcurrentRefreshesOfTheSameChange(t *testing.T) {
 		t.Fatalf("%d backlinks, want 24: a page was indexed twice or not at all", len(back))
 	}
 }
+
+// A snapshot resolves a page's saved source exactly as the cache did.
+func TestSnapshotMatchesTheCache(t *testing.T) {
+	w, root := fixture(t)
+	s, err := w.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range s.Pages() {
+		src, _, err := w.Read(p.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cached, err := w.Links(p.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := s.Links(p.Path, src)
+		if fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", cached) && !(len(got) == 0 && len(cached) == 0) {
+			t.Errorf("%s:\nsnapshot %+v\ncache    %+v", p.Path, got, cached)
+		}
+	}
+
+	// An unsaved buffer: a heading added, a link to it, and a link broken.
+	buf := []byte("# Top\n\n## Added\n\n[[#Added]] [[#Top]] [[Orphn]]\n")
+	links := s.Links("index", buf)
+	var got []string
+	for _, l := range links {
+		got = append(got, l.Written()+" "+l.Status)
+	}
+	if strings.Join(got, ", ") != "[[#Added]] ok, [[#Top]] ok, [[Orphn]] missing-page" {
+		t.Fatalf("buffer links = %v", got)
+	}
+	// The snapshot's own view of index is unchanged afterwards.
+	if again := s.Links("lexer/design-sketch", []byte("[[index#Added]]\n")); again[0].Status != StatusMissingHeading {
+		t.Fatalf("a buffer's heading leaked into the index: %+v", again[0])
+	}
+
+	offers, err := s.Offers(links[2], buf)
+	if err != nil || len(offers) == 0 || offers[0].New != "Orphan" {
+		t.Fatalf("offers for [[Orphn]] = %+v, %v", offers, err)
+	}
+	if got := FixText(links[2], buf, offers[0]); got != "Orphan|Orphn" {
+		t.Fatalf("FixText = %q", got)
+	}
+
+	if id, ok := w.PageOf(filepath.Join(root, DirName, PagesDir, "lexer", "grammar-ambiguity.md")); !ok || id != "lexer/grammar-ambiguity" {
+		t.Fatalf("PageOf = %q, %v", id, ok)
+	}
+	for _, file := range []string{filepath.Join(root, "README.md"), filepath.Join(root, DirName, PagesDir, ".hidden", "x.md"), filepath.Join(root, DirName, PagesDir, "x.txt")} {
+		if id, ok := w.PageOf(file); ok {
+			t.Errorf("PageOf(%s) = %q", file, id)
+		}
+	}
+}

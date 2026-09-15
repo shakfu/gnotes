@@ -374,9 +374,44 @@ agent while it is open, which the editor must handle.
   rules are ported, not its CodeMirror code.
 - **`[[` completion** from page titles and paths; `#` after a target completes
   headings. **`[`...`](` completion** from repository paths.
-- `space` toggles the checkbox on the current line.
-- Undo and redo; search within the page; jump to a link's target.
+- Modal, vim-style keys (below).
 - A preview toggle, rendered as in the reader (section 12).
+
+### Keys
+
+The editor is modal and follows vim, so a vim user's habits work. Where vim
+and Neovim differ, such as `Y`, it follows vim. It reads no vimrc.
+
+- **Modes:** normal, insert, replace (`R`), visual (`v`, `V`), operator-pending,
+  and the `:` and `/` lines.
+- **Counts** before motions, operators and commands: `3j`, `d2w`, `2dd`.
+- **Motions:** `h j k l`, `gj gk` on wrapped rows, `w b e W B E ge`, `0 ^ $`,
+  `gg G {n}G`, `f F t T ; ,`, `%`, `{ }`, `H M L`, `ctrl-d ctrl-u ctrl-f
+  ctrl-b`, `n N * #`.
+- **Operators** with any motion or text object: `d c y > < gu gU g~`; doubled
+  (`dd`, `cc`, `yy`); and `D C Y x X s S r J ~ p P`.
+- **Text objects:** `iw aw iW aW is as ip ap`; quotes `i" a" i' a'` and the
+  same for backticks; brackets `i( a( ib i[ a[ i{ a{ i< a<`; and `il al` for a
+  markdown or wiki link.
+- **Insert:** `i a I A o O gi`; `backspace ctrl-w ctrl-u ctrl-t ctrl-d
+  ctrl-o`; `esc` and `ctrl-[` leave. `ctrl-n` and `ctrl-p` complete, as in vim,
+  and `[[` opens completion. Enter continues lists.
+- **Repeat and undo:** `.`, `u`, `ctrl-r`.
+- **Registers:** unnamed, `"a`-`"z`, `"0`, `"_`. `"+` writes the system
+  clipboard through OSC 52; pasting from it is the terminal's paste.
+- **Search:** `/ ?` with Go regular expressions, which differ from vim's
+  (no `\<`, `\v`); `:noh`.
+- **Ex:** `:w :q :wq :x :q! :e!`, `:{n}`, `:s/re/new/[g]` on the line, a visual
+  range, or `%`; `:preview`.
+- **Wiki keys, from vim's own:** `ctrl-]` and `gf` follow the link under the
+  cursor, `ctrl-o` and `ctrl-t` go back, `gx` shows an external link.
+  `ctrl-space` toggles a checklist item, as in vimwiki; some terminals send it
+  as `ctrl-@`, which is accepted too.
+
+Not in the first version: macros (`q`, `@`), marks, line undo (`U`),
+blockwise visual (`ctrl-v`), `:g`, ex ranges other than a visual range and
+`%`, folds, splits and mappings. A vim user will hit these; the key reference lists them as
+missing rather than letting a keypress do something else.
 
 ### Concurrent edits
 
@@ -562,7 +597,9 @@ recorded here.
    because agents are writers and need only the command-line core. Done;
    results below.
 4. **Terminal interface:** tree, reader, link panel, search, quick open.
-5. **Editor**, with conflicts and drafts.
+   Done; results below.
+5. **Language server** (`gnotes wiki lsp`), before the editor of section 11,
+   which is then built only if still needed. Done; results below.
 6. **Migration** from `gnotes.db` and JSONL.
 7. **Browser view.**
 
@@ -811,6 +848,130 @@ Changes from the design, found while building it:
 - **No `delete` tool**, as in section 13. gnotes has no undo, so deletion is
   left to the developer.
 
+### Phase 4 results (2026-09-15)
+
+`gnotes wiki ui` opens the interface of section 12. It starts on `index`, or
+the first page, and has:
+
+- a tree of directories and pages, with folding;
+- a reader drawn by `internal/render`, with `tab` and `shift-tab` between links,
+  `enter` to follow and `backspace` to go back;
+- a link panel with counts, the selected link's target and status, and
+  backlinks (`b`);
+- search as you type (`/`), quick open by title or path (`ctrl-p`), broken
+  links across the wiki (`c`) and tasks (`t`, `space` toggles);
+- repairs for a broken link (`f`), a new page (`n`), and a move with the
+  number of links it rewrites shown before it runs (`r`);
+- a one-second poll that reloads pages changed outside the interface and
+  follows a rename of the open page.
+
+**Renderer.** `internal/render` walks goldmark's tree: headings, emphasis,
+code, lists, checklists, quotes, fenced code, tables, rules and footnotes. It
+wraps at spaces to the width, records the output line of every link and
+heading, and maps each output line to its source line. Control characters in
+page text are replaced. A 5 KB page renders in 1.75 ms, so a selection
+change renders the page again rather than patching lines.
+
+**Exit criterion: the interface works on the wiki and fits the terminal.**
+Tests drive the model with key messages over a real wiki and check following
+page, heading, broken and file links; back; backlinks; search; quick open;
+repairing a link; toggling a task; creating and moving a page; the poll; an
+edit that conflicts with an outside save; an empty wiki; and every screen at
+sizes from 100x30 down to 1x1, with no line wider than the terminal. A run
+in a pseudo-terminal on the 5,000-page wiki starts, draws and quits.
+
+**Timings.** One process on the 5,000 pages of phase 1, including drawing the
+frame, median:
+
+| action | median |
+|---|---|
+| start and first frame | 25 ms |
+| scroll one line | 0.05 ms |
+| select the next link | 0.3 ms |
+| open a page | 0.8 ms |
+| search keystroke | 13.8 ms (26 ms for one letter, which matches every page) |
+| quick open keystroke | 1.3 ms |
+| poll with nothing changed | 10.9 ms, once a second |
+| `c`, checking 15,011 broken links | 82 ms |
+| `t`, listing 15,000 tasks | 34 ms |
+
+Changes from the design, found while building it:
+
+- **It lives in `internal/tui`** beside the notes interface, reusing the input
+  field, styles and poll. Both interfaces are in one binary until phase 6
+  removes the notes one.
+- **No `:` command line.** Every action has a key; a command line returns if
+  an action needs arguments a prompt cannot take.
+- **`e` opens `$EDITOR` on the whole page**, not the gnotes editor at the
+  current line, until phase 5. The write is checked against the hash read
+  before editing; on a conflict the edited text is kept in a temporary file
+  and its path shown.
+- **A file link opens `$EDITOR` with `+N`** for a line anchor. Editors that
+  do not take `+N`, such as VS Code, open the file at its start or fail.
+- **External links are shown, not opened.**
+- **`space` pages down in the reader.** Toggling a checklist item is in the
+  task list.
+- **The tree sorts by path**, so `page-100` comes before `page-2`.
+
+### Phase 5 results: language server (2026-09-16)
+
+`gnotes wiki lsp` speaks LSP 3.17 on standard input and output. It opens the
+wiki at the workspace root the editor sends, or the directory it runs in.
+
+| request | does |
+|---|---|
+| diagnostics | a warning on each broken link in an open buffer, as typed |
+| completion | pages after `[[`, headings after `#`, paths after `](` |
+| definition | the page, heading or file line a link names |
+| references | links to the page, or to the page a link names |
+| hover | a page's title and backlinks; a line link's lines; a broken link's problem |
+| document and workspace symbols | headings as an outline; pages by title |
+| rename | moves a page: its link edits and the file rename, for the editor to apply |
+| `workspace/willRenameFiles` | the link edits when the editor renames a page itself |
+| code actions | each repair `check --fix` offers, and creating a missing page |
+
+It writes nothing. Edits go to the editor, which applies them to its buffers;
+the server sees the result on save or within a second.
+
+**Unsaved buffers.** `wiki.Snapshot` holds the page index, every page's
+headings included, and resolves a buffer's links as refresh would, with the
+buffer's own headings. A test checks that it gives the same links as the
+cache for every page of the phase 1 fixture. The snapshot is loaded again
+only when a refresh finds a change.
+
+**Exit criterion: an editor gets completion, diagnostics, following and
+rename on the wiki.** Tests drive the server through its framing as an editor
+would, with UTF-8 and UTF-16 positions, and cover each request above; a rename
+applied to the files leaves no new broken link; renames are refused over
+unsaved changes to a page they edit, and in an editor that cannot rename
+files. Helix 25.07 ran against the built binary: it initialized, received the
+diagnostic for a broken link at the right range, followed a link to its page,
+and shut the server down.
+
+**Timings.** One server on the 5,000 pages of phase 1, median, framing
+included:
+
+| request | median |
+|---|---|
+| initialize, index loaded | 55 ms |
+| change to diagnostics, one page | 0.17 ms |
+| `[[` completion, 200 of 5,000 pages | 0.7 ms |
+| definition | 0.14 ms |
+| references | 0.3 ms |
+| save after an outside change, index reloaded | 65 ms |
+
+Changes from the design, found while building it:
+
+- **A rename does not write.** `gnotes wiki mv` writes each page atomically
+  against its hash; through LSP the editor applies the edits, and the pages
+  it edits stay unsaved until the user saves them.
+- **A rename is refused when a page it edits has unsaved changes**, since the
+  edits are positioned in the saved files.
+- **Only pages under `.gnotes/wiki` are served.** A markdown file elsewhere in
+  the repository, such as `README.md`, gets no diagnostics or completion.
+- **Whole-document sync.** The server asks for the full text on each change;
+  pages are small, and a page of 5 KB checks in under a millisecond.
+
 ## 18. Open questions
 
 1. **Global notes.** Do they keep `-g`, with the same layout under `~/notes`,
@@ -819,5 +980,7 @@ Changes from the design, found while building it:
    items from markdown outside `.gnotes/wiki`, such as `TODO.md`?
 3. **Assignees without accounts.** With the developer and agents as writers,
    is `assignees` needed, and if so, what names it?
-4. **Editor keys.** Plain keys with modifiers, or modal vim-style keys, or
-   both behind a setting? This decides much of phase 5.
+4. **Editor keys.** Decided: modal, vim-style (section 11).
+5. **A language server.** Decided: built first, in the same executable, as
+   `gnotes wiki lsp` (phase 5). Whether the editor of section 11 is still
+   needed is open.

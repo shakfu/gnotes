@@ -18,6 +18,9 @@ type Edit struct {
 	Line int    `json:"line"`
 	Old  string `json:"old"`
 	New  string `json:"new"`
+
+	// Start and End bound Old in the page's source before the move.
+	Start, End int `json:"-"`
 }
 
 // MovePlan is what renaming a page would change.
@@ -101,7 +104,7 @@ func (w *Wiki) PlanMove(from, to string) (*MovePlan, error) {
 	add := func(page, editPage string, l Link, ps *pageSource, repl string) {
 		old := string(ps.src[l.DestStart:l.DestEnd])
 		ps.spans = append(ps.spans, span{start: l.DestStart, end: l.DestEnd, old: old, new: repl})
-		plan.Edits = append(plan.Edits, Edit{Page: editPage, Line: l.Line, Old: old, New: repl})
+		plan.Edits = append(plan.Edits, Edit{Page: editPage, Line: l.Line, Old: old, New: repl, Start: l.DestStart, End: l.DestEnd})
 	}
 
 	incoming, err := w.links(`resolved = ? AND kind IN ('page', 'heading') AND page != ?`, from, from)

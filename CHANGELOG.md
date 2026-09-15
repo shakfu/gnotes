@@ -34,6 +34,10 @@ Nothing has been tagged yet, so everything below is the initial body of work.
 
 `gnotes wiki mcp` serves the wiki to code agents over MCP. An agent reads a page with its hash, then replaces exact text or the whole page against that hash. If the developer saved the page in between, the agent's write is refused and returns the current source. The agent can also create and rename pages, repair broken links, and change task status. There is no delete tool: gnotes has no undo, so deletion is left to the developer.
 
+`gnotes wiki ui` is a terminal interface to the wiki: a page tree, a reader that follows links and goes back, a panel of links and backlinks, search as you type, quick open, broken links with repairs, and tasks. Pages are drawn by a markdown renderer of gnotes' own rather than glamour, which added 7.86 MB to the binary. Pages changed outside the interface reload within a second.
+
+`gnotes wiki lsp` is a language server in the same executable, so an editor with an LSP client, such as Neovim or Helix, works on the wiki: link completion, warnings on broken links as you type, following links, backlinks, renaming a page with its links rewritten, and quick fixes. It was built before a gnotes editor because it keeps a vim user in their own vim, with their configuration. Configuration for Neovim, Helix and Vim is in the README.
+
 **Import of JSONL projects.** A project with `.gnotes/events/*.jsonl` logs, from builds before the database, is replayed into the tables on first open, each change dated by its event. Unknown actions and rejected events are counted, not imported. The logs are left in place.
 
 ### Fixed

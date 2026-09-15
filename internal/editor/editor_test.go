@@ -77,3 +77,27 @@ func TestVisualWinsOverEditorAndNoneIsAnError(t *testing.T) {
 		t.Fatalf("VISUAL was not used: %v", err)
 	}
 }
+
+func TestOpenPassesTheLine(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "args")
+	script := filepath.Join(dir, "ed.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$@\" > '"+log+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for line, want := range map[int]string{42: "+42 /some file.go\n", 0: "/some file.go\n"} {
+		cmd, err := Open("/some file.go", line, env(map[string]string{"EDITOR": script}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := os.ReadFile(log); string(got) != want {
+			t.Errorf("line %d: editor got %q, want %q", line, got, want)
+		}
+	}
+	if _, err := Open("x", 1, env(nil)); err != ErrNoEditor {
+		t.Fatalf("Open without an editor = %v", err)
+	}
+}

@@ -50,9 +50,11 @@ type Link struct {
 	Status   string `json:"status"`
 
 	// Ref marks a reference-style link, whose destination is in the shared
-	// definition. DestStart and DestEnd bound the destination in the page's
-	// source, -1 when it has no position.
+	// definition. Start and End bound the whole link, and DestStart and
+	// DestEnd the destination, in the page's source; each is -1 when it has no
+	// position.
 	Ref                bool `json:"-"`
+	Start, End         int  `json:"-"`
 	DestStart, DestEnd int  `json:"-"`
 }
 
@@ -207,19 +209,9 @@ func (w *Wiki) Page(p string) (Page, error) {
 		return Page{}, err
 	}
 
-	hrows, err := w.db.Query(`SELECT level, text, slug, line FROM headings WHERE page = ? ORDER BY line`, p)
-	if err != nil {
+	if out.Headings, err = w.Headings(p); err != nil {
 		return Page{}, err
 	}
-	for hrows.Next() {
-		var h Heading
-		if err := hrows.Scan(&h.Level, &h.Text, &h.Slug, &h.Line); err != nil {
-			hrows.Close()
-			return Page{}, err
-		}
-		out.Headings = append(out.Headings, h)
-	}
-	hrows.Close()
 
 	if out.Links, err = w.links(`page = ?`, p); err != nil {
 		return Page{}, err
@@ -231,7 +223,7 @@ func (w *Wiki) Page(p string) (Page, error) {
 	return out, err
 }
 
-const linkColumns = `page, line, col, form, image, label, target, anchor, kind, resolved, status, ref, dest_start, dest_stop`
+const linkColumns = `page, line, col, form, image, label, target, anchor, kind, resolved, status, ref, start, stop, dest_start, dest_stop`
 
 func (w *Wiki) links(where string, args ...any) ([]Link, error) {
 	rows, err := w.db.Query(`SELECT `+linkColumns+` FROM links WHERE `+where+` ORDER BY page, line, col`, args...)
@@ -243,10 +235,28 @@ func (w *Wiki) links(where string, args ...any) ([]Link, error) {
 	for rows.Next() {
 		var l Link
 		if err := rows.Scan(&l.Page, &l.Line, &l.Col, &l.Form, &l.Image, &l.Label, &l.Target, &l.Anchor, &l.Kind, &l.Resolved, &l.Status,
-			&l.Ref, &l.DestStart, &l.DestEnd); err != nil {
+			&l.Ref, &l.Start, &l.End, &l.DestStart, &l.DestEnd); err != nil {
 			return nil, err
 		}
 		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// Headings returns a page's headings in source order.
+func (w *Wiki) Headings(p string) ([]Heading, error) {
+	rows, err := w.db.Query(`SELECT level, text, slug, line FROM headings WHERE page = ? ORDER BY line`, p)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Heading{}
+	for rows.Next() {
+		var h Heading
+		if err := rows.Scan(&h.Level, &h.Text, &h.Slug, &h.Line); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
 	}
 	return out, rows.Err()
 }

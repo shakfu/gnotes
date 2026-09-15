@@ -90,3 +90,25 @@ func (e *Edit) Finish() (string, error) {
 
 // Cleanup removes the temporary file. It is safe to call more than once.
 func (e *Edit) Cleanup() { os.Remove(e.Path) }
+
+// Open prepares the editor command for an existing file, at a line when line
+// is positive. The line is passed as +N, which vi, vim, nano, emacs, micro and
+// kakoune accept.
+func Open(path string, line int, getenv func(string) string) (*exec.Cmd, error) {
+	editor := strings.TrimSpace(getenv("VISUAL"))
+	if editor == "" {
+		editor = strings.TrimSpace(getenv("EDITOR"))
+	}
+	if editor == "" {
+		return nil, ErrNoEditor
+	}
+	args := []string{path}
+	if line > 0 {
+		args = []string{fmt.Sprintf("+%d", line), path}
+	}
+	if runtime.GOOS == "windows" {
+		fields := strings.Fields(editor)
+		return exec.Command(fields[0], append(fields[1:], args...)...), nil
+	}
+	return exec.Command("sh", append([]string{"-c", editor + ` "$@"`, "sh"}, args...)...), nil
+}

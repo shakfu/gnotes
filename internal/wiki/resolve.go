@@ -268,6 +268,9 @@ func (ix *index) wiki(target string) (string, string) {
 // or text that slugs to it.
 func (ix *index) heading(page, anchor string) (bool, error) {
 	s, ok := ix.slugs[page]
+	if !ok && ix.tx == nil {
+		return false, nil // an index loaded whole has every page's headings
+	}
 	if !ok {
 		s = map[string]bool{}
 		rows, err := ix.tx.Query(`SELECT slug FROM headings WHERE page = ?`, page)

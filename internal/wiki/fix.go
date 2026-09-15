@@ -48,7 +48,15 @@ func (w *Wiki) OffersFor(links []Link) ([][]Offer, error) {
 				return nil, err
 			}
 		}
-		offers, err := w.offers(l, ix, renames)
+		if l.DestStart < 0 {
+			out[i] = []Offer{}
+			continue
+		}
+		src, _, err := w.Read(l.Page)
+		if err != nil {
+			return nil, err
+		}
+		offers, err := w.offers(l, src, ix, renames)
 		if err != nil {
 			return nil, err
 		}
@@ -57,16 +65,12 @@ func (w *Wiki) OffersFor(links []Link) ([][]Offer, error) {
 	return out, nil
 }
 
-// offers is Offers with the index and renames loaded; ix is needed only for a
-// missing or ambiguous page.
-func (w *Wiki) offers(l Link, ix *index, renames [][2]string) ([]Offer, error) {
+// offers is Offers for a link in src, with the index and renames loaded; ix is
+// needed only for a missing or ambiguous page.
+func (w *Wiki) offers(l Link, src []byte, ix *index, renames [][2]string) ([]Offer, error) {
 	out := []Offer{}
 	if l.DestStart < 0 {
 		return out, nil
-	}
-	src, _, err := w.Read(l.Page)
-	if err != nil {
-		return nil, err
 	}
 	if err := checkDest(src, l); err != nil {
 		return nil, err
@@ -127,12 +131,15 @@ func (w *Wiki) offers(l Link, ix *index, renames [][2]string) ([]Offer, error) {
 		}
 
 	case StatusMissingHeading:
-		src, _, err := w.Read(l.Resolved)
-		if err != nil {
-			return out, nil
+		target := src
+		if l.Resolved != l.Page {
+			var err error
+			if target, _, err = w.Read(l.Resolved); err != nil {
+				return out, nil
+			}
 		}
 		want := markdown.Slug(l.Anchor)
-		heads := markdown.Parse(src).Headings
+		heads := markdown.Parse(target).Headings
 		sort.SliceStable(heads, func(i, j int) bool {
 			return editDistance(heads[i].Slug, want) < editDistance(heads[j].Slug, want)
 		})
@@ -170,15 +177,21 @@ func (w *Wiki) Fix(l Link, o Offer) error {
 	if err := checkDest(src, l); err != nil {
 		return err
 	}
-	repl := o.New
-	if l.Form == string(markdown.FormWiki) && (l.DestEnd >= len(src) || src[l.DestEnd] != '|') {
-		repl += "|" + strings.TrimSpace(string(src[l.DestStart:l.DestEnd]))
-	}
-	out, err := applySpans(src, []span{{start: l.DestStart, end: l.DestEnd, old: string(src[l.DestStart:l.DestEnd]), new: repl}})
+	out, err := applySpans(src, []span{{start: l.DestStart, end: l.DestEnd, old: string(src[l.DestStart:l.DestEnd]), new: FixText(l, src, o)}})
 	if err != nil {
 		return err
 	}
 	return w.Write(l.Page, out, hash)
+}
+
+// FixText is what replaces a link's destination in src to apply an offer. A
+// wiki link that showed its target keeps showing it, as its label.
+func FixText(l Link, src []byte, o Offer) string {
+	repl := o.New
+	if l.Form == string(markdown.FormWiki) && (l.DestEnd >= len(src) || src[l.DestEnd] != '|') {
+		repl += "|" + strings.TrimSpace(string(src[l.DestStart:l.DestEnd]))
+	}
+	return repl
 }
 
 // originalTitle returns a page's title as written.

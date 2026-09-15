@@ -111,10 +111,49 @@ gnotes wiki edit "parser notes"             # opens $EDITOR on the page
 gnotes wiki mv lexer/parser-notes archive/ --dry-run   # the links it would rewrite
 gnotes wiki check --fix                     # choose a repair for each broken link
 gnotes wiki promote "index:12"              # a checklist item becomes a task page
+gnotes wiki ui                              # tree, reader, links, search; ? for keys
+gnotes wiki lsp                             # language server for your editor; see Editors
 claude mcp add gnotes-wiki -- gnotes wiki mcp   # the wiki for a code agent
 ```
 
 Pages are markdown files under `.gnotes/wiki`, edited with any editor. They link with `[[Page title]]`, `[[path/page#Heading|label]]`, or markdown links to pages, files and line ranges such as `../../src/lexer.go#L42`. The cache is derived from the pages and rebuilt whenever it is missing or stale. A write refuses, and changes nothing, when a page changed after gnotes read it. An agent works through the same writes: it reads a page's hash and edits exact text against it. This will replace the database; [the design](docs/dev/wiki-design.md) describes the plan.
+
+### Editors
+
+`gnotes wiki lsp` is a language server in the same executable. An editor starts it and gets, in wiki pages: `[[` and `](` completion of pages, headings and paths; warnings on broken links; go to definition to follow a link; references for backlinks; hover; heading outlines; rename of a page with its links rewritten; and quick fixes for broken links. Open buffers are checked as typed, before saving.
+
+Neovim 0.11 or later:
+
+```lua
+vim.lsp.config('gnotes', {
+  cmd = { 'gnotes', 'wiki', 'lsp' },
+  filetypes = { 'markdown' },
+  root_markers = { '.gnotes' },
+})
+vim.lsp.enable('gnotes')
+```
+
+Its default LSP keys then apply: `ctrl-]` follows a link, `grr` lists backlinks, `grn` renames the page, `gra` offers fixes, `K` hovers, `ctrl-x ctrl-o` completes.
+
+Helix, in `.helix/languages.toml` or `~/.config/helix/languages.toml`:
+
+```toml
+[language-server.gnotes]
+command = "gnotes"
+args = ["wiki", "lsp"]
+
+[[language]]
+name = "markdown"
+language-servers = ["gnotes"]
+```
+
+Vim has no built-in LSP client; with [vim-lsp](https://github.com/prabirshrestha/vim-lsp):
+
+```vim
+au User lsp_setup call lsp#register_server({'name': 'gnotes', 'cmd': {server_info->['gnotes', 'wiki', 'lsp']}, 'allowlist': ['markdown']})
+```
+
+A rename returns edits for the editor to apply, so the pages it changes are left modified and unsaved; save them all (`:wall`).
 
 ## Commands
 

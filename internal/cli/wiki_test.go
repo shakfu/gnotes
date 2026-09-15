@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -360,5 +361,32 @@ func TestWikiMCP(t *testing.T) {
 	}
 	if _, _, code := f.run("wiki", "mcp", "extra"); code == 0 {
 		t.Fatal("wiki mcp took an argument")
+	}
+	if _, _, code := f.run("wiki", "ui", "extra"); code == 0 {
+		t.Fatal("wiki ui took an argument")
+	}
+}
+
+func TestWikiLSP(t *testing.T) {
+	f := wikiFixture(t)
+	frame := func(body string) string { return fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(body), body) }
+	// No rootUri: the server uses the directory gnotes runs in.
+	stdin := frame(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}`) +
+		frame(`{"jsonrpc":"2.0","method":"initialized","params":{}}`) +
+		frame(`{"jsonrpc":"2.0","id":2,"method":"workspace/symbol","params":{"query":"grammar"}}`) +
+		frame(`{"jsonrpc":"2.0","id":3,"method":"shutdown"}`) +
+		frame(`{"jsonrpc":"2.0","method":"exit"}`)
+	stdout, stderr, code := f.runIn(stdin, "wiki", "lsp")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if n := strings.Count(stdout, "Content-Length: "); n != 3 || !strings.HasPrefix(stdout, "Content-Length: ") {
+		t.Fatalf("want 3 frames on stdout, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, `"name":"gnotes-wiki"`) || !strings.Contains(stdout, `"name":"Grammar"`) {
+		t.Fatalf("replies:\n%s", stdout)
+	}
+	if _, _, code := f.run("wiki", "lsp", "extra"); code == 0 {
+		t.Fatal("wiki lsp took an argument")
 	}
 }
