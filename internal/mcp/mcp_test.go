@@ -13,6 +13,7 @@ import (
 	"github.com/shakfu/gnotes/internal/state"
 	"github.com/shakfu/gnotes/internal/store"
 	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gnotes/internal/wiki"
 )
 
 var clock = func() time.Time { return time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC) }
@@ -24,6 +25,9 @@ type fixture struct {
 	t    *testing.T
 	sess *session.Session
 	work string
+
+	// wiki, when set, is served instead of sess.
+	wiki *wiki.Wiki
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -58,6 +62,9 @@ func (f *fixture) exchange(frames ...string) []map[string]any {
 
 	var out, logw bytes.Buffer
 	srv := New(f.sess, "gnotes", "test")
+	if f.wiki != nil {
+		srv = NewWiki(f.wiki, "gnotes-wiki", "test")
+	}
 
 	if err := srv.Serve(strings.NewReader(strings.Join(frames, "\n")+"\n"), &out, &logw); err != nil {
 		f.t.Fatalf("Serve: %v\nstderr: %s", err, logw.String())
@@ -325,8 +332,12 @@ func TestDiagnosticsGoToTheLogStreamOnly(t *testing.T) {
 // ---------------------------------------------------------------- tools/list
 
 func TestToolsListIsWellFormed(t *testing.T) {
-	f := newFixture(t)
+	checkToolsList(t, newFixture(t), registry)
+	checkToolsList(t, newWikiFixture(t), wikiRegistry)
+}
 
+func checkToolsList(t *testing.T, f *fixture, registry []registered) {
+	t.Helper()
 	replies := f.exchange(f.frame(1, "tools/list", nil))
 	tools := replies[0]["result"].(map[string]any)["tools"].([]any)
 

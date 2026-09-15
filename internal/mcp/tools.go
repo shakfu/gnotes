@@ -84,11 +84,14 @@ func ptr[T any](v T) *T { return &v }
 // have been made at all, such as an unknown tool name.
 type handler func(s *Server, args json.RawMessage) (string, error)
 
-// registry is every tool, in the order tools/list returns them.
-var registry = []struct {
+// registered is a tool and its handler.
+type registered struct {
 	tool
 	run handler
-}{
+}
+
+// registry is every notes tool, in the order tools/list returns them.
+var registry = []registered{
 	// ------------------------------------------------------------ reading
 
 	{
@@ -256,11 +259,20 @@ the same one.`,
 
 // tools returns the tool definitions for tools/list.
 func (s *Server) tools() []tool {
-	out := make([]tool, len(registry))
-	for i, entry := range registry {
+	reg := s.registry()
+	out := make([]tool, len(reg))
+	for i, entry := range reg {
 		out[i] = entry.tool
 	}
 	return out
+}
+
+// registry returns the tools this server serves.
+func (s *Server) registry() []registered {
+	if s.wiki != nil {
+		return wikiRegistry
+	}
+	return registry
 }
 
 // callParams is the tools/call payload.
@@ -276,7 +288,7 @@ func (s *Server) callTool(raw json.RawMessage) (any, error) {
 		return nil, &rpcError{Code: codeInvalidParams, Message: "malformed tools/call params: " + err.Error()}
 	}
 
-	for _, entry := range registry {
+	for _, entry := range s.registry() {
 		if entry.Name != p.Name {
 			continue
 		}
@@ -290,8 +302,10 @@ func (s *Server) callTool(raw json.RawMessage) (any, error) {
 		if err != nil {
 			// A tool that failed partway may have staged events already. The
 			// server outlives the call, so dropping them here is what keeps
-			// them out of the next tool's commit.
-			s.sess.Rollback()
+			// them out of the next tool's commit. Wiki writes stage nothing.
+			if s.sess != nil {
+				s.sess.Rollback()
+			}
 
 			// A failed operation is a result the model can read and react to,
 			// not a protocol fault.

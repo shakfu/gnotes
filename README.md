@@ -97,6 +97,25 @@ Entries are addressed by the same six-character handle the command line prints, 
 
 `gnotes mcp` speaks the protocol on standard input and output and is not meant to be run by hand; a client starts and stops it. Everything on standard output is protocol, and diagnostics go to standard error.
 
+## Wiki (preview)
+
+```sh
+gnotes wiki init                            # .gnotes/wiki, committed; .gnotes/cache.db, ignored
+gnotes wiki ls lexer                        # pages under a directory
+gnotes wiki show "design sketch"            # a page, its links and backlinks
+gnotes wiki search tokeniz                  # ranked, the last word by prefix
+gnotes wiki check                           # broken links; exit status 1 when any
+gnotes wiki tasks -s open                   # checklist items and task pages
+gnotes wiki new "Parser notes" --in lexer -t parser -m "First line."
+gnotes wiki edit "parser notes"             # opens $EDITOR on the page
+gnotes wiki mv lexer/parser-notes archive/ --dry-run   # the links it would rewrite
+gnotes wiki check --fix                     # choose a repair for each broken link
+gnotes wiki promote "index:12"              # a checklist item becomes a task page
+claude mcp add gnotes-wiki -- gnotes wiki mcp   # the wiki for a code agent
+```
+
+Pages are markdown files under `.gnotes/wiki`, edited with any editor. They link with `[[Page title]]`, `[[path/page#Heading|label]]`, or markdown links to pages, files and line ranges such as `../../src/lexer.go#L42`. The cache is derived from the pages and rebuilt whenever it is missing or stale. A write refuses, and changes nothing, when a page changed after gnotes read it. An agent works through the same writes: it reads a page's hash and edits exact text against it. This will replace the database; [the design](docs/dev/wiki-design.md) describes the plan.
+
 ## Commands
 
 Creating and editing:

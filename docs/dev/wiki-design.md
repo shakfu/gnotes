@@ -243,14 +243,23 @@ Every command brings the cache up to date before answering:
 
 1. List the directories under `.gnotes/wiki`.
 2. Stat every `.md` file on a pool of goroutines.
-3. Compare size and modification time with `files`. Re-read and re-parse the
+3. Compare a fingerprint of every page's name, size and modification time with
+   the stored one. If it matches, stop.
+4. Take the write lock and compare again: another process may have indexed the
+   same change meanwhile.
+5. Compare size and modification time with `files`. Re-read and re-parse the
    pages that differ; delete the rows of pages that are gone.
-4. Match deleted and added pages with the same content hash as renames, and
-   keep them for the fix offers.
-5. If the set of pages or headings changed, re-resolve link status with one
-   `UPDATE` over `links`.
+6. Insert the changed pages' rows, resolving their links against every page as
+   it will be after this refresh.
+7. Re-resolve links on other pages whose target names a page added, changed or
+   removed, by path, title or file name.
 
-A write transaction is taken only when step 3 finds a change.
+A removed page's content hash is kept, for the last 1,000 removals, so a page
+that reappears elsewhere with the same content is a rename, in the same refresh
+or a later one.
+
+A page edited twice within the filesystem's timestamp resolution, keeping its
+size, is not seen as changed. `cache --rebuild` recovers.
 
 Measured on 5,000 pages in 50 directories, warm cache, 16-thread Linux:
 
@@ -260,9 +269,8 @@ Measured on 5,000 pages in 50 directories, warm cache, 16-thread Linux:
 | list directories, then stat on 16 goroutines | 7-9 ms |
 | read all 5,000 files (9 MB) | 73-89 ms |
 
-An unchanged wiki of 5,000 pages therefore costs about 8 ms per command before
-the query. The first build reads every file; its parse and insert time is
-measured in phase 0.
+An unchanged wiki of 5,000 pages costs about 9 ms per command before the query,
+and a first build about 1.9 s (section 17, phase 1).
 
 File targets outside the wiki can change without any page changing. Refresh
 re-checks file targets only for the pages it re-parsed; `gnotes check` stats
@@ -295,6 +303,9 @@ Target, checked in phase 1: `gnotes search` under 15 ms median at 5,000 pages,
 process start included, against 45 ms for today's build.
 
 ## 9. Commands
+
+Until phase 4 these are `gnotes wiki <command>`, beside the notes commands they
+replace.
 
 | command | does |
 |---|---|
@@ -387,11 +398,11 @@ gopherwiki's `drafts` table, moved to files so a cache rebuild cannot lose it.
 
 ### Building it
 
-The component is the largest and least certain piece of this plan. Phase 0
-decides between `bubbles/textarea` and a component of our own. It checks
-whether `textarea` supports styled spans, undo and soft wrap with an accurate
-cursor, and measures typing latency on a 2,000-line page. The current
-dependencies are bubbletea, lipgloss and `x/ansi`; `bubbles` would be new.
+A component of our own, on bubbletea and lipgloss, not `bubbles/textarea`
+(phase 0, section 17). It keeps the page as lines, styles and wraps only the
+lines on screen, and records edits for undo. The prototype does not yet draw a
+cursor, map a cursor through wide characters and wrapped rows, select or use
+the clipboard; each of those is bounded by the rows on screen, not by the page.
 
 ## 12. Terminal interface
 
@@ -422,9 +433,9 @@ wiki                        | Design sketch                     lexer/
   wiki, **`t`** lists tasks.
 
 Rendering: headings, emphasis, lists, task lists, quotes, code and tables from
-the goldmark tree, styled with lipgloss. [glamour](https://github.com/charmbracelet/glamour)
-does this but brings chroma; phase 0 measures its binary cost before choosing
-it over a small renderer. Neither uses goldmark's typographer or hard-wrap
+the goldmark tree, styled with lipgloss, by a renderer of our own.
+[glamour](https://github.com/charmbracelet/glamour) was measured and rejected
+(phase 0). The renderer does not use goldmark's typographer or hard-wrap
 options, which gopherwiki enables: typographer changes quotes and dashes, and
 hard wraps render differently from GitHub.
 
@@ -541,20 +552,15 @@ resolves a wiki link by path only, and gnotes also by title (section 5).
 Each phase ends with `make test` and `make lint` passing and its exit criteria
 recorded here.
 
-0. **Spike.** Port the wiki-link parser with source segments. Measure parse and
-   index time for 5,000 pages, and the binary size of goldmark, yaml.v3,
-   glamour and `bubbles`. Prototype the editor component (section 11). Exit:
-   numbers here; a renderer choice; an editor component choice.
-1. **Cache and read commands:** `init`, `ls`, `show`, `search`, `links`,
-   `backlinks`, `check` without `--fix`, `orphans`, `tasks`,
-   `cache --rebuild`. Exit: a fixture wiki with every broken-link status is
-   reported exactly; `search` under 15 ms median at 5,000 pages.
+0. **Spike.** Done; results below.
+1. **Cache and read commands.** Done; results below.
 2. **Writes:** the write path with base hashes, `new`, `mv`, `rm`, `tag`,
-   `done`, `promote`, `check --fix`. Exit: rename and fix fixtures covering
+   `done`, `promote`, `check --fix`. Done; results below. Exit: rename and fix fixtures covering
    both link forms, labels, headings, relative paths from other directories,
    reference-style links, and a conflicting concurrent write.
 3. **Agents.** The MCP tools of section 13, on the phase 2 write path. Early,
-   because agents are writers and need only the command-line core.
+   because agents are writers and need only the command-line core. Done;
+   results below.
 4. **Terminal interface:** tree, reader, link panel, search, quick open.
 5. **Editor**, with conflicts and drafts.
 6. **Migration** from `gnotes.db` and JSONL.
@@ -562,6 +568,248 @@ recorded here.
 
 The work belongs on a branch until phase 4: the two storage models cannot share
 a binary without doubling the front ends.
+
+### Phase 0 results (2026-09-15)
+
+16-thread Linux machine, warm filesystem cache.
+
+**Parser.** `internal/markdown` reads front matter, title, headings (with
+GitHub slugs), links and checklist items, each with its source position. It
+is goldmark with GFM, footnotes, and the wiki-link parser ported from
+gopherwiki with source offsets. Tests cover both link forms, labels, anchors,
+reference-style links, autolinks, links in inline, fenced and indented code,
+front matter offsets, and concurrent use.
+
+- Positions are exact where they exist, and missing, not guessed, where they
+  do not. A markdown destination's offset comes from goldmark returning a
+  slice of the source; the parser checks that the slice aliases the source
+  rather than searching for equal bytes. Two cases have no position: text
+  under tab-expanded indentation, which goldmark copies, and the use site of a
+  reference-style link, whose destination is the shared definition.
+- Destinations are kept as written, with backslash escapes and percent
+  encoding. Resolution in phase 1 decodes them.
+
+**Parse and index**, one page of 1.3 KB with front matter, four sections, both
+link forms, a file link and checklist items:
+
+| | time |
+|---|---|
+| parse one page | 73 us, 480 allocations |
+| read 5,000 pages | 46-52 ms |
+| parse 5,000 pages, one goroutine | 346-358 ms |
+| parse 5,000 pages, 16 goroutines | 63-66 ms |
+| insert 165,000 rows in one transaction | 477-499 ms |
+| FTS5 query matching all 5,000 pages | 0.86 ms |
+
+A first build is about 0.6 s, most of it inserts. After that, a changed page
+costs one parse and its rows.
+
+**Binary size**, stripped, each added to a program already using bubbletea,
+lipgloss and SQLite:
+
+| added | size |
+|---|---|
+| goldmark, with GFM and footnotes, parse and HTML | +721 KB |
+| yaml.v3 | +303 KB |
+| `bubbles/textarea` | +578 KB |
+| glamour | +7.86 MB |
+
+glamour also needs a lipgloss prerelease (`v1.1.1-0.20250404203927`) newer
+than the `v1.1.0` gnotes uses.
+
+**Renderer: our own, on the goldmark tree.** glamour costs more than twice the
+whole browser view, almost all of it chroma for code highlighting.
+
+**Editor component: our own.** Keystroke latency, an insert and a full redraw
+of a 100x40 view, median of 500:
+
+| page lines | `bubbles/textarea` | prototype |
+|---|---|---|
+| 200 | 2.8 ms | 33 us |
+| 500 | 5.0 ms | 35 us |
+| 1,000 | 9.9 ms | 35 us |
+| 2,000 | 19.2 ms | 37 us |
+
+`textarea` grows by about 9.6 us per line of page and passes one 60 Hz frame
+near 1,700 lines. It also has no undo, styles only the whole text or the
+cursor line (so it cannot highlight markdown or underline a broken link), and
+stops at 10,000 lines. The prototype undid 500 edits in 2 ms. The prototype
+is incomplete (section 11); its latency is a lower bound, and the design
+keeps each missing feature bounded by the rows on screen.
+
+The size and editor programs were throwaway and are not in the tree.
+
+### Phase 1 results (2026-09-15)
+
+`internal/wiki` holds the cache, refresh, link resolution and queries;
+`gnotes wiki` exposes `init`, `ls`, `show`, `search`, `links`, `backlinks`,
+`check`, `orphans`, `tasks` and `cache --rebuild`, each read command with
+`--json`.
+
+**Exit criterion 1, met.** A fixture wiki holds one link for each status and
+resolution rule, and `TestEveryLinkStatus` checks every link's kind, status and
+target. Further tests cover deletion, re-creation, renames across refreshes,
+title and heading changes reaching links on other pages, file changes outside
+the wiki, a stale or corrupt cache, concurrent refreshes, and the commands'
+output, exit status and JSON.
+
+**Exit criterion 2, met for selective queries only.** Median of 50 runs of the
+built binary, process start included, on 5,000 generated pages (1.3 KB each,
+four sections, 16 links and four checklist items per page):
+
+| command | median |
+|---|---|
+| `search`, one page matches | 11.7 ms |
+| `search`, about 40% of pages match | 19.8 ms |
+| `search`, every page matches | 30.9 ms |
+| `show` | 11.5 ms |
+| `backlinks` | 10.8 ms |
+| `search` after editing or retitling one page | 34 ms |
+| `check` | 105 ms |
+| `ls`, printing 5,000 rows | 40 ms |
+| `tasks -s open`, printing 15,000 rows | 73 ms |
+| `cache --rebuild` | 1.9 s |
+
+Of an unchanged command's time, the scan is 5-8 ms and process start and
+opening the cache about 3 ms. A query matching every page spends about 11 ms
+in BM25 alone, so a broad query cannot meet 15 ms from the command line. The
+terminal interface keeps the cache open and skips the scan per keystroke.
+
+Changes from the design, found while building it:
+
+- **The fingerprint** (section 7, step 3) replaced reading the file table on
+  every command, which cost 5 ms.
+- **Resolution per affected link.** Re-resolving every page link after any
+  change cost 143 ms per edited page at 5,000 pages; resolving only links that
+  can name a changed page, through normalised target columns, cost 34 ms.
+  New links are resolved as they are inserted.
+- **Search ranks in three steps**: BM25 picks up to 200 candidates, titles
+  reorder them, and snippets and tags are built for the rows returned.
+  Building them for every match cost 20-30 ms.
+- **Renames are matched across refreshes**, not only within one, because the
+  terminal interface's poll can see a deletion and an addition separately.
+- **A reference resolves by file name** before fragments, so `page-42` is not
+  ambiguous with `page-4200`.
+- **The first build is 1.9 s**, not the spike's 0.6 s: the cache has more
+  indexes and tables than the spike's. Dropping indexes during a large build
+  saved 17% and was not kept, since the index list would have to track the
+  schema by hand.
+
+### Phase 2 results (2026-09-15)
+
+`gnotes wiki` adds `new`, `edit`, `mv`, `rm`, `tag`, `untag`, `done`, `doing`,
+`reopen`, `promote` and `check --fix[=first]`. Every write, one page or many,
+goes through one batch: all bases are checked under the cache's write lock,
+then each page is written to a synced temporary file and renamed.
+
+**Exit criterion, met.** Tests in `internal/wiki` check exact page contents
+after a move for:
+
+- wiki links by title, path, file name and heading, with and without labels;
+- markdown links, repository-rooted links, angle-bracket destinations and
+  reference definitions;
+- the moved page's own relative links to pages, headings, files and lines;
+- a link that becomes ambiguous on a page the move does not edit, and one
+  already broken that is not reported.
+
+Further tests cover a move refused when a linking page changed after
+planning, a conflicting write from a second process, fix offers for each
+broken status, front matter edits, task status, promotion and removal. The CLI
+tests run each command, including `$EDITOR` and interactive `check --fix`.
+
+No fixture produced an incoming link without a source position, so the path
+that reports such links as not rewritten has no test.
+
+**Timings.** Median of the built binary, process start included, on the 5,000
+pages of phase 1:
+
+| command | median |
+|---|---|
+| `tag`, `done` on a checklist item, `edit --stdin`, `new`, `rm` | 37-40 ms |
+| `mv`, 4 incoming links | 73 ms |
+| `mv --dry-run`, 1,000 incoming links | 65 ms |
+| `mv`, 1,000 incoming links in 500 pages | 662 ms |
+
+A one-page write costs two scans and one re-index, about 38 ms, close to
+phase 1's 34 ms for a read after an edit. A move writes and syncs every page
+it edits, then re-indexes them.
+
+Changes from the design, found while building it:
+
+- **`new` does not open an editor**, and `edit` opens `$EDITOR`, checked
+  against the page's hash, until the phase 5 editor exists.
+- **A write re-indexes after its renames**, not in the same step. A crash
+  between them leaves the cache stale, and the next command's scan corrects
+  it.
+- **A move reports newly broken links from the links it can change**: those
+  on the pages written and those naming either path or the page's title.
+  Comparing every broken link cost 110 ms on the benchmark wiki, which has
+  15,011 broken links.
+- **A file name matches with spaces read as hyphens**, so `edit parser notes`
+  finds `parser-notes.md` after its title heading is removed.
+- **Not built:** `check --files`, `tasks --due` and `log`.
+
+### Phase 3 results (2026-09-15)
+
+`gnotes wiki mcp` serves the wiki over MCP on standard input and output, as
+`gnotes-wiki`:
+
+```sh
+claude mcp add gnotes-wiki -- gnotes wiki mcp
+```
+
+It has the eleven tools of section 13, named `gnotes_list`, `gnotes_search`,
+`gnotes_read`, `gnotes_check`, `gnotes_tasks`, `gnotes_create`, `gnotes_edit`,
+`gnotes_write`, `gnotes_rename`, `gnotes_fix_link` and `gnotes_set_task`. The
+protocol code is shared with `gnotes mcp`, which keeps serving the database.
+
+**Exit criterion: the tools work on the phase 2 write path.** Tests drive the
+server through its framing and cover:
+
+- an edit and a whole-page write against a stale hash, after an outside save:
+  refused, nothing written, and the error carries the current hash and source;
+- writes refusing a title or fragment where a path is required;
+- a rename with `dry_run`, then for real;
+- check offers, a fix refused for a destination not offered, and a fix applied;
+- a checklist item refused after a line was inserted above it;
+- tool descriptions, schemas and annotations, for both servers.
+
+A command-line test runs `gnotes wiki mcp` and checks that standard output
+holds only frames.
+
+**Timings.** One server process on the 5,000 pages of phase 1, median; each
+call starts with a refresh:
+
+| tool | median |
+|---|---|
+| `gnotes_read`, `gnotes_search` (one match), `gnotes_tasks` (one page) | 5-6 ms |
+| `gnotes_edit` | 27 ms |
+| `gnotes_check`, 20 links with offers, of 15,011 broken | 211 ms |
+| `gnotes_check`, one page | 126 ms |
+
+`check` re-examines every file link in the wiki before filtering to a page,
+which is most of its time.
+
+Changes from the design, found while building it:
+
+- **`write` replaces the whole source**, front matter included, not the body.
+  An agent changes tags or status with `edit` on the front matter, so no tag
+  tool is needed.
+- **`fix_link` takes the link's page, line and text and the chosen
+  destination**, which must be one of the current offers. An offer number
+  would name a different repair once the list changed.
+- **`set_task` requires the item's text** for a checklist item, since
+  `page:line` names another item after a line is inserted above it.
+- **Writes take exact paths**; reads also take titles and fragments.
+- **Edits at cached byte offsets check the page against the cache.** Ticking
+  an item or promoting it used an offset from the cache on a page read later,
+  so a save in between could put the box character in the wrong place. Phase
+  2 had this fault; moves already checked.
+- **Offers for many links share one page index**, and the similar-name search
+  stops an edit distance once it passes the limit. Twenty offers took 695 ms
+  before, loading the index for each link.
+- **No `delete` tool**, as in section 13. gnotes has no undo, so deletion is
+  left to the developer.
 
 ## 18. Open questions
 

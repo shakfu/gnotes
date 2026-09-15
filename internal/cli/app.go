@@ -103,7 +103,7 @@ func init() {
 		cmdEdit, cmdStatus, cmdDue, cmdPriority,
 		cmdTag, cmdUntag, cmdAssign, cmdUnassign,
 		cmdLink, cmdUnlink, cmdMove, cmdRemove, cmdRestore,
-		cmdLog, cmdInfo, cmdWho, cmdUI, cmdServe, cmdMCP, cmdHelp,
+		cmdLog, cmdInfo, cmdWho, cmdUI, cmdServe, cmdMCP, cmdWiki, cmdHelp,
 	}
 	for _, c := range commands {
 		byName[c.name] = c

@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/shakfu/gnotes/internal/session"
+	"github.com/shakfu/gnotes/internal/wiki"
 )
 
 // Protocol versions this server implements, newest first.
@@ -69,7 +70,9 @@ func (e *rpcError) Error() string { return e.Message }
 
 // Server speaks MCP over a byte stream.
 type Server struct {
+	// Exactly one of sess and wiki is set; it decides the tools served.
 	sess *session.Session
+	wiki *wiki.Wiki
 
 	// out receives protocol frames and nothing else.
 	out *bufio.Writer
@@ -87,6 +90,11 @@ type Server struct {
 // New builds a server over an open session.
 func New(s *session.Session, name, version string) *Server {
 	return &Server{sess: s, name: name, version: version}
+}
+
+// NewWiki builds a server over an open wiki.
+func NewWiki(w *wiki.Wiki, name, version string) *Server {
+	return &Server{wiki: w, name: name, version: version}
 }
 
 // Serve reads frames from in and writes replies to out until in reaches end of
@@ -302,8 +310,15 @@ func (s *Server) initialize(raw json.RawMessage) (any, error) {
 			"name":    s.name,
 			"version": s.version,
 		},
-		"instructions": instructions,
+		"instructions": s.instructions(),
 	}, nil
+}
+
+func (s *Server) instructions() string {
+	if s.wiki != nil {
+		return wikiInstructions
+	}
+	return instructions
 }
 
 // instructions tell the model what this server is for. It is the one piece of
@@ -350,6 +365,10 @@ func (s *Server) send(r response) {
 // of stat calls, and an agent that reads a stale tree acts on notes that no
 // longer say what it thinks they say.
 func (s *Server) refresh() error {
+	if s.wiki != nil {
+		_, err := s.wiki.Refresh()
+		return err
+	}
 	_, err := s.sess.Refresh()
 	return err
 }

@@ -28,6 +28,12 @@ Nothing has been tagged yet, so everything below is the initial body of work.
 
 **Global notes.** `gnotes -g init [dir]` creates a personal project in `dir` or `~/notes`, or adopts one already there, and records its location. A leading `-g` sends any command to it, including `ui`, `serve` and `mcp`. Outside a project there is no fallback to it: a command without `-g` still refuses, so a note run in the wrong directory cannot land there. The location is kept in `global.json`, not `user.json`, because `whoami --set` rewrites `user.json` with only the identity fields.
 
+**Wiki (preview).** `gnotes wiki` works on markdown pages under `.gnotes/wiki`, the storage model that replaces the database (see `docs/dev/wiki-design.md`). Pages link with `[[wiki]]` links and markdown links; `gnotes wiki check` reports links to missing pages, headings, files and line ranges, and exits with status 1 when any exist. `ls`, `show`, `search`, `links`, `backlinks`, `orphans` and `tasks` read a gitignored cache, `.gnotes/cache.db`, which each command brings up to date from the pages and rebuilds when it is missing, stale or corrupt.
+
+`new`, `edit`, `mv`, `rm`, `tag`, `untag`, `done`, `doing`, `reopen` and `promote` write pages, and `check --fix` offers repairs for each broken link. `mv` rewrites links to and from the page in their own form, and `--dry-run` lists them. A write checks the content hash of every page it changes before writing any; if one changed since it was read, nothing is written. The hash check replaces a lock because editors outside gnotes take no lock.
+
+`gnotes wiki mcp` serves the wiki to code agents over MCP. An agent reads a page with its hash, then replaces exact text or the whole page against that hash. If the developer saved the page in between, the agent's write is refused and returns the current source. The agent can also create and rename pages, repair broken links, and change task status. There is no delete tool: gnotes has no undo, so deletion is left to the developer.
+
 **Import of JSONL projects.** A project with `.gnotes/events/*.jsonl` logs, from builds before the database, is replayed into the tables on first open, each change dated by its event. Unknown actions and rejected events are counted, not imported. The logs are left in place.
 
 ### Fixed

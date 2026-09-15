@@ -6,6 +6,8 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.10.1
+	github.com/yuin/goldmark v1.7.16
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.59.0
 )
 
