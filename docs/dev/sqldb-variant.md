@@ -1,5 +1,7 @@
 # A single-file database variant of gnotes
 
+Superseded: markdown files become the source of truth; see [wiki-design.md](wiki-design.md).
+
 Sketch and design space, not a plan. Nothing here is committed to.
 
 ## 1. The question behind the question
