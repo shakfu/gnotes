@@ -80,7 +80,7 @@ func (w *Wiki) offers(l Link, src []byte, ix *index, renames [][2]string) ([]Off
 	// pageOffer names a page in the link's own form.
 	pageOffer := func(id, why string) Offer {
 		if !wiki {
-			return Offer{Label: why, New: w.markdownDest(src, l, l.Page, w.file(id))}
+			return Offer{Label: why, New: w.markdownDest(src, l, l.Page, w.file(id), false)}
 		}
 		// The title when it names only this page, else the path.
 		target := id
@@ -158,7 +158,7 @@ func (w *Wiki) offers(l Link, src []byte, ix *index, renames [][2]string) ([]Off
 			break
 		}
 		for _, found := range w.findFiles(path.Base(l.Resolved)) {
-			out = append(out, Offer{Label: "file at " + found, New: w.markdownDest(src, l, l.Page, filepath.Join(w.Repo, filepath.FromSlash(found)))})
+			out = append(out, Offer{Label: "file at " + found, New: w.markdownDest(src, l, l.Page, filepath.Join(w.Repo, filepath.FromSlash(found)), false)})
 		}
 	}
 

@@ -1484,7 +1484,7 @@ func notesHelp(a *App) {
 	a.printf("gwiki notes keeps notes and tasks in a SQLite database, .gwiki/notes.db.\n\n")
 	a.printf("usage: gwiki notes <command> [arguments]\n")
 	a.printf("       gwiki notes -g <command>  use the global notes, not this directory's project\n")
-	a.printf("       gwiki notes               open the notes interface\n\n")
+	a.printf("       gwiki notes               list the commands\n\n")
 }
 
 // parseWhen reads a point in the past, for time travel. It accepts a date, a

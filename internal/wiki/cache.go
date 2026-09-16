@@ -11,7 +11,9 @@ import (
 
 // schemaVersion is PRAGMA user_version. Any other value, or a file SQLite
 // cannot read, is deleted and rebuilt: the cache holds nothing the pages do not.
-const schemaVersion = 3
+// 4: a directory's README is titled, found and linked by the directory.
+// 5: a checklist item's text no longer holds its due: date.
+const schemaVersion = 5
 
 const schema = `
 CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);

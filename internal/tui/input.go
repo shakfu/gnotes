@@ -12,7 +12,7 @@ import (
 //
 // Written here rather than taken from a widget library: the interface needs
 // exactly one line of editing with a handful of readline keys, and owning it
-// keeps the command line, the search line and the prompts behaving identically
+// keeps the search line, the open line and the prompts behaving identically
 // without a dependency in between.
 type input struct {
 	// runes is the content. Runes rather than a string so that the cursor
@@ -157,43 +157,4 @@ func (in *input) render(prefix string, width int) string {
 		b.WriteString("_")
 	}
 	return b.String()
-}
-
-// history recall. The command line remembers what has been run so that a
-// repeated command is one keypress away rather than retyped.
-
-// pushHistory records a command, skipping a repeat of the previous one.
-func (m *Model) pushHistory(cmd string) {
-	cmd = strings.TrimSpace(cmd)
-	if cmd == "" {
-		return
-	}
-	if n := len(m.history); n > 0 && m.history[n-1] == cmd {
-		m.histPos = len(m.history)
-		return
-	}
-	m.history = append(m.history, cmd)
-	m.histPos = len(m.history)
-}
-
-// historyPrev walks back through past commands.
-func (m *Model) historyPrev() {
-	if m.histPos == 0 {
-		return
-	}
-	m.histPos--
-	m.input.set(m.history[m.histPos])
-}
-
-// historyNext walks forward, ending at an empty line.
-func (m *Model) historyNext() {
-	if m.histPos >= len(m.history) {
-		return
-	}
-	m.histPos++
-	if m.histPos == len(m.history) {
-		m.input.clear()
-		return
-	}
-	m.input.set(m.history[m.histPos])
 }

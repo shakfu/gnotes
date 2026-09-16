@@ -13,28 +13,24 @@ import (
 	"github.com/shakfu/gwiki/internal/wiki"
 )
 
-// overview is what the home screen shows, loaded when it opens and when pages
-// change under it.
+// overview is what the latest and stats tabs show, loaded when they open and
+// when pages change under them.
 type overview struct {
 	pages    int
 	recent   []wiki.Change
 	broken   int
 	orphans  []wiki.PageInfo
 	deadEnds []wiki.PageInfo
-	tasks    []wiki.Task
-	overdue  int
-	dueSoon  int
 	dirs     []wiki.Count
 	tags     []wiki.Count
 	hubs     []wiki.Count
 	titles   map[string]string
 }
 
-// Section sizes on the overview.
+// Tab sizes: the pages the latest tab lists, and the most-linked pages.
 const (
-	homeRecent = 10
-	homeTasks  = 8
-	homeCounts = 6
+	homeRecent = 100
+	homeHubs   = 10
 )
 
 func (m *WikiModel) loadHome() {
@@ -59,33 +55,11 @@ func (m *WikiModel) loadHome() {
 	try(err)
 	o.tags, err = m.w.TagCounts()
 	try(err)
-	o.hubs, err = m.w.Hubs(homeCounts)
-	try(err)
-	o.tasks, err = m.w.Tasks(wiki.TaskFilter{Status: "open"})
+	o.hubs, err = m.w.Hubs(homeHubs)
 	try(err)
 	if len(errs) > 0 {
 		m.setError(errs[0])
 	}
-
-	today := m.now().Format("2006-01-02")
-	soon := m.now().AddDate(0, 0, 7).Format("2006-01-02")
-	for _, t := range o.tasks {
-		switch {
-		case t.Due == "":
-		case t.Due < today:
-			o.overdue++
-		case t.Due <= soon:
-			o.dueSoon++
-		}
-	}
-	// Dated tasks first, soonest first; then the rest by page.
-	sort.SliceStable(o.tasks, func(i, j int) bool {
-		a, b := o.tasks[i], o.tasks[j]
-		if (a.Due == "") != (b.Due == "") {
-			return a.Due != ""
-		}
-		return a.Due < b.Due
-	})
 
 	dirs := map[string]int{}
 	for _, p := range m.pages {
@@ -107,38 +81,137 @@ func (m *WikiModel) loadHome() {
 	m.home = o
 }
 
-// homeRow is one line of the overview; a row with an action can be selected.
+// sortTasks puts dated tasks first, soonest first, then the rest in order.
+func sortTasks(tasks []wiki.Task) {
+	sort.SliceStable(tasks, func(i, j int) bool {
+		a, b := tasks[i], tasks[j]
+		if (a.Due == "") != (b.Due == "") {
+			return a.Due != ""
+		}
+		return a.Due < b.Due
+	})
+}
+
+// taskSummary counts the listed tasks: open, overdue and due within a week.
+func (m *WikiModel) taskSummary() string {
+	today := m.now().Format("2006-01-02")
+	soon := m.now().AddDate(0, 0, 7).Format("2006-01-02")
+	open, overdue, dueSoon := 0, 0, 0
+	for _, t := range m.tasks {
+		if t.Status == "done" {
+			continue
+		}
+		open++
+		switch {
+		case t.Due == "":
+		case t.Due < today:
+			overdue++
+		case t.Due <= soon:
+			dueSoon++
+		}
+	}
+	parts := []string{fmt.Sprintf("%d open", open)}
+	if overdue > 0 {
+		parts = append(parts, fmt.Sprintf("%d overdue", overdue))
+	}
+	if dueSoon > 0 {
+		parts = append(parts, fmt.Sprintf("%d due within a week", dueSoon))
+	}
+	if m.allTasks {
+		parts = append(parts, fmt.Sprintf("%d done", len(m.tasks)-open))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// ---------------------------------------------------------------- latest
+
+// viewLatest lists pages by when they last changed.
+func (m *WikiModel) viewLatest() []string {
+	o := m.home
+	if o == nil || len(o.recent) == 0 {
+		return []string{styleDim.Render(" no pages yet; n creates one")}
+	}
+	t := &table{cols: []column{{title: "PAGE", shrink: 2, min: 12}, {title: "PATH", shrink: 3, min: 8}, {title: "CHANGED", right: true}, {title: "AUTHOR", shrink: 4}, {}}}
+	for _, c := range o.recent {
+		var state cell
+		if c.Uncommitted {
+			state = text("●", styleWarn)
+		}
+		t.rows = append(t.rows, []cell{
+			text(display.Line(c.Title), stylePlain),
+			text(display.Line(c.Path), styleDim),
+			text(ago(m.now(), c.Modified), styleDim),
+			text(display.Line(c.Author), styleDim),
+			state,
+		})
+	}
+	return m.viewTable(t, nil)
+}
+
+// latestSummary is the latest tab's count, and the legend when a page is not
+// committed.
+func (m *WikiModel) latestSummary() string {
+	o := m.home
+	if o == nil {
+		return ""
+	}
+	s := plural(o.pages, "page")
+	for _, c := range o.recent {
+		if c.Uncommitted {
+			return s + " · ● uncommitted"
+		}
+	}
+	return s
+}
+
+// ---------------------------------------------------------------- stats
+
+// homeRow is one line of the stats tab; a row with an action can be selected.
 type homeRow struct {
 	text   string
 	action func()
 }
 
-// homeColumns lays out the overview: recent changes and tasks, then health
-// and structure.
-func (m *WikiModel) homeColumns() [2][]homeRow {
+// homeWidths are the stats tab's column widths; right is zero below 100
+// columns, where the tab is one column.
+func (m *WikiModel) homeWidths() (left, right int) {
+	if m.width < 100 {
+		return m.width, 0
+	}
+	left = m.width / 2
+	return left, m.width - left - 1
+}
+
+// statsColumns lays out the stats tab: health and the most-linked pages, then
+// directories and tags.
+func (m *WikiModel) statsColumns() [2][]homeRow {
 	o := m.home
 	if o == nil {
 		return [2][]homeRow{}
+	}
+	lw, rw := m.homeWidths()
+	if rw == 0 {
+		rw = lw
 	}
 	var left, right []homeRow
 	header := func(rows *[]homeRow, title, detail string) {
 		if len(*rows) > 0 {
 			*rows = append(*rows, homeRow{})
 		}
-		text := styleHeader.Render(title)
+		text := " " + styleHeader.Render(title)
 		if detail != "" {
 			text += "  " + styleDim.Render(detail)
 		}
 		*rows = append(*rows, homeRow{text: text})
 	}
-	openPage := func(page string) func() {
-		return func() {
-			if err := m.open(page); err != nil {
-				m.setError(err)
-				return
-			}
-			m.focus = focusReader
+	// rowsOf lays out a section's table and pairs its rows with their actions.
+	rowsOf := func(t *table, width int, actions []func()) []homeRow {
+		t.layout(width)
+		out := make([]homeRow, len(t.rows))
+		for i, r := range t.rows {
+			out[i] = homeRow{text: t.draw(r), action: actions[i]}
 		}
+		return out
 	}
 	listPages := func(title string, pages []wiki.PageInfo) func() {
 		return func() {
@@ -147,139 +220,92 @@ func (m *WikiModel) homeColumns() [2][]homeRow {
 		}
 	}
 
-	header(&left, "Recent changes", "")
-	if len(o.recent) == 0 {
-		left = append(left, homeRow{text: styleDim.Render("  no pages yet; n creates one")})
-	}
-	for _, c := range o.recent {
-		when := ago(m.now(), c.Modified)
-		detail := when
-		if c.Author != "" {
-			detail += "  " + display.Line(c.Author)
-		}
-		if c.Uncommitted {
-			detail += "  " + styleDoing.Render("uncommitted")
-		}
-		left = append(left, homeRow{
-			text:   "  " + display.Line(c.Title) + "  " + styleDim.Render(display.Line(c.Path)+"  "+detail),
-			action: openPage(c.Path),
-		})
-	}
-
-	taskDetail := fmt.Sprintf("%d open", len(o.tasks))
-	if o.overdue > 0 {
-		taskDetail += fmt.Sprintf(", %d overdue", o.overdue)
-	}
-	if o.dueSoon > 0 {
-		taskDetail += fmt.Sprintf(", %d due within a week", o.dueSoon)
-	}
-	header(&left, "Tasks", taskDetail)
-	today := m.now().Format("2006-01-02")
-	for i, t := range o.tasks {
-		if i == homeTasks {
-			left = append(left, homeRow{text: styleDim.Render(fmt.Sprintf("  %d more; t lists them all", len(o.tasks)-homeTasks)), action: func() {
-				m.screen, m.cursor, m.scroll = screenTasks, 0, 0
-				m.loadTasks()
-			}})
-			break
-		}
-		where := t.Page
-		if t.Line > 0 {
-			where = fmt.Sprintf("%s:%d", t.Page, t.Line)
-		}
-		text := "  " + display.Line(t.Text) + "  " + styleDim.Render(display.Line(where))
-		switch {
-		case t.Due != "" && t.Due < today:
-			text += "  " + styleOverdue.Render("overdue "+t.Due)
-		case t.Due != "":
-			text += "  " + styleDue.Render("due "+t.Due)
-		}
-		page, line := t.Page, t.Line
-		left = append(left, homeRow{text: text, action: func() { m.openAt(page, line) }})
-	}
-
-	header(&right, "Health", "")
-	count := func(label string, n int, action func()) homeRow {
-		style := styleOK
+	header(&left, "Health", "")
+	health := &table{cols: []column{{shrink: 1, min: 8}, {right: true}}}
+	count := func(label string, n int) []cell {
 		if n > 0 {
-			style = styleError
+			return []cell{{{"✗ ", styleError}, {label, stylePlain}}, text(fmt.Sprint(n), styleError)}
 		}
-		return homeRow{text: fmt.Sprintf("  %-14s %s", label, style.Render(fmt.Sprint(n))), action: action}
+		return []cell{{{"✓ ", styleOK}, {label, stylePlain}}, text("0", styleOK)}
 	}
-	right = append(right,
-		count("broken links", o.broken, func() {
-			m.screen, m.cursor, m.scroll = screenBroken, 0, 0
-			m.loadBroken()
-		}),
-		count("orphan pages", len(o.orphans), listPages("orphan pages: nothing links to them", o.orphans)),
-		count("dead ends", len(o.deadEnds), listPages("dead ends: they link to no page", o.deadEnds)),
-	)
+	health.rows = [][]cell{count("broken links", o.broken), count("orphan pages", len(o.orphans)), count("dead ends", len(o.deadEnds))}
+	left = append(left, rowsOf(health, lw, []func(){
+		func() { m.showList(screenBroken) },
+		listPages("orphan pages: nothing links to them", o.orphans),
+		listPages("dead ends: they link to no page", o.deadEnds),
+	})...)
 
-	header(&right, "Structure", fmt.Sprintf("%d pages", o.pages))
-	for i, d := range o.dirs {
-		if i == homeCounts {
-			break
+	if len(o.hubs) > 0 {
+		header(&left, "Most linked", "")
+		hubs := &table{cols: []column{{shrink: 1, min: 8}, {right: true}}}
+		var actions []func()
+		for _, h := range o.hubs {
+			title := o.titles[h.Name]
+			if title == "" {
+				title = h.Name
+			}
+			hubs.rows = append(hubs.rows, []cell{text(display.Line(title), stylePlain), text(fmt.Sprintf("← %d", h.Pages), styleDim)})
+			page := h.Name
+			actions = append(actions, func() {
+				if err := m.open(page); err != nil {
+					m.setError(err)
+					return
+				}
+				m.focus = focusContent
+			})
 		}
+		left = append(left, rowsOf(hubs, lw, actions)...)
+	}
+
+	header(&right, "Directories", plural(o.pages, "page"))
+	dirs := &table{cols: []column{{shrink: 1, min: 8}, {right: true}}}
+	var actions []func()
+	for _, d := range o.dirs {
 		name, dir := d.Name+"/", d.Name
 		if d.Name == "" {
 			name = "(top)"
 		}
-		right = append(right, homeRow{
-			text: fmt.Sprintf("  %s  %s", display.Line(name), styleDim.Render(fmt.Sprint(d.Pages))),
-			action: func() {
-				pages, err := m.w.Pages(dir, "")
-				if err != nil {
-					m.setError(err)
-					return
-				}
-				if dir == "" {
-					pages = pages[:0]
-					for _, p := range m.pages {
-						if !strings.Contains(p.Path, "/") {
-							pages = append(pages, p)
-						}
+		dirs.rows = append(dirs.rows, []cell{text(display.Line(name), stylePlain), text(fmt.Sprint(d.Pages), styleDim)})
+		actions = append(actions, func() {
+			pages, err := m.w.Pages(dir, "")
+			if err != nil {
+				m.setError(err)
+				return
+			}
+			if dir == "" {
+				pages = pages[:0]
+				for _, p := range m.pages {
+					if !strings.Contains(p.Path, "/") {
+						pages = append(pages, p)
 					}
 				}
-				listPages("pages in "+name, pages)()
-			},
+			}
+			listPages("pages in "+name, pages)()
 		})
 	}
-	for i, t := range o.tags {
-		if i == homeCounts {
-			break
-		}
-		tag := t.Name
-		right = append(right, homeRow{
-			text: fmt.Sprintf("  %s  %s", styleTag.Render("#"+display.Line(tag)), styleDim.Render(fmt.Sprint(t.Pages))),
-			action: func() {
+	right = append(right, rowsOf(dirs, rw, actions)...)
+
+	if len(o.tags) > 0 {
+		header(&right, "Tags", "")
+		tags := &table{cols: []column{{shrink: 1, min: 8}, {right: true}}}
+		actions = nil
+		for _, t := range o.tags {
+			tag := t.Name
+			tags.rows = append(tags.rows, []cell{text("#"+display.Line(tag), styleTag), text(fmt.Sprint(t.Pages), styleDim)})
+			actions = append(actions, func() {
 				pages, err := m.w.Pages("", tag)
 				if err != nil {
 					m.setError(err)
 					return
 				}
 				listPages("pages tagged #"+tag, pages)()
-			},
-		})
-	}
-	if len(o.hubs) > 0 {
-		right = append(right, homeRow{text: styleDim.Render("  most linked")})
-	}
-	for _, h := range o.hubs {
-		title := o.titles[h.Name]
-		if title == "" {
-			title = h.Name
+			})
 		}
-		right = append(right, homeRow{
-			text:   fmt.Sprintf("  %s  %s", display.Line(title), styleDim.Render(fmt.Sprintf("<- %d", h.Pages))),
-			action: openPage(h.Name),
-		})
+		right = append(right, rowsOf(tags, rw, actions)...)
 	}
 
 	if m.width < 100 {
-		if len(left) > 0 {
-			left = append(left, homeRow{})
-		}
-		return [2][]homeRow{append(left, right...), nil}
+		return [2][]homeRow{append(append(left, homeRow{}), right...), nil}
 	}
 	return [2][]homeRow{left, right}
 }
@@ -311,41 +337,36 @@ func selectable(rows []homeRow) []int {
 	return out
 }
 
-func (m *WikiModel) keyHome(k string) {
-	cols := m.homeColumns()
+// homeSelection returns the stats tab's columns and the selectable rows of the
+// current one.
+func (m *WikiModel) homeSelection() ([2][]homeRow, []int) {
+	cols := m.statsColumns()
 	if cols[1] == nil {
 		m.homeCol = 0
 	}
-	sel := selectable(cols[m.homeCol])
-	pos := m.homeRow[m.homeCol]
-	switch k {
-	case "j", "down":
-		m.homeRow[m.homeCol] = min(pos+1, max(0, len(sel)-1))
-	case "k", "up":
-		m.homeRow[m.homeCol] = max(pos-1, 0)
-	case "g", "home":
-		m.homeRow[m.homeCol] = 0
-	case "G", "end":
-		m.homeRow[m.homeCol] = max(0, len(sel)-1)
-	case "h", "left", "l", "right", "tab":
-		if cols[1] != nil {
-			m.homeCol = 1 - m.homeCol
-		}
-	case "enter":
-		if pos < len(sel) {
-			cols[m.homeCol][sel[pos]].action()
-		}
-	case "r":
-		if err := m.loadPages(); err != nil {
-			m.setError(err)
-		}
-		m.loadHome()
-		m.setStatus("overview reloaded")
+	return cols, selectable(cols[m.homeCol])
+}
+
+func (m *WikiModel) homeMove(s func(pos, last int) int) {
+	_, sel := m.homeSelection()
+	m.homeRow[m.homeCol] = step(m.homeRow[m.homeCol], len(sel)-1, s)
+}
+
+func (m *WikiModel) homeSwitch() {
+	if cols, _ := m.homeSelection(); cols[1] != nil {
+		m.homeCol = 1 - m.homeCol
 	}
 }
 
-func (m *WikiModel) viewHome() []string {
-	cols := m.homeColumns()
+func (m *WikiModel) homeEnter() {
+	cols, sel := m.homeSelection()
+	if pos := m.homeRow[m.homeCol]; pos < len(sel) {
+		cols[m.homeCol][sel[pos]].action()
+	}
+}
+
+func (m *WikiModel) viewStats() []string {
+	cols := m.statsColumns()
 	h := m.bodyHeight()
 	render := func(col int, width int) []string {
 		rows := cols[col]
@@ -364,7 +385,7 @@ func (m *WikiModel) viewHome() []string {
 		for i := start; i < len(rows) && len(out) < h; i++ {
 			text := truncate(rows[i].text, width)
 			if i == cursor && col == m.homeCol {
-				text = styleSelected.Render(pad(ansi.Strip(text), width))
+				text = selectRow(ansi.Strip(text), width)
 			}
 			out = append(out, text)
 		}
@@ -373,8 +394,7 @@ func (m *WikiModel) viewHome() []string {
 	if cols[1] == nil {
 		return render(0, m.width)
 	}
-	lw := m.width * 3 / 5
-	rw := m.width - lw - 1
+	lw, rw := m.homeWidths()
 	left, right := render(0, lw), render(1, rw)
 	out := make([]string, h)
 	for i := range out {
@@ -385,19 +405,7 @@ func (m *WikiModel) viewHome() []string {
 		if i < len(right) {
 			r = right[i]
 		}
-		out[i] = pad(clip(l, lw), lw) + styleDim.Render("|") + clip(r, rw)
-	}
-	return out
-}
-
-func (m *WikiModel) viewPages() []string {
-	if len(m.listed) == 0 {
-		return []string{styleDim.Render(" none")}
-	}
-	start, end := m.listWindow(len(m.listed), 1)
-	var out []string
-	for i := start; i < end; i++ {
-		out = append(out, m.row(i, " "+pageLabel(m.listed[i])))
+		out[i] = pad(clip(l, lw), lw) + styleDim.Render("│") + clip(r, rw)
 	}
 	return out
 }

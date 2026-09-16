@@ -488,7 +488,11 @@ func taskLine(t wiki.Task) string {
 	if t.Status == "done" {
 		box = "[x]"
 	}
-	return fmt.Sprintf("%s:%d  %s  %s", t.Page, t.Line, box, t.Text)
+	s := fmt.Sprintf("%s:%d  %s  %s", t.Page, t.Line, box, t.Text)
+	if t.Due != "" {
+		s += "  due:" + t.Due
+	}
+	return s
 }
 
 func (s *Server) wikiTasks(raw json.RawMessage) (string, error) {

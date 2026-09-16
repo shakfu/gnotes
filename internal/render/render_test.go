@@ -26,25 +26,25 @@ func TestBlocks(t *testing.T) {
 		"- a\n- [ ] b\n- [x] c\n  1. d\n\n> e\n> f\n\n```\ng\n\th\n```\n\n| x | yy |\n|---|----|\n| 1 | 2 |\n\n---\n\nEnd[^1].\n\n[^1]: Note.\n"
 	d := render(t, src, 40)
 	want := []string{
-		"# Top",
+		"Top",
 		"",
 		"One two three four five. Six.",
 		"",
-		"- a",
-		"- [ ] b",
-		"- [x] c",
+		"• a",
+		"☐ b",
+		"☑ c",
 		"  1. d",
 		"",
-		"| e f",
+		"│ e f",
 		"",
 		"  g",
 		"      h",
 		"",
-		"x | yy",
-		"--+---",
-		"1 | 2",
+		"x │ yy",
+		"──┼───",
+		"1 │ 2",
 		"",
-		"----------------------------------------",
+		"────────────────────────────────────────",
 		"",
 		"End[^1].",
 		"",
@@ -55,6 +55,16 @@ func TestBlocks(t *testing.T) {
 	}
 	if d.Source[0] != 5 || d.Source[2] != 7 || d.Source[5] != 11 || d.Source[18] != d.Source[17] {
 		t.Fatalf("source lines = %v", d.Source)
+	}
+}
+
+// Headings below level 2 keep their marker, and a checklist item's wrapped
+// text lines up after its checkbox.
+func TestHeadingMarkersAndTaskWrap(t *testing.T) {
+	d := render(t, "## Two\n\n### Three\n\n- [ ] a checklist item that wraps\n", 16)
+	want := []string{"Two", "", "### Three", "", "☐ a checklist", "  item that", "  wraps"}
+	if got := strings.Join(d.Lines, "\n"); got != strings.Join(want, "\n") {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, strings.Join(want, "\n"))
 	}
 }
 
@@ -136,7 +146,7 @@ func BenchmarkRender(b *testing.B) {
 		_ = i
 	}
 	src := []byte(sb.String())
-	o := Options{Width: 80, Styles: DefaultStyles(), Selected: 3}
+	o := Options{Width: 80, Styles: marked(), Selected: 3}
 	b.ReportAllocs()
 	for b.Loop() {
 		Render(src, o)

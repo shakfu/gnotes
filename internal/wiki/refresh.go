@@ -383,6 +383,9 @@ func (wr *writer) exec(name string, args ...any) error {
 func (wr *writer) touch(id, title, stem string) {
 	wr.ids[id] = true
 	wr.paths[strings.ToLower(id)] = true
+	if dir := ReadmeDir(id); dir != "" {
+		wr.paths[strings.ToLower(dir)] = true // [[dir]] names the page
+	}
 	wr.titles[strings.ToLower(title)] = true
 	wr.stems[stem] = true
 }
@@ -418,9 +421,9 @@ func (wr *writer) insert(p parsed) error {
 	}
 	title := pg.Title
 	if title == "" {
-		title = path.Base(id)
+		title = pageName(id)
 	}
-	stem := strings.ToLower(path.Base(id))
+	stem := pageStem(id)
 	wr.touch(id, title, stem)
 	body := string(p.src[pg.BodyStart:])
 

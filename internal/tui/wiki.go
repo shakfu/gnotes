@@ -1,8 +1,8 @@
+// Package tui is the wiki's terminal interface: an overview, a page tree
+// beside the open page in a vim buffer, a backlinks panel, search, quick open,
+// broken links and tasks; see docs/dev/wiki-design.md, section 12, and
+// docs/dev/modal-reader.md.
 package tui
-
-// The wiki interface: a page tree, a reader with a link panel, search, quick
-// open, broken links and tasks. It sits beside the notes interface until the
-// wiki replaces it; see docs/dev/wiki-design.md, section 12.
 
 import (
 	"errors"
@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,7 +22,7 @@ import (
 
 	"github.com/shakfu/gwiki/internal/editor"
 	"github.com/shakfu/gwiki/internal/markdown"
-	"github.com/shakfu/gwiki/internal/render"
+	"github.com/shakfu/gwiki/internal/vim"
 	"github.com/shakfu/gwiki/internal/wiki"
 )
 
@@ -29,48 +30,59 @@ import (
 type wscreen int
 
 const (
-	screenHome   wscreen = iota // the overview
-	screenRead                  // tree and reader
+	screenLatest wscreen = iota // the overview's tab of recent changes
+	screenRead                  // tree and page
 	screenSearch                // '/' results as you type
 	screenOpen                  // ctrl-p quick open
 	screenBroken                // 'c' broken links across the wiki
 	screenTasks                 // 't' tasks
 	screenOffers                // 'f' repairs for one link
 	screenPages                 // a list of pages, such as a tag's
-	screenEdit                  // the page in the editor
+	screenStats                 // the overview's tab of health and structure
 	screenHelp
 )
+
+// overviewTabs are the overview's screens, in the order the header shows them
+// and tab moves through them.
+var overviewTabs = []wscreen{screenLatest, screenTasks, screenStats}
+
+func isTab(s wscreen) bool { return slices.Contains(overviewTabs, s) }
 
 // wfocus is the focused part of the read screen.
 type wfocus int
 
 const (
-	focusTree wfocus = iota
-	focusReader
-	focusPanel // the backlinks under the page
+	focusTree    wfocus = iota
+	focusContent        // the page's buffer
+	focusPanel          // the backlinks under the page
 )
 
 // WikiModel is the wiki interface state.
 type WikiModel struct {
-	w      *wiki.Wiki
-	styles render.Styles
+	w *wiki.Wiki
 
 	width, height int
 
 	screen wscreen
 	focus  wfocus
 
-	// base is the screen that lists and prompts return to: the overview or
-	// the reader, whichever was used last.
+	// base is the screen that lists and prompts return to: an overview tab or
+	// the page, whichever was used last. tab is the overview tab last shown.
 	base wscreen
+	tab  wscreen
 
+	// edit is the open page's buffer, set whenever cur is.
 	edit      *editing
-	clipboard string
 	home      *overview
 	homeCol   int
 	homeRow   [2]int
 	listTitle string
 	listed    []wiki.PageInfo
+
+	// helpFrom is the screen the help returns to, and helpScroll its first
+	// visible line.
+	helpFrom   wscreen
+	helpScroll int
 
 	// input backs the search and open lines and prompts.
 	input  input
@@ -103,54 +115,61 @@ type WikiModel struct {
 	now      func() time.Time
 	quitting bool
 
-	// exec runs a program with the terminal; tests replace it.
+	// exec runs a program with the terminal, and copy puts text in the
+	// system clipboard; tests replace both.
 	exec func(*exec.Cmd, tea.ExecCallback) tea.Cmd
+	copy func(text string)
 
 	// after is a command queued by a key for Update to return.
 	after tea.Cmd
 }
 
-// reading is the open page.
+// reading is what the index knows about the open page.
 type reading struct {
 	info      wiki.PageInfo
-	src       []byte
-	hash      string
-	links     map[string]wiki.Link
-	backlinks []wiki.Link
+	links     int
 	broken    int
+	backlinks []wiki.Link
+	linkers   []linker
 
-	doc                   *render.Doc
-	docWidth, docSelected int
-
-	selected   int // index into doc.Links, or -1
-	scroll     int
 	backCursor int
+}
+
+// linker is a page linking to the open one: the line of its first link, and
+// how many links it has.
+type linker struct {
+	page        string
+	line, links int
 }
 
 // place is an entry in the back stack.
 type place struct {
-	page             string
-	scroll, selected int
+	page   string
+	cursor vim.Pos
+	top    int
 }
 
-// treeRow is a directory or a page in the tree.
+// treeRow is a directory or a page in the tree. A directory with a README has
+// that page on its own row, and the README gets none of its own.
 type treeRow struct {
-	dir   string // a directory's path, empty for a page
-	page  int    // index into pages
-	depth int
+	dir     string // a directory's path, empty for a page
+	page    int    // index into pages: the page, or the directory's README
+	hasPage bool   // a directory has a README
+	depth   int
 }
 
 // NewWiki builds the interface over an open wiki.
 func NewWiki(w *wiki.Wiki) (*WikiModel, error) {
 	m := &WikiModel{
 		w:         w,
-		styles:    render.DefaultStyles(),
 		width:     80,
 		height:    24,
 		collapsed: map[string]bool{},
 		getenv:    os.Getenv,
 		now:       time.Now,
 		exec:      tea.ExecProcess,
+		// OSC 52: the terminal sets its clipboard, over SSH too.
+		copy: func(text string) { term.Output().Copy(text) },
 	}
 	if err := m.loadPages(); err != nil {
 		return nil, err
@@ -174,10 +193,23 @@ func RunWiki(w *wiki.Wiki) error {
 	if err != nil {
 		return err
 	}
+	// Ask the terminal for its background now: once the program runs, the
+	// reply would arrive as keystrokes.
+	term.HasDarkBackground()
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		return fmt.Errorf("interface: %w", err)
 	}
 	return nil
+}
+
+// pollInterval is how often pages are checked for outside changes.
+const pollInterval = time.Second
+
+// pollMsg asks the model to check for outside changes.
+type pollMsg struct{}
+
+func poll() tea.Cmd {
+	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return pollMsg{} })
 }
 
 // Init starts polling for outside changes.
@@ -205,20 +237,37 @@ func (m *WikiModel) buildTree() {
 	if m.treeCursor < len(m.rows) {
 		selected = m.rowKey(m.rows[m.treeCursor])
 	}
+	readmes := map[string]int{}
+	for i, p := range m.pages {
+		if dir := wiki.ReadmeDir(p.Path); dir != "" {
+			readmes[dir] = i
+		}
+	}
 	m.rows = m.rows[:0]
 	shown := map[string]bool{}
+	// The home page first, then everything by path.
+	order := make([]int, 0, len(m.pages))
 	for i, p := range m.pages {
+		if p.Path == "index" {
+			order = append([]int{i}, order...)
+		} else {
+			order = append(order, i)
+		}
+	}
+	for _, i := range order {
+		p := m.pages[i]
 		parts := strings.Split(p.Path, "/")
 		hidden := false
 		for d := 1; d < len(parts) && !hidden; d++ {
 			dir := strings.Join(parts[:d], "/")
 			if !shown[dir] {
 				shown[dir] = true
-				m.rows = append(m.rows, treeRow{dir: dir, depth: d - 1})
+				readme, has := readmes[dir]
+				m.rows = append(m.rows, treeRow{dir: dir, page: readme, hasPage: has, depth: d - 1})
 			}
 			hidden = m.collapsed[dir]
 		}
-		if !hidden {
+		if !hidden && wiki.ReadmeDir(p.Path) == "" {
 			m.rows = append(m.rows, treeRow{page: i, depth: len(parts) - 1})
 		}
 	}
@@ -240,66 +289,104 @@ func (m *WikiModel) rowKey(r treeRow) string {
 	return ""
 }
 
-// open reads a page into the reader, remembering the page it replaces.
+// errUnsaved refuses to leave a page with unsaved changes, as vim does.
+var errUnsaved = errors.New("the page has unsaved changes; :w writes them, :e! discards them")
+
+// open shows a page, remembering the one it replaces. The open page's buffer
+// is kept when it is the page asked for.
 func (m *WikiModel) open(page string) error {
-	if m.cur != nil && m.cur.info.Path != page && m.base == screenRead {
-		m.history = append(m.history, place{m.cur.info.Path, m.cur.scroll, m.cur.selected})
+	if m.cur != nil && m.cur.info.Path != page {
+		if m.edit != nil && m.edit.ed.Dirty {
+			return errUnsaved
+		}
+		if m.base == screenRead {
+			m.history = append(m.history, m.here())
+		}
 	}
-	if err := m.load(page); err != nil {
-		return err
+	if m.cur == nil || m.cur.info.Path != page {
+		if err := m.load(page); err != nil {
+			return err
+		}
 	}
 	m.screen, m.base = screenRead, screenRead
 	return nil
 }
 
-// load reads a page into the reader without touching the back stack.
+// here is the open page and position, for the back stack.
+func (m *WikiModel) here() place {
+	return place{page: m.cur.info.Path, cursor: m.edit.ed.Cursor, top: m.edit.ed.Top}
+}
+
+// load reads a page into the buffer, without touching the back stack.
 func (m *WikiModel) load(page string) error {
 	src, hash, err := m.w.Read(page)
 	if err != nil {
 		return err
 	}
-	full, err := m.w.Page(page)
+	r, err := m.pageInfo(page)
 	if err != nil {
 		return err
 	}
-	r := &reading{info: full.PageInfo, src: src, hash: hash, links: map[string]wiki.Link{}, backlinks: full.Backlinks, selected: -1}
-	for _, l := range full.Links {
-		r.links[linkKey(string(l.Form), l.Target, l.Anchor)] = l
-		if l.Status != wiki.StatusOK {
-			r.broken++
-		}
-	}
 	m.cur = r
+	m.openBuffer(page, src, hash)
 	for i, row := range m.rows {
-		if row.dir == "" && m.pages[row.page].Path == page {
+		if (row.dir == "" || row.hasPage) && m.pages[row.page].Path == page {
 			m.treeCursor = i
 		}
 	}
 	return nil
 }
 
-// reload reads the open page again after a change, keeping the position.
+// pageInfo reads the index's links and backlinks for a page.
+func (m *WikiModel) pageInfo(page string) (*reading, error) {
+	full, err := m.w.Page(page)
+	if err != nil {
+		return nil, err
+	}
+	r := &reading{info: full.PageInfo, links: len(full.Links), backlinks: full.Backlinks}
+	for _, l := range full.Links {
+		if l.Status != wiki.StatusOK {
+			r.broken++
+		}
+	}
+	at := map[string]int{}
+	for _, l := range full.Backlinks {
+		i, seen := at[l.Page]
+		if !seen {
+			i = len(r.linkers)
+			at[l.Page] = i
+			r.linkers = append(r.linkers, linker{page: l.Page, line: l.Line})
+		}
+		r.linkers[i].links++
+	}
+	return r, nil
+}
+
+// reload brings the open page up to date after a write or an outside change:
+// the index's view of it, and the buffer when it has no unsaved changes. A
+// modified buffer is marked instead, for :w! or :e!.
 func (m *WikiModel) reload() {
 	if m.cur == nil {
 		return
 	}
-	old := m.cur
-	if err := m.load(old.info.Path); err != nil {
-		m.cur = nil
-		m.setError(fmt.Errorf("%s: %w", old.info.Path, err))
+	page := m.cur.info.Path
+	r, err := m.pageInfo(page)
+	if err != nil {
+		m.setError(fmt.Errorf("%s: %w", page, err))
 		return
 	}
-	m.cur.scroll, m.cur.selected, m.cur.backCursor = old.scroll, old.selected, old.backCursor
-}
-
-func linkKey(form, target, anchor string) string {
-	return form + "\x00" + target + "\x00" + anchor
-}
-
-// cacheLink is the indexed link for a drawn one.
-func (r *reading) cacheLink(l render.Link) (wiki.Link, bool) {
-	c, ok := r.links[linkKey(string(l.Form), l.Target, l.Anchor)]
-	return c, ok
+	r.backCursor = min(m.cur.backCursor, max(0, len(r.linkers)-1))
+	m.cur = r
+	e := m.edit
+	if src, hash, err := m.w.Read(page); err == nil && hash != e.base {
+		if e.ed.Dirty {
+			e.outside = true
+		} else {
+			e.ed.Load(string(src))
+			e.base, e.outside = hash, false
+		}
+	}
+	m.checkLinks()
 }
 
 // ---------------------------------------------------------------- layout
@@ -307,7 +394,7 @@ func (r *reading) cacheLink(l render.Link) (wiki.Link, bool) {
 const wikiTreeWidth = 28
 
 // treeWidth is the tree's column, zero when the terminal is too narrow to
-// show it beside the reader.
+// show it beside the page.
 func (m *WikiModel) treeWidth() int {
 	if m.width < 70 {
 		if m.focus == focusTree || m.cur == nil {
@@ -320,15 +407,18 @@ func (m *WikiModel) treeWidth() int {
 
 func (m *WikiModel) bodyHeight() int { return max(1, m.height-2) }
 
-// panelHeight is the link panel under the page, dropped on short terminals.
+// panelHeight is the backlinks panel under the page: a title row and a row
+// per linking page, at most a third of the body. Pages nothing links to, and
+// short terminals, get none.
 func (m *WikiModel) panelHeight() int {
-	if m.bodyHeight() < 12 {
+	if m.cur == nil || len(m.cur.linkers) == 0 || m.bodyHeight() < 12 {
 		return 0
 	}
-	return 6
+	return min(len(m.cur.linkers)+1, m.bodyHeight()/3)
 }
 
-func (m *WikiModel) readerWidth() int {
+// contentWidth is the page pane, beside the tree and its separator.
+func (m *WikiModel) contentWidth() int {
 	w := m.width - m.treeWidth()
 	if m.treeWidth() > 0 && w > 0 {
 		w-- // the separator
@@ -336,64 +426,27 @@ func (m *WikiModel) readerWidth() int {
 	return max(0, w)
 }
 
-func (m *WikiModel) readerHeight() int { return max(1, m.bodyHeight()-m.panelHeight()) }
-
-// doc renders the open page for the reader's width and selection, reusing the
-// last rendering when neither changed.
-func (m *WikiModel) doc() *render.Doc {
-	r := m.cur
-	width := max(10, m.readerWidth()-1)
-	if r.doc == nil || r.docWidth != width || r.docSelected != r.selected {
-		r.doc = render.Render(r.src, render.Options{Width: width, Styles: m.styles, Selected: r.selected, Broken: func(l render.Link) bool {
-			c, ok := r.cacheLink(l)
-			return ok && c.Status != wiki.StatusOK
-		}})
-		r.docWidth, r.docSelected = width, r.selected
-	}
-	return r.doc
+// contentHeight is the rows the buffer is drawn in, under the front matter
+// line and above the backlinks panel.
+func (m *WikiModel) contentHeight() int {
+	return max(1, m.bodyHeight()-m.panelHeight()-m.metaHeight())
 }
 
-func (m *WikiModel) scrollReader(by int) {
-	if m.cur == nil {
-		return
+// metaHeight is the front matter line above the preview, which does not draw
+// the front matter; the buffer shows it as text.
+func (m *WikiModel) metaHeight() int {
+	if m.cur == nil || m.edit == nil || !m.edit.preview || len(m.metaLine()) == 0 {
+		return 0
 	}
-	m.cur.scroll = max(0, min(m.cur.scroll+by, len(m.doc().Lines)-m.readerHeight()))
+	return 1
 }
 
-// selectLink moves the selection by step, wrapping, and scrolls it into view.
-func (m *WikiModel) selectLink(step int) {
-	if m.cur == nil {
-		return
-	}
-	links := m.doc().Links
-	if len(links) == 0 {
-		m.setStatus("no links on this page")
-		return
-	}
-	r := m.cur
-	if r.selected < 0 {
-		// Start from the first link on screen.
-		r.selected = len(links) - 1
-		if step < 0 {
-			r.selected = 0
-		}
-		for i, l := range links {
-			if l.Line >= r.scroll {
-				r.selected = (i - step + len(links)) % len(links)
-				break
-			}
-		}
-	}
-	r.selected = (r.selected + step + len(links)) % len(links)
-	m.showLine(links[r.selected].Line)
-}
-
-// showLine scrolls the reader so an output line is visible.
-func (m *WikiModel) showLine(line int) {
-	h := m.readerHeight()
-	if line < m.cur.scroll || line >= m.cur.scroll+h {
-		m.cur.scroll = max(0, line-h/3)
-	}
+// jumpTo puts the cursor at the start of a 1-based source line, a third of
+// the way down the pane.
+func (m *WikiModel) jumpTo(line int) {
+	ed := m.edit.ed
+	ed.SetCursor(vim.Pos{Line: max(0, line-1)})
+	ed.Top = max(0, ed.Cursor.Line-m.contentHeight()/3)
 }
 
 // ---------------------------------------------------------------- update
@@ -443,18 +496,8 @@ func (m *WikiModel) pollDisk() {
 		m.setError(err)
 		return
 	}
-	if e := m.edit; e != nil {
-		// A page changed under the editor: reload a clean buffer, and warn
-		// about one with unsaved changes.
-		if _, hash, err := m.w.Read(e.page); err == nil && hash != e.base {
-			if e.ed.Dirty {
-				e.outside = true
-			} else {
-				m.editReload()
-			}
-		}
-	}
 	if m.cur != nil {
+		m.edit.links = nil
 		page := m.cur.info.Path
 		for _, r := range ch.Renamed {
 			if r[0] == page {
@@ -462,14 +505,20 @@ func (m *WikiModel) pollDisk() {
 			}
 		}
 		if page != m.cur.info.Path {
-			m.cur.info.Path = page
+			m.dropDraft()
+			m.cur.info.Path, m.edit.page = page, page
 			m.setStatus("renamed to " + page)
 		}
-		if _, _, err := m.w.Read(page); err != nil {
-			m.setStatus(page + " was removed")
-			m.cur = nil
-		} else {
+		switch _, _, err := m.w.Read(page); {
+		case err == nil:
 			m.reload()
+		case m.edit.ed.Dirty:
+			m.edit.outside = true
+			m.setError(errors.New(page + " was removed; :w writes it again"))
+		default:
+			m.setStatus(page + " was removed")
+			m.cur, m.edit = nil, nil
+			m.focus = focusTree
 		}
 	}
 	switch m.screen {
@@ -477,7 +526,7 @@ func (m *WikiModel) pollDisk() {
 		m.loadBroken()
 	case screenTasks:
 		m.loadTasks()
-	case screenHome:
+	case screenLatest, screenStats:
 		m.loadHome()
 	}
 }
@@ -491,250 +540,377 @@ func (m *WikiModel) key(msg tea.KeyMsg) {
 		m.keyPrompt(msg)
 		return
 	}
-	switch m.screen {
-	case screenSearch, screenOpen:
+	switch {
+	case m.screen == screenSearch, m.screen == screenOpen:
 		m.keyFind(msg)
-		return
-	case screenEdit:
-		m.keyEdit(msg)
-		return
-	case screenHelp:
-		m.screen = m.base
-		return
-	}
-
-	k := msg.String()
-	m.status = ""
-	switch k {
-	case "q":
-		m.quitting = true
-		return
-	case "?":
-		m.screen = screenHelp
-		return
-	case "/":
-		m.screen, m.cursor, m.scroll, m.hits = screenSearch, 0, 0, nil
-		m.input.clear()
-		return
-	case "ctrl+p":
-		m.screen, m.cursor, m.scroll = screenOpen, 0, 0
-		m.input.clear()
-		m.findPages()
-		return
-	case "c":
-		if m.screen != screenOffers {
-			m.screen, m.cursor, m.scroll = screenBroken, 0, 0
-			m.loadBroken()
-			return
-		}
-	case "t":
-		if m.screen != screenOffers {
-			m.screen, m.cursor, m.scroll = screenTasks, 0, 0
-			m.loadTasks()
-			return
-		}
-	case "n":
-		m.promptNew()
-		return
-	case "O":
-		m.screen, m.base = screenHome, screenHome
-		m.loadHome()
-		return
-	case "esc":
-		if m.screen == screenOffers {
-			m.screen = m.offerFrom
-			return
-		}
-		if m.screen != m.base {
-			m.screen = m.base
-			return
-		}
-	}
-
-	switch m.screen {
-	case screenHome:
-		m.keyHome(k)
-	case screenBroken, screenTasks, screenOffers, screenPages:
-		m.keyList(msg)
+	case m.screen == screenRead && m.focus == focusContent && m.edit != nil:
+		m.keyContent(msg)
+	case m.screen == screenHelp:
+		m.keyHelp(msg)
 	default:
-		switch m.focus {
-		case focusTree:
-			m.keyTree(k)
-		case focusPanel:
-			m.keyPanel(k)
-		default:
-			m.keyReader(k)
-		}
+		m.status = ""
+		m.keyNormal(msg.String())
 	}
 }
 
-func (m *WikiModel) keyTree(k string) {
-	switch k {
-	case "j", "down":
-		m.treeCursor = min(m.treeCursor+1, len(m.rows)-1)
-	case "k", "up":
-		m.treeCursor = max(m.treeCursor-1, 0)
-	case "g", "home":
-		m.treeCursor = 0
-	case "G", "end":
-		m.treeCursor = max(0, len(m.rows)-1)
-	case "enter", " ", "o":
-		if m.treeCursor >= len(m.rows) {
-			return
-		}
-		row := m.rows[m.treeCursor]
-		if row.dir != "" {
-			m.collapsed[row.dir] = !m.collapsed[row.dir]
-			m.buildTree()
-			return
-		}
-		if err := m.open(m.pages[row.page].Path); err != nil {
-			m.setError(err)
-			return
-		}
-		m.focus = focusReader
-	case "l", "right", "tab":
-		if m.cur != nil {
-			m.focus = focusReader
-		}
-	}
+// ---------------------------------------------------------------- actions
+
+func (m *WikiModel) startSearch() {
+	m.screen, m.cursor, m.scroll, m.hits = screenSearch, 0, 0, nil
+	m.input.clear()
 }
 
-func (m *WikiModel) keyReader(k string) {
-	if m.cur == nil {
-		m.focus = focusTree
+func (m *WikiModel) startOpen() {
+	m.screen, m.cursor, m.scroll = screenOpen, 0, 0
+	m.input.clear()
+	m.findPages()
+}
+
+// showList opens the broken links, or the tasks tab.
+func (m *WikiModel) showList(screen wscreen) {
+	if screen == screenTasks {
+		m.showTab(screenTasks)
 		return
 	}
-	half := max(1, m.readerHeight()/2)
-	switch k {
-	case "j", "down":
-		m.scrollReader(1)
-	case "k", "up":
-		m.scrollReader(-1)
-	case "ctrl+d", "pgdown", " ":
-		m.scrollReader(half)
-	case "ctrl+u", "pgup":
-		m.scrollReader(-half)
-	case "g", "home":
-		m.cur.scroll = 0
-	case "G", "end":
-		m.scrollReader(len(m.doc().Lines))
-	case "tab":
-		m.selectLink(1)
-	case "shift+tab":
-		m.selectLink(-1)
-	case "enter":
-		m.follow()
-	case "backspace":
-		m.back()
-	case "h", "left":
-		m.focus = focusTree
-	case "b":
-		if len(m.cur.backlinks) > 0 {
-			m.focus = focusPanel
-		} else {
-			m.setStatus("no page links here")
-		}
-	case "e":
-		line := 0
-		if r := m.cur; r != nil && r.scroll < len(m.doc().Source) {
-			line = m.doc().Source[r.scroll]
-		}
-		m.openEditor(m.cur.info.Path, line)
-	case "E":
-		m.editExternal()
-	case "r":
-		m.promptMove()
-	case "f":
-		if l, ok := m.selectedLink(); ok {
-			m.showOffers(l, screenRead)
-		} else {
-			m.setStatus("select a broken link with tab first")
+	m.screen, m.cursor, m.scroll = screen, 0, 0
+	m.loadBroken()
+}
+
+// showHome opens the overview on the tab last shown.
+func (m *WikiModel) showHome() { m.showTab(m.tab) }
+
+// showTab opens an overview tab, loading what it shows.
+func (m *WikiModel) showTab(tab wscreen) {
+	if m.screen != tab {
+		m.cursor, m.scroll = 0, 0
+	}
+	m.screen, m.base, m.tab = tab, tab, tab
+	if tab == screenTasks {
+		m.loadTasks()
+	} else {
+		m.loadHome()
+	}
+}
+
+// cycleTab moves to the next overview tab, or the previous one.
+func (m *WikiModel) cycleTab(by int) {
+	i := slices.Index(overviewTabs, m.screen)
+	m.showTab(overviewTabs[(i+by+len(overviewTabs))%len(overviewTabs)])
+}
+
+// reloadAll reads pages and git details again, for a commit, which changes no
+// page and so is not noticed by polling.
+func (m *WikiModel) reloadAll() {
+	m.afterWrite()
+	if m.screen == screenLatest || m.screen == screenStats {
+		m.loadHome()
+	}
+	if !m.statusErr {
+		m.setStatus("reloaded")
+	}
+}
+
+// escape returns from a list to the overview or the reader.
+func (m *WikiModel) escape() {
+	if m.screen != m.base {
+		m.screen = m.base
+	}
+}
+
+func (m *WikiModel) treeMove(s func(pos, last int) int) {
+	m.treeCursor = step(m.treeCursor, len(m.rows)-1, s)
+}
+
+// treeEnter opens a page, or a directory's README; a directory without one
+// folds.
+func (m *WikiModel) treeEnter() {
+	if m.treeCursor >= len(m.rows) {
+		return
+	}
+	row := m.rows[m.treeCursor]
+	if row.dir != "" && !row.hasPage {
+		m.treeFold()
+		return
+	}
+	if err := m.open(m.pages[row.page].Path); err != nil {
+		m.setError(err)
+		return
+	}
+	m.focus = focusContent
+}
+
+// treeFold folds or unfolds a directory, and opens a page.
+func (m *WikiModel) treeFold() {
+	if m.treeCursor >= len(m.rows) {
+		return
+	}
+	if row := m.rows[m.treeCursor]; row.dir != "" {
+		m.collapsed[row.dir] = !m.collapsed[row.dir]
+		m.buildTree()
+		return
+	}
+	m.treeEnter()
+}
+
+// treeRight unfolds a folded directory, steps into an unfolded one, and opens
+// a page.
+func (m *WikiModel) treeRight() {
+	if m.treeCursor >= len(m.rows) {
+		return
+	}
+	row := m.rows[m.treeCursor]
+	switch {
+	case row.dir == "":
+		m.treeEnter()
+	case m.collapsed[row.dir]:
+		m.treeFold()
+	case m.treeCursor+1 < len(m.rows) && m.rows[m.treeCursor+1].depth > row.depth:
+		m.treeCursor++
+	}
+}
+
+// treeLeft folds an unfolded directory, and otherwise moves to the directory
+// holding the row.
+func (m *WikiModel) treeLeft() {
+	if m.treeCursor >= len(m.rows) {
+		return
+	}
+	row := m.rows[m.treeCursor]
+	if row.dir != "" && !m.collapsed[row.dir] {
+		m.treeFold()
+		return
+	}
+	for i := m.treeCursor - 1; i >= 0; i-- {
+		if m.rows[i].dir != "" && m.rows[i].depth < row.depth {
+			m.treeCursor = i
+			return
 		}
 	}
 }
 
-func (m *WikiModel) keyPanel(k string) {
+func (m *WikiModel) toContent() {
+	if m.cur != nil {
+		m.focus = focusContent
+	}
+}
+
+// cycleFocus moves between the panes shown: the tree, the page and the
+// backlinks panel.
+func (m *WikiModel) cycleFocus(by int) {
+	panes := []wfocus{focusTree}
+	if m.cur != nil {
+		panes = append(panes, focusContent)
+	}
+	if m.panelHeight() > 0 {
+		panes = append(panes, focusPanel)
+	}
+	for i, p := range panes {
+		if p == m.focus {
+			m.focus = panes[(i+by+len(panes))%len(panes)]
+			return
+		}
+	}
+	m.focus = panes[0]
+}
+
+func (m *WikiModel) toPanel() error {
+	switch {
+	case m.panelHeight() > 0:
+		m.focus = focusPanel
+		return nil
+	case len(m.cur.linkers) == 0:
+		return errors.New("no page links here")
+	}
+	return errors.New("the terminal is too short for the backlinks")
+}
+
+// fixLink lists repairs for the broken link under the cursor.
+func (m *WikiModel) fixLink() error {
+	l, ok := m.linkAtCursor()
+	if !ok {
+		return errors.New("no link under the cursor")
+	}
+	if l.Status == wiki.StatusOK {
+		return errors.New("the link is not broken")
+	}
+	m.showOffers(l, screenRead)
+	return nil
+}
+
+func (m *WikiModel) panelMove(s func(pos, last int) int) {
+	m.cur.backCursor = step(m.cur.backCursor, len(m.cur.linkers)-1, s)
+}
+
+func (m *WikiModel) panelEnter() {
 	r := m.cur
-	if r == nil {
-		m.focus = focusTree
+	if r.backCursor >= len(r.linkers) {
 		return
 	}
-	switch k {
-	case "j", "down":
-		r.backCursor = min(r.backCursor+1, len(r.backlinks)-1)
-	case "k", "up":
-		r.backCursor = max(r.backCursor-1, 0)
-	case "esc", "b", "h", "left":
-		m.focus = focusReader
-	case "enter":
-		if r.backCursor >= len(r.backlinks) {
-			return
-		}
-		l := r.backlinks[r.backCursor]
-		m.openAt(l.Page, l.Line)
-	}
+	l := r.linkers[r.backCursor]
+	m.openAt(l.page, l.line)
 }
 
-// openAt opens a page scrolled to a source line.
+// openAt opens a page with the cursor on a source line.
 func (m *WikiModel) openAt(page string, line int) {
 	if err := m.open(page); err != nil {
 		m.setError(err)
 		return
 	}
-	m.focus = focusReader
-	for i, s := range m.doc().Source {
-		if s >= line {
-			m.showLine(i)
-			return
-		}
-	}
+	m.focus = focusContent
+	m.jumpTo(line)
 }
 
-// selectedLink is the indexed form of the selected link.
-func (m *WikiModel) selectedLink() (wiki.Link, bool) {
-	r := m.cur
-	if r == nil || r.selected < 0 || r.selected >= len(m.doc().Links) {
+// bufferLinks are the links in the buffer as it is now, resolved against the
+// index. They are kept until the text changes or a write may have changed
+// what they reach.
+func (m *WikiModel) bufferLinks() []wiki.Link {
+	e := m.edit
+	if e == nil {
+		return nil
+	}
+	text := e.ed.Text()
+	if e.linksText == text && e.links != nil {
+		return e.links
+	}
+	snap, err := m.w.Snapshot()
+	if err != nil {
+		return nil
+	}
+	e.links = snap.Links(e.page, []byte(text))
+	if e.links == nil {
+		e.links = []wiki.Link{}
+	}
+	e.linksText = text
+	return e.links
+}
+
+// linkSpan is where a link sits in the buffer, as byte offsets.
+func linkSpan(l wiki.Link) (start, end int) {
+	if l.Start >= 0 {
+		return l.Start, l.End
+	}
+	return l.DestStart, l.DestEnd
+}
+
+// cursorOffset is the buffer's cursor as a byte offset into its text.
+func (e *editing) cursorOffset() int {
+	off := 0
+	for i := 0; i < e.ed.Cursor.Line; i++ {
+		off += len(e.ed.Buf.LineString(i)) + 1
+	}
+	line := []rune(e.ed.Buf.LineString(e.ed.Cursor.Line))
+	return off + len(string(line[:min(e.ed.Cursor.Col, len(line))]))
+}
+
+// posOf is a byte offset into the buffer's text as a line and rune column.
+func (e *editing) posOf(off int) vim.Pos {
+	for l := 0; l < e.ed.Buf.Lines(); l++ {
+		line := e.ed.Buf.LineString(l)
+		if off <= len(line) {
+			return vim.Pos{Line: l, Col: len([]rune(line[:off]))}
+		}
+		off -= len(line) + 1
+	}
+	return vim.Pos{Line: max(0, e.ed.Buf.Lines()-1)}
+}
+
+// linkAtCursor is the link under the buffer's cursor, anywhere from its first
+// character to its last.
+func (m *WikiModel) linkAtCursor() (wiki.Link, bool) {
+	if m.edit == nil {
 		return wiki.Link{}, false
 	}
-	return r.cacheLink(m.doc().Links[r.selected])
+	off := m.edit.cursorOffset()
+	for _, l := range m.bufferLinks() {
+		if start, end := linkSpan(l); start >= 0 && off >= start && off < end {
+			return l, true
+		}
+	}
+	return wiki.Link{}, false
+}
+
+// jumpLink moves the cursor to the start of the next link, or the previous one
+// when by is negative, wrapping at either end of the page.
+func (m *WikiModel) jumpLink(by int) error {
+	e := m.edit
+	var starts []int
+	for _, l := range m.bufferLinks() {
+		if start, _ := linkSpan(l); start >= 0 {
+			starts = append(starts, start)
+		}
+	}
+	if len(starts) == 0 {
+		return errors.New("no links on this page")
+	}
+	sort.Ints(starts)
+	// From inside a link, the next one is after its start.
+	off := e.cursorOffset()
+	if l, ok := m.linkAtCursor(); ok {
+		off, _ = linkSpan(l)
+	}
+	target, wrapped := -1, false
+	if by > 0 {
+		for _, s := range starts {
+			if s > off {
+				target = s
+				break
+			}
+		}
+		if target < 0 {
+			target, wrapped = starts[0], true
+		}
+	} else {
+		for i := len(starts) - 1; i >= 0; i-- {
+			if starts[i] < off {
+				target = starts[i]
+				break
+			}
+		}
+		if target < 0 {
+			target, wrapped = starts[len(starts)-1], true
+		}
+	}
+	e.ed.SetCursor(e.posOf(target))
+	if h := m.contentHeight(); e.ed.Cursor.Line < e.ed.Top || e.ed.Cursor.Line >= e.ed.Top+h {
+		e.ed.Top = max(0, e.ed.Cursor.Line-h/3)
+	}
+	if wrapped {
+		e.ed.Message, e.ed.Err = "wrapped to the other end of the page", false
+	}
+	return nil
 }
 
 var lineAnchor = regexp.MustCompile(`^L(\d+)`)
 
-// follow opens what the selected link points at.
-func (m *WikiModel) follow() {
-	l, ok := m.selectedLink()
-	if !ok {
-		if m.cur.selected < 0 {
-			m.setStatus("tab selects a link")
-		} else {
-			m.setStatus("the link is not indexed yet")
-		}
-		return
-	}
+// follow opens what a link points at: a page, at its heading when it names
+// one, or a file in $EDITOR.
+func (m *WikiModel) follow(l wiki.Link) error {
 	switch {
 	case l.Kind == wiki.KindExternal:
-		m.setStatus("external link, not opened: " + l.Resolved)
+		return errors.New("external link, not opened: " + l.Resolved)
 
 	case (l.Kind == wiki.KindPage || l.Kind == wiki.KindHeading) && (l.Status == wiki.StatusOK || l.Status == wiki.StatusMissingHeading):
-		if l.Resolved != m.cur.info.Path {
-			if err := m.open(l.Resolved); err != nil {
-				m.setError(err)
-				return
-			}
-		} else {
-			m.history = append(m.history, place{m.cur.info.Path, m.cur.scroll, m.cur.selected})
+		if l.Resolved == m.cur.info.Path {
+			m.history = append(m.history, m.here())
+		} else if err := m.open(l.Resolved); err != nil {
+			return err
 		}
-		m.cur.selected = -1
-		m.cur.scroll = 0
+		m.focus = focusContent
+		line := 1
 		if l.Anchor != "" {
-			if line, ok := m.doc().Headings[markdown.Slug(l.Anchor)]; ok {
-				m.cur.scroll = line
-			} else {
+			found := false
+			for _, h := range markdown.Parse([]byte(m.edit.ed.Text())).Headings {
+				if h.Slug == markdown.Slug(l.Anchor) {
+					line, found = h.Line, true
+					break
+				}
+			}
+			if !found {
 				m.setStatus("no heading #" + l.Anchor)
 			}
 		}
+		m.jumpTo(line)
+		return nil
 
 	case (l.Kind == wiki.KindFile || l.Kind == wiki.KindLine) && (l.Status == wiki.StatusOK || l.Status == wiki.StatusLineOutOfRange):
 		line := 0
@@ -743,29 +919,33 @@ func (m *WikiModel) follow() {
 		}
 		cmd, err := editor.Open(filepath.Join(m.w.Repo, filepath.FromSlash(l.Resolved)), line, m.getenv)
 		if err != nil {
-			m.setError(err)
-			return
+			return err
 		}
 		m.after = m.exec(cmd, func(err error) tea.Msg { return fileEditedMsg{err} })
-
-	default:
-		m.setError(fmt.Errorf("%s: %s; f lists repairs", l.Status, l.Written()))
+		return nil
 	}
+	return fmt.Errorf("%s: %s; :fix lists repairs", l.Status, l.Written())
 }
 
-// back returns to the previous place.
-func (m *WikiModel) back() {
+// back returns to the previous page and position.
+func (m *WikiModel) back() error {
 	if len(m.history) == 0 {
-		m.setStatus("nothing to go back to")
-		return
+		return errors.New("nothing to go back to")
 	}
 	p := m.history[len(m.history)-1]
-	m.history = m.history[:len(m.history)-1]
-	if err := m.load(p.page); err != nil {
-		m.setError(err)
-		return
+	if p.page != m.cur.info.Path {
+		if m.edit.ed.Dirty {
+			return errUnsaved
+		}
+		if err := m.load(p.page); err != nil {
+			return err
+		}
 	}
-	m.cur.scroll, m.cur.selected = p.scroll, p.selected
+	m.history = m.history[:len(m.history)-1]
+	m.edit.ed.SetCursor(p.cursor)
+	m.edit.ed.Top = p.top
+	m.focus = focusContent
+	return nil
 }
 
 // ---------------------------------------------------------------- finding
@@ -789,7 +969,7 @@ func (m *WikiModel) keyFind(msg tea.KeyMsg) {
 			m.setError(err)
 			return
 		}
-		m.screen, m.focus = screenRead, focusReader
+		m.screen, m.focus = screenRead, focusContent
 		return
 	case "down", "ctrl+n":
 		m.cursor = min(m.cursor+1, max(0, m.listLen()-1))
@@ -900,6 +1080,11 @@ func subsequence(s, sub string) bool {
 
 func (m *WikiModel) listLen() int {
 	switch m.screen {
+	case screenLatest:
+		if m.home == nil {
+			return 0
+		}
+		return len(m.home.recent)
 	case screenSearch:
 		return len(m.hits)
 	case screenOpen:
@@ -936,60 +1121,57 @@ func (m *WikiModel) loadTasks() {
 		m.setError(err)
 		return
 	}
+	sortTasks(tasks)
 	m.tasks = tasks
 	m.cursor = min(m.cursor, max(0, len(tasks)-1))
 }
 
-func (m *WikiModel) keyList(msg tea.KeyMsg) {
-	switch k := msg.String(); k {
-	case "j", "down":
-		m.cursor = min(m.cursor+1, max(0, m.listLen()-1))
-	case "k", "up":
-		m.cursor = max(m.cursor-1, 0)
-	case "g", "home":
-		m.cursor = 0
-	case "G", "end":
-		m.cursor = max(0, m.listLen()-1)
-	case "enter":
-		m.listEnter()
-	case "f":
-		if m.screen == screenBroken && m.cursor < len(m.broken) {
-			m.showOffers(m.broken[m.cursor], screenBroken)
-		}
-	case " ", "x":
-		if m.screen == screenTasks && m.cursor < len(m.tasks) {
-			m.toggleTask(m.tasks[m.cursor])
-		}
-	case "a":
-		if m.screen == screenTasks {
-			m.allTasks = !m.allTasks
-			m.loadTasks()
-		}
+func (m *WikiModel) listMove(s func(pos, last int) int) {
+	m.cursor = step(m.cursor, m.listLen()-1, s)
+}
+
+func (m *WikiModel) brokenOffers() {
+	if m.cursor < len(m.broken) {
+		m.showOffers(m.broken[m.cursor], screenBroken)
 	}
+}
+
+func (m *WikiModel) toggleSelected() {
+	if m.cursor < len(m.tasks) {
+		m.toggleTask(m.tasks[m.cursor])
+	}
+}
+
+func (m *WikiModel) toggleAllTasks() {
+	m.allTasks = !m.allTasks
+	m.loadTasks()
 }
 
 func (m *WikiModel) listEnter() {
 	switch m.screen {
+	case screenLatest:
+		if m.home == nil || m.cursor >= len(m.home.recent) {
+			return
+		}
+		if err := m.open(m.home.recent[m.cursor].Path); err != nil {
+			m.setError(err)
+			return
+		}
+		m.focus = focusContent
 	case screenBroken:
 		if m.cursor >= len(m.broken) {
 			return
 		}
 		l := m.broken[m.cursor]
-		m.screen = screenRead
 		m.openAt(l.Page, l.Line)
-		for i, dl := range m.doc().Links {
-			if c, ok := m.cur.cacheLink(dl); ok && c.Line == l.Line && c.Written() == l.Written() {
-				m.cur.selected = i
-				m.showLine(dl.Line)
-				break
-			}
+		if m.edit != nil && m.edit.page == l.Page {
+			m.edit.ed.SetCursor(vim.Pos{Line: l.Line - 1, Col: max(0, l.Col-1)})
 		}
 	case screenTasks:
 		if m.cursor >= len(m.tasks) {
 			return
 		}
 		t := m.tasks[m.cursor]
-		m.screen = screenRead
 		m.openAt(t.Page, t.Line)
 	case screenPages:
 		if m.cursor < len(m.listed) {
@@ -997,7 +1179,7 @@ func (m *WikiModel) listEnter() {
 				m.setError(err)
 				return
 			}
-			m.focus = focusReader
+			m.focus = focusContent
 		}
 	case screenOffers:
 		if m.cursor >= len(m.offers) {
@@ -1039,7 +1221,7 @@ func (m *WikiModel) showOffers(l wiki.Link, from wscreen) {
 		return
 	}
 	if len(offers) == 0 {
-		m.setStatus("no repairs to offer for " + l.Written() + "; edit the page with e")
+		m.setStatus("no repairs to offer for " + l.Written() + "; edit the link in the page")
 		return
 	}
 	m.offers, m.offerFor, m.offerFrom = offers, l, from
@@ -1048,6 +1230,9 @@ func (m *WikiModel) showOffers(l wiki.Link, from wscreen) {
 
 // afterWrite brings the interface up to date with a write it made.
 func (m *WikiModel) afterWrite() {
+	if m.edit != nil {
+		m.edit.links = nil
+	}
 	if err := m.loadPages(); err != nil {
 		m.setError(err)
 	}
@@ -1058,7 +1243,7 @@ func (m *WikiModel) afterWrite() {
 	case screenTasks:
 		m.loadTasks()
 	}
-	if m.base == screenHome {
+	if isTab(m.base) {
 		m.loadHome()
 	}
 }
@@ -1093,8 +1278,9 @@ func (m *WikiModel) keyPrompt(msg tea.KeyMsg) {
 	}
 }
 
-// promptNew creates a page in the directory of the page open or selected.
-func (m *WikiModel) promptNew() {
+// promptNew creates a page in the directory of the page open or selected,
+// asking for its title unless one is given.
+func (m *WikiModel) promptNew(title string) {
 	dir := ""
 	if m.cur != nil {
 		dir = path.Dir(m.cur.info.Path)
@@ -1109,13 +1295,12 @@ func (m *WikiModel) promptNew() {
 	if dir == "." {
 		dir = ""
 	}
-	label := "new page title: "
-	if dir != "" {
-		label = "new page in " + dir + "/, title: "
-	}
-	m.askWiki(label, "", func(title string) error {
+	create := func(title string) error {
 		if strings.TrimSpace(title) == "" {
 			return errors.New("a page needs a title")
+		}
+		if m.edit != nil && m.edit.ed.Dirty {
+			return errUnsaved
 		}
 		info, err := m.w.Create(wiki.NewPage{Title: title, Dir: dir})
 		if err != nil {
@@ -1127,54 +1312,76 @@ func (m *WikiModel) promptNew() {
 		if err := m.open(info.Path); err != nil {
 			return err
 		}
-		m.screen, m.focus = screenRead, focusReader
-		m.setStatus("created " + info.File() + "; e edits it")
+		m.screen, m.focus = screenRead, focusContent
+		m.setStatus("created " + info.File())
+		return nil
+	}
+	if strings.TrimSpace(title) != "" {
+		if err := create(title); err != nil {
+			m.setError(err)
+		}
+		return
+	}
+	label := "new page title: "
+	if dir != "" {
+		label = "new page in " + dir + "/, title: "
+	}
+	m.askWiki(label, "", create)
+}
+
+// promptMove asks where to move the open page, unless to is given, shows what
+// the move would rewrite, and asks before writing.
+func (m *WikiModel) promptMove(to string) {
+	from := m.cur.info.Path
+	if strings.TrimSpace(to) != "" {
+		m.confirmMove(from, to)
+		return
+	}
+	m.askWiki("move "+from+" to: ", from, func(to string) error {
+		m.confirmMove(from, to)
 		return nil
 	})
 }
 
-// promptMove asks where to move the open page, shows what the move would
-// rewrite, and asks again before writing.
-func (m *WikiModel) promptMove() {
-	from := m.cur.info.Path
-	m.askWiki("move "+from+" to: ", from, func(to string) error {
-		to = strings.TrimSpace(to)
-		if strings.HasSuffix(to, "/") {
-			to += path.Base(from)
+// confirmMove plans a move and asks before writing it.
+func (m *WikiModel) confirmMove(from, to string) {
+	to = strings.TrimSpace(to)
+	if strings.HasSuffix(to, "/") {
+		to += path.Base(from)
+	}
+	plan, err := m.w.PlanMove(from, to)
+	if err != nil {
+		m.setError(err)
+		return
+	}
+	pages := map[string]bool{}
+	for _, e := range plan.Edits {
+		pages[e.Page] = true
+	}
+	question := fmt.Sprintf("move to %s, rewriting %d links in %d pages? y/n: ", plan.To, len(plan.Edits), len(pages))
+	m.askWiki(question, "", func(answer string) error {
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(answer)), "y") {
+			m.setStatus("not moved")
+			return nil
 		}
-		plan, err := m.w.PlanMove(from, to)
+		res, err := m.w.Move(from, to)
 		if err != nil {
 			return err
 		}
-		pages := map[string]bool{}
-		for _, e := range plan.Edits {
-			pages[e.Page] = true
+		// The old path is gone from the back stack.
+		for i := range m.history {
+			if m.history[i].page == from {
+				m.history[i].page = res.To
+			}
 		}
-		question := fmt.Sprintf("move to %s, rewriting %d links in %d pages? y/n: ", plan.To, len(plan.Edits), len(pages))
-		m.askWiki(question, "", func(answer string) error {
-			if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(answer)), "y") {
-				m.setStatus("not moved")
-				return nil
-			}
-			res, err := m.w.Move(from, to)
-			if err != nil {
-				return err
-			}
-			// The old path is gone from the back stack.
-			for i := range m.history {
-				if m.history[i].page == from {
-					m.history[i].page = res.To
-				}
-			}
-			m.cur.info.Path = res.To
-			m.afterWrite()
-			status := fmt.Sprintf("moved to %s; %d links rewritten", res.To, len(res.Edits))
-			if len(res.Broken) > 0 {
-				status += fmt.Sprintf("; %d links broken, c lists them", len(res.Broken))
-			}
-			m.setStatus(status)
-			return nil
-		})
+		m.dropDraft()
+		m.cur.info.Path, m.edit.page = res.To, res.To
+		m.afterWrite()
+		status := fmt.Sprintf("moved to %s; %d links rewritten", res.To, len(res.Edits))
+		if len(res.Broken) > 0 {
+			status += fmt.Sprintf("; %d links broken, :broken lists them", len(res.Broken))
+		}
+		m.setStatus(status)
 		return nil
 	})
 }
@@ -1188,21 +1395,25 @@ type wikiEditedMsg struct {
 
 type fileEditedMsg struct{ err error }
 
-// edit hands the page source to $EDITOR. The gwiki editor replaces this in
-// phase 5.
 // editExternal hands the page to $EDITOR, for a page the built-in editor is
 // not wanted for.
-func (m *WikiModel) editExternal() {
-	r := m.cur
-	e, err := editor.Start(string(r.src), m.getenv)
-	if err != nil {
-		m.setError(err)
-		return
+func (m *WikiModel) editExternal() error {
+	if m.edit.ed.Dirty {
+		return errUnsaved
 	}
-	page, hash, src := r.info.Path, r.hash, r.src
+	page := m.cur.info.Path
+	src, hash, err := m.w.Read(page)
+	if err != nil {
+		return err
+	}
+	e, err := editor.Start(string(src), m.getenv)
+	if err != nil {
+		return err
+	}
 	m.after = m.exec(e.Cmd, func(err error) tea.Msg {
 		return wikiEditedMsg{page: page, hash: hash, src: src, edit: e, err: err}
 	})
+	return nil
 }
 
 func (m *WikiModel) edited(msg wikiEditedMsg) {

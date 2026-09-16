@@ -1,5 +1,5 @@
 /*
-  gnotes web view.
+  gwiki notes web view.
 
   The page holds no model of its own. Every change is a request, and the server
   answers with the new state, which is then rendered from scratch. Keeping a
@@ -191,7 +191,7 @@ function render(state) {
   el.project.title = state.location;
   el.location.textContent = shortPath(state.location);
   el.location.title = state.location;
-  document.title = `${state.project} — gnotes`;
+  document.title = `${state.project} — gwiki`;
 
   renderCounts(state.counts);
   // Before the rows, which read the notebook names it collects.
@@ -339,7 +339,7 @@ function rowFor(n) {
   const ref = document.createElement("span");
   ref.className = "ref";
   ref.textContent = n.ref;
-  ref.title = "Handle — pass this to the gnotes command line";
+  ref.title = "Handle — pass this to the gwiki notes command line";
   li.append(ref);
 
   li.append(markFor(n));
@@ -514,7 +514,7 @@ function detailFor({ node, path, backlinks, history }) {
   const ref = document.createElement("span");
   ref.className = "ref";
   ref.textContent = node.ref;
-  ref.title = "Handle — pass this to the gnotes command line";
+  ref.title = "Handle — pass this to the gwiki notes command line";
   head.append(ref);
 
   head.append(
@@ -995,7 +995,7 @@ $("menu").addEventListener("click", () => {
 // Theme: the system preference is the default, and the toggle overrides it.
 // The choice is remembered because it is a property of the reader, not of the
 // project.
-const THEME_KEY = "gnotes-theme";
+const THEME_KEY = "gwiki-theme";
 
 // Storage can be unavailable, blocked or throwing; the theme then simply is
 // not remembered, and the page must still start.
@@ -1028,7 +1028,7 @@ $("theme").addEventListener("click", () => {
 
 if (!TOKEN) {
   el.empty.hidden = false;
-  el.empty.textContent = "No access token. Open the address gnotes printed, including its ?token=… part.";
+  el.empty.textContent = "No access token. Open the address gwiki printed, including its ?token=… part.";
 } else {
   load();
   watch();

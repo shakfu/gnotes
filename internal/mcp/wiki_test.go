@@ -227,10 +227,10 @@ func TestWikiRenameCheckAndFix(t *testing.T) {
 
 func TestWikiTasksAndSetTask(t *testing.T) {
 	f := newWikiFixture(t)
-	f.page("plan", "# Plan\n\n- [ ] first\n- [x] second\n")
+	f.page("plan", "# Plan\n\n- [ ] first due:2026-10-01\n- [x] second\n")
 	f.page("tasks/ship", "---\ntitle: Ship\ntype: task\npriority: high\n---\n")
 
-	if out := f.mustCall("gwiki_tasks", nil); out != "plan:3  [ ]  first\nplan:4  [x]  second\ntasks/ship  [open]  Ship  priority:high" {
+	if out := f.mustCall("gwiki_tasks", nil); out != "plan:3  [ ]  first  due:2026-10-01\nplan:4  [x]  second\ntasks/ship  [open]  Ship  priority:high" {
 		t.Fatalf("tasks:\n%s", out)
 	}
 	if out := f.mustCall("gwiki_tasks", map[string]any{"status": "done"}); out != "plan:4  [x]  second" {

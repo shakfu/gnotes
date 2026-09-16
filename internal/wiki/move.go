@@ -138,8 +138,11 @@ func (w *Wiki) PlanMove(from, to string) (*MovePlan, error) {
 			if !changed {
 				continue
 			}
+		} else if ReadmeDir(to) != "" && !strings.HasSuffix(strings.ToLower(l.Target), ".md") {
+			// A link to the directory stays one.
+			repl = w.markdownDest(ps.src, l, l.Page, filepath.Dir(w.file(to)), true)
 		} else {
-			repl = w.markdownDest(ps.src, l, l.Page, w.file(to))
+			repl = w.markdownDest(ps.src, l, l.Page, w.file(to), false)
 		}
 		add(l.Page, l.Page, l, ps, repl)
 	}
@@ -176,7 +179,7 @@ func (w *Wiki) PlanMove(from, to string) (*MovePlan, error) {
 			}
 			target = w.file(id)
 		}
-		if repl := w.markdownDest(own.src, l, to, target); repl != string(own.src[l.DestStart:l.DestEnd]) {
+		if repl := w.markdownDest(own.src, l, to, target, false); repl != string(own.src[l.DestStart:l.DestEnd]) {
 			add(from, to, l, own, repl)
 		}
 	}
@@ -249,10 +252,18 @@ func (w *Wiki) brokenNear(pages []string, from, to, title string) ([]Link, error
 		return nil, err
 	}
 	lf, lt := strings.ToLower(from), strings.ToLower(to)
+	// A README is also named by its directory.
+	df, dt := lf, lt
+	if d := ReadmeDir(lf); d != "" {
+		df = d
+	}
+	if d := ReadmeDir(lt); d != "" {
+		dt = d
+	}
 	return w.links(`status NOT IN ('ok', '') AND (page IN (SELECT value FROM json_each(?))
 		OR kind IN ('page', 'heading') AND (resolved IN (?, ?)
-			OR key_path IN (?, ?, ?) OR key_hyph IN (?, ?) OR key_stem IN (?, ?)))`,
-		string(list), from, to, lf, lt, strings.ToLower(title), lf, lt, path.Base(lf), path.Base(lt))
+			OR key_path IN (?, ?, ?, ?, ?) OR key_hyph IN (?, ?, ?, ?) OR key_stem IN (?, ?)))`,
+		string(list), from, to, lf, lt, strings.ToLower(title), df, dt, lf, lt, df, dt, pageStem(lf), pageStem(lt))
 }
 
 // checkDest confirms a link's recorded offsets still hold its destination, so a
@@ -282,7 +293,12 @@ func wikiRewrite(ix *index, src []byte, l Link, to string) (repl string, changed
 	if strings.HasSuffix(strings.ToLower(l.Target), ".md") {
 		suffix = ".md"
 	}
-	for _, c := range []string{path.Base(to) + suffix, to + suffix} {
+	candidates := []string{path.Base(to) + suffix, to + suffix}
+	if dir := ReadmeDir(to); dir != "" && suffix == "" {
+		// A README is best named by its directory.
+		candidates = append([]string{path.Base(dir), dir}, candidates...)
+	}
+	for _, c := range candidates {
 		if got, status := ix.wiki(c); status == StatusOK && got == to {
 			return wikiText(src, l, c), true, true
 		}
@@ -305,7 +321,8 @@ func wikiText(src []byte, l Link, target string) string {
 
 // markdownDest is a markdown link destination pointing at target, an absolute
 // path, from a page, keeping the link's anchor and its repository-rooted style.
-func (w *Wiki) markdownDest(src []byte, l Link, fromPage, target string) string {
+// dir ends the path with a slash, for a link to a directory.
+func (w *Wiki) markdownDest(src []byte, l Link, fromPage, target string, dir bool) string {
 	var dest string
 	if strings.HasPrefix(l.Target, "/") {
 		rel, _ := filepath.Rel(w.Repo, target)
@@ -313,6 +330,9 @@ func (w *Wiki) markdownDest(src []byte, l Link, fromPage, target string) string 
 	} else {
 		rel, _ := filepath.Rel(filepath.Dir(w.file(fromPage)), target)
 		dest = filepath.ToSlash(rel)
+	}
+	if dir {
+		dest += "/"
 	}
 	// Outside angle brackets a destination ends at a space or an unmatched
 	// parenthesis.

@@ -373,7 +373,7 @@ func (e *Editor) startInsert(mode Mode) {
 	e.Mode = mode
 	e.insertStart = e.Cursor
 	e.replaced = nil
-	e.Message = "-- " + mode.String() + " --"
+	e.Message = "" // the host shows Mode
 }
 
 // ---------------------------------------------------------------- markdown

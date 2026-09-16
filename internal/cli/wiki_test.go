@@ -112,7 +112,8 @@ func TestWikiTasksOrphansAndCache(t *testing.T) {
 	f := wikiFixture(t)
 
 	out := strings.Join(strings.Fields(f.mustRun("tasks")), " ")
-	if !strings.Contains(out, "lexer/design-sketch:8 [ ] 2026-08-21 benchmark") || !strings.Contains(out, "tasks/ship [~] Ship it") {
+	// The item's date shows once, in its column.
+	if !strings.Contains(out, "lexer/design-sketch:8 [ ] 2026-08-21 benchmark") || strings.Contains(out, "due:") || !strings.Contains(out, "tasks/ship [~] Ship it") {
 		t.Errorf("tasks:\n%s", out)
 	}
 	if out := f.mustRun("tasks", "-s", "doing"); strings.Contains(out, "benchmark") || !strings.Contains(out, "Ship it") {
@@ -222,6 +223,7 @@ func TestWikiNewEditAndTag(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'Appended in the editor.\\n' >> \"$1\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("VISUAL", "") // $VISUAL wins over $EDITOR
 	t.Setenv("EDITOR", script)
 	f.mustRun("edit", "parser notes")
 	if page := readPage(t, f, "lexer/parser-notes"); !strings.HasSuffix(page, "From stdin.\nAppended in the editor.\n") || !strings.HasPrefix(page, "---\n") {

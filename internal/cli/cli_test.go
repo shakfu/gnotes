@@ -783,6 +783,7 @@ func TestDoubleDashPassesADashedTitle(t *testing.T) {
 func TestEditCanClearABody(t *testing.T) {
 	f := newFixture(t)
 	f.mustRun("note", "cleared", "-m", "something")
+	t.Setenv("VISUAL", "") // $VISUAL wins over $EDITOR
 	t.Setenv("EDITOR", "false")
 	f.mustRun("edit", "cleared", "-m", "")
 	if body, _ := f.showJSON("cleared")["body"].(string); body != "" {

@@ -164,7 +164,7 @@ func (w *Wiki) Find(ref string) (PageInfo, error) {
 	}
 	like := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(r) + "%"
 	for _, where := range []string{
-		`lower(path) = ?1`,
+		`lower(path) = ?1 OR lower(path) = ?1 || '/readme'`,
 		`lower(title) = ?1`,
 		`stem = ?3`,
 		`lower(path) LIKE ?2 ESCAPE '\' OR lower(title) LIKE ?2 ESCAPE '\'`,

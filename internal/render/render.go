@@ -36,27 +36,6 @@ type Styles struct {
 	Selected lipgloss.Style
 }
 
-// DefaultStyles use the terminal's own ANSI colours.
-func DefaultStyles() Styles {
-	return Styles{
-		Heading: [3]lipgloss.Style{
-			lipgloss.NewStyle().Bold(true).Underline(true).Foreground(lipgloss.Color("4")),
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4")),
-			lipgloss.NewStyle().Bold(true),
-		},
-		Strong:   lipgloss.NewStyle().Bold(true),
-		Emphasis: lipgloss.NewStyle().Italic(true),
-		Strike:   lipgloss.NewStyle().Faint(true),
-		Code:     lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
-		Quote:    lipgloss.NewStyle().Faint(true),
-		Marker:   lipgloss.NewStyle().Faint(true),
-		HTML:     lipgloss.NewStyle().Faint(true),
-		Link:     lipgloss.NewStyle().Underline(true).Foreground(lipgloss.Color("6")),
-		Broken:   lipgloss.NewStyle().Underline(true).Foreground(lipgloss.Color("1")),
-		Selected: lipgloss.NewStyle().Reverse(true),
-	}
-}
-
 // Link is a link as drawn, in reading order.
 type Link struct {
 	Form   markdown.Form
@@ -186,11 +165,16 @@ func (r *renderer) block(n ast.Node, m *margin) {
 		}
 		r.headings++
 		style := r.o.Styles.Heading[min(n.Level, 3)-1]
-		prefix := []piece{{text: strings.Repeat("#", n.Level) + " ", style: &r.o.Styles.Marker, link: -1}}
+		// Levels 1 and 2 differ by style; deeper ones keep their marker, since
+		// they share a style.
+		var prefix []piece
+		if n.Level >= 3 {
+			prefix = []piece{{text: strings.Repeat("#", n.Level) + " ", style: &r.o.Styles.Marker, link: -1}}
+		}
 		r.wrap(append(prefix, r.inlines(n, &style)...), m, src)
 
 	case *ast.ThematicBreak:
-		r.emit(m, r.o.Styles.Marker.Render(strings.Repeat("-", max(3, r.width-m.width()))), src)
+		r.emit(m, r.o.Styles.Marker.Render(strings.Repeat("─", max(3, r.width-m.width()))), src)
 
 	case *ast.CodeBlock, *ast.FencedCodeBlock:
 		code := &margin{parent: m, first: "  ", rest: "  "}
@@ -214,7 +198,7 @@ func (r *renderer) block(n ast.Node, m *margin) {
 		}
 
 	case *ast.Blockquote:
-		bar := r.o.Styles.Quote.Render("| ")
+		bar := r.o.Styles.Quote.Render("│ ")
 		r.children(n, &margin{parent: m, first: bar, rest: bar}, true)
 
 	case *ast.List:
@@ -223,13 +207,21 @@ func (r *renderer) block(n ast.Node, m *margin) {
 			if item != n.FirstChild() && !n.IsTight {
 				r.emit(m, "", r.sourceLine(item))
 			}
-			marker := "- "
-			if n.IsOrdered() {
+			marker := "• "
+			switch {
+			case n.IsOrdered():
 				marker = fmt.Sprintf("%d. ", number)
 				number++
+			case taskItem(item):
+				// The checkbox stands in for the bullet.
+				marker = ""
 			}
 			styled := r.o.Styles.Marker.Render(marker)
-			r.children(item, &margin{parent: m, first: styled, rest: strings.Repeat(" ", len(marker))}, !n.IsTight)
+			rest := strings.Repeat(" ", ansi.StringWidth(marker))
+			if marker == "" {
+				rest = "  "
+			}
+			r.children(item, &margin{parent: m, first: styled, rest: rest}, !n.IsTight)
 		}
 
 	case *extast.Table:
@@ -247,6 +239,16 @@ func (r *renderer) block(n ast.Node, m *margin) {
 	default:
 		r.children(n, m, true)
 	}
+}
+
+// taskItem reports whether a list item starts with a checkbox.
+func taskItem(item ast.Node) bool {
+	block := item.FirstChild()
+	if block == nil {
+		return false
+	}
+	_, ok := block.FirstChild().(*extast.TaskCheckBox)
+	return ok
 }
 
 // piece is a run of text in one style. link is the index of the link it
@@ -319,9 +321,9 @@ func (r *renderer) inlines(n ast.Node, style *lipgloss.Style) []piece {
 				}
 				add(b.String(), r.over(style, r.o.Styles.HTML), link)
 			case *extast.TaskCheckBox:
-				box := "[ ] "
+				box := "☐ "
 				if c.IsChecked {
-					box = "[x] "
+					box = "☑ "
 				}
 				add(box, &r.o.Styles.Marker, link)
 			case *extast.FootnoteLink:
@@ -537,7 +539,7 @@ func (r *renderer) table(n *extast.Table, m *margin, src int) {
 		widths[widest]--
 	}
 
-	sep := r.o.Styles.Marker.Render(" | ")
+	sep := r.o.Styles.Marker.Render(" │ ")
 	for ri, row := range rows {
 		var line strings.Builder
 		start := len(r.out.Lines)
@@ -571,9 +573,9 @@ func (r *renderer) table(n *extast.Table, m *margin, src int) {
 		if ri+1 == header {
 			var rule []string
 			for _, w := range widths {
-				rule = append(rule, strings.Repeat("-", w))
+				rule = append(rule, strings.Repeat("─", w))
 			}
-			r.emit(m, r.o.Styles.Marker.Render(strings.Join(rule, "-+-")), src)
+			r.emit(m, r.o.Styles.Marker.Render(strings.Join(rule, "─┼─")), src)
 		}
 	}
 }

@@ -1,7 +1,7 @@
 /*
-  gnotes web view.
+  gwiki notes web view.
 
-  The visual idea: a gnotes project is a stack of immutable events, so the page
+  The visual idea: a notes project is a stack of immutable events, so the page
   is built from thin strata separated by hairlines rather than from cards
   floating on a surface. Nothing has a shadow; depth comes from value, not from
   elevation.
@@ -757,7 +757,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 /*
   The provenance strip: the events that add up to this entry.
 
-  This is the one thing a gnotes view can show that an ordinary notes app
+  This is the one thing a gwiki notes view can show that an ordinary notes app
   cannot. Nothing here is stored as a note; it is the sum of these lines, and
   the page says so plainly rather than pretending otherwise.
 */

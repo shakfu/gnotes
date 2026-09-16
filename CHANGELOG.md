@@ -12,7 +12,27 @@ Nothing has been tagged yet, so everything below is the initial body of work.
 
 **Renamed to gwiki; the wiki is the product.** The binary is `gwiki`, the module `github.com/shakfu/gwiki`, the project directory `.gwiki/`, and the environment variables `GWIKI_HOME` and `GWIKI_TOKEN`. The wiki commands moved to the top level, and a bare `gwiki` opens the wiki interface. The notes database stays, as `.gwiki/notes.db`, with its commands under `gwiki notes`: they share names such as `ls`, `edit` and `done` with the wiki's, so both could not be top-level. A project with `.gnotes/` must rename the directory, and a link written as `/.gnotes/wiki/...` must be updated; `gwiki` names the old directory when it finds one. The identity file moved with the configuration directory, from `gnotes/` to `gwiki/`.
 
+**The terminal interface draws in xterm 256 colours.** The palette matches the browser view's, with a light and a dark value picked from the terminal's background. Fixed colours over the terminal's 16 theme colours, so the interface looks the same under every theme.
+
+**The wiki interface has header and status bars.** The header names the project, the page's title and path, and the page's broken links, links and backlinks, which the link panel listed before. The status bar names the screen or the editor's mode, then hints or the last message.
+
+**The wiki interface's lists and overview are aligned tables.** Tasks, broken links, page lists, quick open, repairs and each overview section draw their fields in columns, and cut the path before the title when the terminal is narrow. The status bar shows the position in a list. Search snippets drop markdown syntax and highlight matches. On the overview, the most-linked pages go under whichever column is shorter.
+
+**The tree folds with left and right.** Right (`l`) moved focus to the page; it now unfolds a directory, steps into an unfolded one, or opens a page, and left (`h`) folds a directory or moves to its parent, as file trees in editors do. `tab` still moves to the page. Folds are drawn with `▾` and `▸` instead of `v` and `>`.
+
+**The overview is three tabs.** It drew recent changes, tasks, health, directories, tags and the most-linked pages on one screen, capped at 6 to 10 rows each. Its header is now a tab bar, `latest`, `tasks` and `stats`, moved through with `tab` and `shift-tab`; each tab has the whole screen, so the lists are no longer capped. The tasks screen is the tasks tab, and `O` returns to the tab last shown. The status bar names the tab.
+
+**A page is read and edited in one vim buffer.** Opening a page shows its markdown source beside the tree, in the editor that was a separate screen, with the pages linking to it underneath. `tab` moves between the three. In normal mode `<` and `>` jump between links, `enter` follows one, `ctrl-o` goes back and `[` `]` move half a screen; the status bar names the link under the cursor. Wiki actions that were single keys in the reader are `:` commands (`:new`, `:mv`, `:broken`, `:tasks`, `:fix`, `:search` and more), since vim uses those keys; the tree, overview and lists keep their letters and gain a `:` line. `:q` quits gwiki. A source buffer over a rendered reader, so reading and editing need no switch; `:preview` draws the page. `<` and `>` no longer indent in normal mode; `V` then `>`, or `ctrl-t` in insert mode, still does.
+
+**The backlinks panel shows only when it has something.** It took 6 rows on every page and listed each link separately. It now appears only for a page something links to, up to a third of the screen, with one row per linking page. Headings in `:preview` drop their `#` markers above level 3, and bullets, checkboxes, quotes, tables and rules draw with box-drawing characters, so a quote bar no longer looks like a table column. The preview shows the page's type, status, priority, due date and tags above it.
+
+**The notes terminal interface is removed.** `gwiki notes ui` and a bare `gwiki notes`, which now lists its commands, no longer open it. The notes remain available through the command line, the browser view and the agent server.
+
 ### Added
+
+**A directory's README is its page.** `lexer/README.md` is the page for `lexer/`: `[[lexer]]` and `[lexer](lexer/)` reach it, a README without a title takes the directory's name, `gwiki show lexer` finds it, and the tree draws it on the directory's row, where `enter` opens it and `space` folds. Moving it rewrites `[[lexer]]` to the new directory and keeps directory links as directories. README over `index.md` because GitHub shows a directory's README when it is browsed. A link to a directory of pages without a README is now a missing page rather than a working file link; a directory of other files is unchanged. The cache schema is version 4, so existing caches are rebuilt.
+
+**An example wiki.** `.gwiki/wiki` in this repository documents gwiki itself, in sections for guides, architecture, decisions and tasks.
 
 **Wiki overview.** The wiki interface opens on an overview: recent changes with the last commit's author and date and the pages git has not recorded, open tasks with overdue and due-soon counts, broken links, orphan pages and dead ends, and directories, tags and the most-linked pages. Each row opens its page or list; `O` returns to it.
 
@@ -67,6 +87,20 @@ Nothing has been tagged yet, so everything below is the initial body of work.
 **The browser view lost edits.** The detail pane was rebuilt only when its entry left the list, so an added tag did not appear, and renaming an entry back to its previous title was silently not saved. It now refreshes on every change and keeps a field that is being typed in. A newer search could render an older one's results, Escape in the new-entry dialog could still create the entry, and the first change after the page loaded could be missed. A link to an entry that is deleted or missing can now be removed, here, in the agent server and with `gwiki unlink`.
 
 **Command line.** `--` did not stop flag parsing. `edit -m ""` opened the editor instead of clearing the body. `init` saved the identity before refusing; it now checks first, succeeds on a fresh clone that only lacks an identity, and refuses to create a project beneath another in the same repository. The editor runs through `sh -c`, as git runs it, so a quoted path containing spaces works, and closing it unchanged writes nothing.
+
+**A checklist item's due date showed twice.** `- [ ] benchmark due:2026-10-01` kept the token in its text, so `gwiki tasks`, the MCP task list and the browser view printed the date in the text and again beside it. The parser now takes the date out of the text; MCP item lines add `due:` themselves. The fix is in the parser rather than each front end, and the web and MCP servers' check that a line still holds the same item compares text that lacks the date on both sides. The cache schema is version 5.
+
+**`"+y` copied nowhere.** The yanked text was kept in a field nothing read. It now reaches the system clipboard through OSC 52, which works over SSH.
+
+**`:preview` drew broken links as working ones.** It rendered without the link index, so a missing page looked like any link.
+
+**The tasks screen hid due dates' urgency.** It drew overdue tasks like any other, while the overview coloured them. A checklist item's inline `due:` also showed twice, in its text and after it. The tasks screen and the overview now share one row: the date once, marked `✗` when past.
+
+**The editor's status line lost its fields.** Entering insert mode, or any message, replaced the mode, the page, the unsaved mark and the cursor position. The message now shows beside them.
+
+**The wiki interface's help was cut off.** It did not scroll, so a 24-row terminal hid the keys for quitting and for the overview, and it omitted keys such as `a` in tasks. The status line dropped `? help` first when it ran out of room. The help, the hints and the key handlers now come from one table; the help scrolls, and `? help` stays at the right edge. Reloading the overview moved from `r`, which moves a page in the reader, to `R`, which works on every screen.
+
+**The terminal interface showed no selection without colour.** Under `NO_COLOR`, lipgloss dropped reverse video along with colour, so the cursor in lists, the tree and the editor, and the selected link, were invisible. Bold, underline and reverse video now stay, and a selected row starts with a marker.
 
 **Interactive interface.** Layout counted runes, so wide characters overflowed rows. The notebook column and the key reference now scroll, and `e` opens `$EDITOR` on the whole body instead of editing its first line.
 

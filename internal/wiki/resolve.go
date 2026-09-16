@@ -88,8 +88,16 @@ func (w *Wiki) classify(page string, l markdown.Link, lineCounts map[string]int)
 		return classified{kind: KindFile, resolved: target, status: StatusOutsideRepo}
 	}
 
-	if inPages, err := filepath.Rel(w.PagesPath(), abs); err == nil && !strings.HasPrefix(inPages, "..") && strings.HasSuffix(inPages, ".md") {
-		c := classified{kind: KindPage, resolved: pageID(filepath.ToSlash(inPages))}
+	inPages, err := filepath.Rel(w.PagesPath(), abs)
+	inPages = filepath.ToSlash(inPages)
+	if err == nil && !strings.HasPrefix(inPages, "..") && inPages != "." && !strings.HasSuffix(inPages, ".md") {
+		// A directory of pages is its README, whether or not one exists yet.
+		if name, ok := sectionReadme(abs); ok {
+			inPages = path.Join(inPages, name)
+		}
+	}
+	if err == nil && !strings.HasPrefix(inPages, "..") && strings.HasSuffix(inPages, ".md") {
+		c := classified{kind: KindPage, resolved: pageID(inPages)}
 		if l.Anchor != "" {
 			c.kind = KindHeading
 		}
@@ -149,7 +157,7 @@ type index struct {
 
 // addEntry puts a page into the index by path and title, with no headings.
 func (ix *index) addEntry(id, title string) {
-	stem := strings.ToLower(path.Base(id))
+	stem := pageStem(id)
 	ix.exact[id] = true
 	ix.byPath[strings.ToLower(id)] = append(ix.byPath[strings.ToLower(id)], id)
 	ix.byTitle[strings.ToLower(title)] = append(ix.byTitle[strings.ToLower(title)], id)
@@ -167,16 +175,16 @@ func (ix *index) removeEntry(id, title string) {
 	delete(ix.exact, id)
 	drop(ix.byPath, strings.ToLower(id))
 	drop(ix.byTitle, strings.ToLower(title))
-	drop(ix.byStem, strings.ToLower(path.Base(id)))
+	drop(ix.byStem, pageStem(id))
 }
 
 // add puts a page parsed in this refresh into the index, headings included.
 func (ix *index) add(id string, pg *markdown.Page) {
 	title := pg.Title
 	if title == "" {
-		title = path.Base(id)
+		title = pageName(id)
 	}
-	stem := strings.ToLower(path.Base(id))
+	stem := pageStem(id)
 	ix.exact[id] = true
 	ix.byPath[strings.ToLower(id)] = append(ix.byPath[strings.ToLower(id)], id)
 	ix.byTitle[strings.ToLower(title)] = append(ix.byTitle[strings.ToLower(title)], id)
@@ -242,13 +250,14 @@ func wikiKeys(target string) (asWritten, hyphened, stem string) {
 	return t, h, path.Base(h)
 }
 
-// wiki resolves a [[wiki]] target: by path, then title, then file name, each
-// case-insensitive. The first rule that matches anything decides; more than one
-// match there is ambiguous.
+// wiki resolves a [[wiki]] target: by path, a directory's path naming its
+// README, then title, then file name, each case-insensitive. The first rule
+// that matches anything decides; more than one match there is ambiguous.
 func (ix *index) wiki(target string) (string, string) {
 	t, h, stem := wikiKeys(target)
 	for _, matches := range [][]string{
-		union(ix.byPath[path.Clean(t)], ix.byPath[path.Clean(h)]),
+		union(union(ix.byPath[path.Clean(t)], ix.byPath[path.Clean(h)]),
+			union(ix.byPath[path.Join(t, "readme")], ix.byPath[path.Join(h, "readme")])),
 		ix.byTitle[t],
 		ix.byStem[stem],
 	} {

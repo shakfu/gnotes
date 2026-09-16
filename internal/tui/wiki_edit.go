@@ -17,8 +17,8 @@ import (
 	"github.com/shakfu/gwiki/internal/wiki"
 )
 
-// editing is the editor's state: the page it holds, the hash it was read at,
-// and the completion list when one is open.
+// editing is the open page's buffer: the page it holds, the hash it was read
+// at, and the completion list when one is open.
 type editing struct {
 	ed      *vim.Editor
 	page    string
@@ -42,6 +42,10 @@ type editing struct {
 	// draftPending marks changes the draft file does not hold yet; the poll
 	// writes it, so a burst of typing costs one write a second.
 	draftPending bool
+
+	// links are the buffer's links when it held linksText; see bufferLinks.
+	links     []wiki.Link
+	linksText string
 }
 
 // draftsDir holds a buffer's autosaved text, so an interrupted edit survives.
@@ -54,36 +58,30 @@ func draftName(page string) string {
 	return hex.EncodeToString(sum[:8]) + ".md"
 }
 
-// openEditor loads a page into the editor, at a source line when line is set.
-func (m *WikiModel) openEditor(page string, line int) {
-	src, hash, err := m.w.Read(page)
-	if err != nil {
-		m.setError(err)
-		return
-	}
+// openBuffer puts a page's source in the buffer.
+func (m *WikiModel) openBuffer(page string, src []byte, hash string) {
 	ed := vim.New(string(src))
-	ed.Width, ed.Height = m.editorWidth(), m.editorHeight()
-	if line > 0 {
-		ed.SetCursor(vim.Pos{Line: line - 1})
-	}
+	ed.Width, ed.Height = m.bufferWidth(), m.contentHeight()
 	m.edit = &editing{ed: ed, page: page, base: hash}
 	ed.Hooks = vim.Hooks{
-		Save:    m.editSave,
-		Quit:    m.editQuit,
-		Reload:  m.editReload,
-		Follow:  m.editFollow,
-		Back:    func() error { return m.editQuit(false) },
+		Save:   m.editSave,
+		Quit:   m.editQuit,
+		Reload: m.editReload,
+		Follow: func() error {
+			l, ok := m.linkAtCursor()
+			if !ok {
+				return errors.New("no link under the cursor")
+			}
+			return m.follow(l)
+		},
+		Back:    m.back,
 		Command: m.editCommand,
 		Changed: m.editChanged,
 		Complete: func(previous bool) {
 			m.editComplete(previous)
 		},
-		Clipboard: func(text string) {
-			// OSC 52 puts the text in the terminal's clipboard.
-			m.clipboard = text
-		},
+		Clipboard: func(text string) { m.copy(text) },
 	}
-	m.screen = screenEdit
 	m.checkLinks()
 	m.offerDraft()
 }
@@ -161,21 +159,15 @@ func (m *WikiModel) editSave(force bool) error {
 	return nil
 }
 
+// editQuit leaves gwiki, as :q leaves vim.
 func (m *WikiModel) editQuit(force bool) error {
-	e := m.edit
-	if e.ed.Dirty && !force {
+	if m.edit.ed.Dirty && !force {
 		return errors.New("the page has unsaved changes; :w writes them, :q! discards them")
 	}
-	if e.ed.Dirty {
+	if m.edit.ed.Dirty {
 		m.dropDraft()
 	}
-	page := e.page
-	m.edit = nil
-	m.screen = screenRead
-	if err := m.load(page); err != nil {
-		m.setError(err)
-	}
-	m.focus = focusReader
+	m.quitting = true
 	return nil
 }
 
@@ -208,73 +200,6 @@ func (m *WikiModel) checkLinks() {
 			e.broken["[["+l.Written()[2:len(l.Written())-2]+"]]"] = true
 		}
 	}
-}
-
-// editFollow opens what the link under the cursor points at, leaving the
-// editor when the buffer is clean.
-func (m *WikiModel) editFollow() error {
-	e := m.edit
-	snap, err := m.w.Snapshot()
-	if err != nil {
-		return err
-	}
-	links := snap.Links(e.page, []byte(e.ed.Text()))
-	line, col := e.ed.Cursor.Line+1, e.ed.Cursor.Col+1
-	for _, l := range links {
-		if l.Line != line {
-			continue
-		}
-		width := len([]rune(l.Written()))
-		if col < l.Col-2 || col > l.Col+width+2 {
-			continue
-		}
-		switch {
-		case l.Status != wiki.StatusOK && l.Status != wiki.StatusMissingHeading:
-			return fmt.Errorf("%s: %s", l.Status, l.Written())
-		case l.Kind == wiki.KindExternal:
-			return errors.New("external link, not opened: " + l.Resolved)
-		case l.Kind == wiki.KindPage || l.Kind == wiki.KindHeading:
-			if e.ed.Dirty {
-				return errors.New("the page has unsaved changes; :w writes them first")
-			}
-			target := l.Resolved
-			m.edit = nil
-			m.screen = screenRead
-			if err := m.open(target); err != nil {
-				return err
-			}
-			m.focus = focusReader
-			return nil
-		default:
-			return errors.New("that is a file link; leave the editor to open it")
-		}
-	}
-	return errors.New("no link under the cursor")
-}
-
-// editCommand handles the ':' commands the editor does not know.
-func (m *WikiModel) editCommand(name, arg string) (bool, error) {
-	switch name {
-	case "preview":
-		m.edit.preview = !m.edit.preview
-		return true, nil
-	case "check":
-		snap, err := m.w.Snapshot()
-		if err != nil {
-			return true, err
-		}
-		broken := 0
-		for _, l := range snap.Links(m.edit.page, []byte(m.edit.ed.Text())) {
-			if l.Status != wiki.StatusOK {
-				broken++
-			}
-		}
-		if broken == 0 {
-			return true, nil
-		}
-		return true, fmt.Errorf("%s in this page", plural(broken, "broken link"))
-	}
-	return false, nil
 }
 
 func plural(n int, what string) string {
@@ -417,9 +342,50 @@ func (m *WikiModel) insertCompletion() {
 
 // ---------------------------------------------------------------- keys
 
-func (m *WikiModel) keyEdit(msg tea.KeyMsg) {
+// keyContent sends a key to the page's buffer. In NORMAL mode, with no
+// command half typed, the wiki takes a few keys first: tab and shift-tab move
+// between panes, < and > jump between links, [ and ] move half a screen,
+// enter follows the link under the cursor, and ctrl-p opens a page.
+func (m *WikiModel) keyContent(msg tea.KeyMsg) {
 	k := msg.String()
 	e := m.edit
+	m.status = ""
+	if e.ed.Mode == vim.Normal && e.ed.Pending() == "" && !e.preview {
+		switch k {
+		case "tab":
+			m.cycleFocus(1)
+			return
+		case "shift+tab":
+			m.cycleFocus(-1)
+			return
+		case "ctrl+p":
+			m.startOpen()
+			return
+		case "<", ">":
+			by := 1
+			if k == "<" {
+				by = -1
+			}
+			if err := m.jumpLink(by); err != nil {
+				e.ed.Message, e.ed.Err = err.Error(), true
+			}
+			return
+		case "[":
+			k = "ctrl+u"
+		case "]":
+			k = "ctrl+d"
+		case "enter":
+			if l, ok := m.linkAtCursor(); ok {
+				if err := m.follow(l); err != nil {
+					e.ed.Message, e.ed.Err = err.Error(), true
+				}
+				return
+			}
+			// Elsewhere, as vim's enter: the first character of the next line.
+			e.ed.Key("j")
+			k = "^"
+		}
+	}
 	// Any key but the cycling ones ends a completion.
 	if e.complete.active && k != "ctrl+n" && k != "ctrl+p" {
 		e.complete.active = false
@@ -436,16 +402,24 @@ func (m *WikiModel) keyEdit(msg tea.KeyMsg) {
 			return
 		}
 	}
-	e.ed.Width, e.ed.Height = m.editorWidth(), m.editorHeight()
+	e.ed.Width, e.ed.Height = m.bufferWidth(), m.contentHeight()
 	// Fast typing and pastes arrive as one message holding several runes.
 	if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 {
 		for _, r := range msg.Runes {
 			e.ed.Key(string(r))
 		}
-		return
+	} else {
+		e.ed.Key(k)
 	}
-	e.ed.Key(k)
+	// Undoing back to the text as read leaves nothing unsaved, which the
+	// editor does not track.
+	if e.ed.Dirty && m.edit == e && wiki.Hash([]byte(e.ed.Text())) == e.base {
+		e.ed.Dirty = false
+	}
 }
 
-func (m *WikiModel) editorWidth() int  { return max(20, m.width-6) }
-func (m *WikiModel) editorHeight() int { return max(3, m.height-2) }
+// bufferWidth is the text beside the line numbers in the page pane.
+func (m *WikiModel) bufferWidth() int { return max(10, m.contentWidth()-gutterWidth) }
+
+// gutterWidth is the line numbers and the space after them.
+const gutterWidth = 5

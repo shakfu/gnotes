@@ -130,7 +130,7 @@ func init() {
 		cmdEdit, cmdStatus, cmdDue, cmdPriority,
 		cmdTag, cmdUntag, cmdAssign, cmdUnassign,
 		cmdLink, cmdUnlink, cmdMove, cmdRemove, cmdRestore,
-		cmdLog, cmdInfo, cmdWho, cmdUI, cmdServe, cmdMCP, helpCommand(notesHelp, &notesTable),
+		cmdLog, cmdInfo, cmdWho, cmdServe, cmdMCP, helpCommand(notesHelp, &notesTable),
 	})
 }
 
@@ -163,8 +163,11 @@ func (a *App) Run(args []string) int {
 
 func (a *App) dispatch(t *commandTable, args []string) int {
 	if len(args) == 0 {
-		// A bare invocation opens the interactive interface.
-		args = []string{"ui"}
+		// A bare gwiki opens the interface; bare notes commands list themselves.
+		args = []string{"help"}
+		if t == wikiTable {
+			args = []string{"ui"}
+		}
 	}
 
 	name := args[0]

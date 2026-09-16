@@ -8,19 +8,15 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/shakfu/gwiki/internal/display"
-	"github.com/shakfu/gwiki/internal/wiki"
 )
 
-// View renders the whole screen: a header, the body and a status line.
+// View renders the whole screen: a header bar, the body and a status bar.
 func (m *WikiModel) View() string {
 	if m.quitting {
 		return ""
 	}
 	if m.width < 1 || m.height < 1 {
 		return ""
-	}
-	if m.screen == screenHelp {
-		return m.viewWikiHelp()
 	}
 
 	var body []string
@@ -35,12 +31,14 @@ func (m *WikiModel) View() string {
 		body = m.viewTasks()
 	case screenOffers:
 		body = m.viewOffers()
-	case screenHome:
-		body = m.viewHome()
+	case screenLatest:
+		body = m.viewLatest()
+	case screenStats:
+		body = m.viewStats()
 	case screenPages:
 		body = m.viewPages()
-	case screenEdit:
-		body = m.viewEdit()
+	case screenHelp:
+		body = m.viewHelp()
 	default:
 		body = m.viewRead()
 	}
@@ -59,93 +57,144 @@ func (m *WikiModel) View() string {
 	return strings.Join(lines[:min(len(lines), m.height)], "\n")
 }
 
+// titleOf is a page's title, or its path when it has none.
+func (m *WikiModel) titleOf(page string) string {
+	for _, p := range m.pages {
+		if p.Path == page && p.Title != "" {
+			return p.Title
+		}
+	}
+	return page
+}
+
+// viewWikiHeader is the header bar: the project, where the view is, and facts
+// about the open page.
 func (m *WikiModel) viewWikiHeader() string {
-	left := styleHeader.Render(display.Line(m.w.Config.Name))
-	if left == "" {
-		left = styleHeader.Render("wiki")
+	name := display.Line(m.w.Config.Name)
+	if name == "" {
+		name = "wiki"
+	}
+	left := []seg{plain(" "), {name, styleHeader}, plain("  ")}
+	var right []seg
+	if isTab(m.screen) {
+		// The overview's header is its tab bar.
+		for _, tab := range overviewTabs {
+			style := styleDim
+			if tab == m.screen {
+				style = styleTab
+			}
+			left = append(left, seg{" " + tabName(tab) + " ", style}, plain(" "))
+		}
+		summary := m.latestSummary()
+		if m.screen == screenTasks {
+			summary = m.taskSummary()
+		}
+		if m.screen != screenStats && summary != "" {
+			right = []seg{{summary + " ", styleDim}}
+		}
+		return bar(m.width, left, right)
+	}
+	page := func(path string) {
+		left = append(left, seg{display.Line(m.titleOf(path)), styleBold}, seg{" · " + display.Line(path), styleDim})
 	}
 	switch m.screen {
 	case screenSearch:
-		left += "  search"
+		left = append(left, plain("search"))
 	case screenOpen:
-		left += "  open"
+		left = append(left, plain("open"))
 	case screenBroken:
-		left += fmt.Sprintf("  broken links (%d)", len(m.broken))
-	case screenTasks:
-		which := "open tasks"
-		if m.allTasks {
-			which = "all tasks"
-		}
-		left += fmt.Sprintf("  %s (%d)", which, len(m.tasks))
+		left = append(left, plain("broken links"), seg{fmt.Sprintf("  %d", len(m.broken)), styleDim})
 	case screenOffers:
-		left += "  repairs for " + display.Line(m.offerFor.Written())
-	case screenHome:
-		left += "  overview"
+		left = append(left, plain("repairs for "+display.Line(m.offerFor.Written())))
 	case screenPages:
-		left += "  " + display.Line(m.listTitle) + fmt.Sprintf(" (%d)", len(m.listed))
-	case screenEdit:
-		left += "  " + styleDim.Render(display.Line(m.edit.page)+"  editing")
+		left = append(left, plain(display.Line(m.listTitle)), seg{fmt.Sprintf("  %d", len(m.listed)), styleDim})
+	case screenHelp:
+		left = append(left, plain("keys"))
 	default:
-		if m.cur != nil {
-			left += "  " + styleDim.Render(display.Line(m.cur.info.Path))
+		if r := m.cur; r != nil {
+			page(r.info.Path)
+			if r.broken > 0 {
+				right = append(right, seg{fmt.Sprintf("✗ %d broken  ", r.broken), styleError})
+			}
+			right = append(right, seg{plural(r.links, "link") + "  " + plural(len(r.backlinks), "backlink") + " ", styleDim})
 		}
 	}
-	right := ""
-	if m.cur != nil && m.cur.broken > 0 && m.screen == screenRead {
-		right = styleError.Render(fmt.Sprintf("%d broken", m.cur.broken))
-	}
-	gap := m.width - ansi.StringWidth(left) - ansi.StringWidth(right)
-	if right == "" || gap < 2 {
-		return left
-	}
-	return left + strings.Repeat(" ", gap) + right
+	return bar(m.width, left, right)
 }
 
+// tabName is an overview tab's name in the header bar.
+func tabName(tab wscreen) string {
+	switch tab {
+	case screenTasks:
+		return "tasks"
+	case screenStats:
+		return "stats"
+	}
+	return "latest"
+}
+
+// screenLabel names the screen, or the focused part of the reader, at the
+// left of the status bar.
+func (m *WikiModel) screenLabel() string {
+	switch m.screen {
+	case screenLatest, screenTasks, screenStats:
+		return strings.ToUpper(tabName(m.screen))
+	case screenBroken:
+		return "BROKEN"
+	case screenOffers:
+		return "REPAIRS"
+	case screenPages:
+		return "PAGES"
+	case screenHelp:
+		return "HELP"
+	}
+	switch {
+	case m.focus == focusTree || m.cur == nil:
+		return "TREE"
+	case m.focus == focusPanel:
+		return "BACKLINKS"
+	}
+	return m.edit.ed.Mode.String()
+}
+
+// viewWikiStatus is the status bar, or the line being typed into.
 func (m *WikiModel) viewWikiStatus() string {
 	switch {
 	case m.prompt != nil:
 		return m.input.render(m.prompt.label, m.width)
-	case m.screen == screenEdit:
+	case m.screen == screenRead && m.focus == focusContent && m.edit != nil:
 		return m.viewEditStatus()
 	case m.screen == screenSearch:
 		return m.input.render("/", m.width)
 	case m.screen == screenOpen:
 		return m.input.render("open: ", m.width)
+	}
+	left := []seg{plain(" "), {m.screenLabel(), styleHeader}, plain("  ")}
+	switch {
+	case m.status != "" && m.statusErr:
+		left = append(left, seg{display.Line(m.status), styleError})
 	case m.status != "":
-		if m.statusErr {
-			return styleError.Render(display.Line(m.status))
-		}
-		return display.Line(m.status)
-	}
-	var hint string
-	switch m.screen {
-	case screenBroken:
-		hint = "enter open  f repairs  esc back"
-	case screenTasks:
-		hint = "space toggle  a all/open  enter open  esc back"
-	case screenOffers:
-		hint = "enter apply  esc back"
-	case screenHome:
-		hint = "j k move  h l column  enter open  / search  ^p open  n new  c broken  t tasks  r reload  ? help"
-	case screenPages:
-		hint = "enter open  esc back"
+		left = append(left, plain(display.Line(m.status)))
 	default:
-		switch m.focus {
-		case focusTree:
-			hint = "enter open  l reader  / search  ^p open  n new  c broken  t tasks  O overview  ? help"
-		case focusPanel:
-			hint = "enter open the linking page  esc reader"
-		default:
-			hint = "tab link  enter follow  bksp back  b backlinks  e edit  r move  f fix  ? help"
+		room := m.width - ansi.StringWidth(" "+m.screenLabel()+"  ") - len(helpHint) - 3
+		left = append(left, seg{fitHints(m.hints(), room), styleDim})
+	}
+	right := []seg{{helpHint + " ", styleDim}}
+	switch m.screen {
+	case screenHelp:
+		right = nil
+	case screenLatest, screenBroken, screenTasks, screenOffers, screenPages:
+		if n := m.listLen(); n > 0 {
+			right = append([]seg{{fmt.Sprintf("%d/%d  ", min(m.cursor+1, n), n), styleDim}}, right...)
 		}
 	}
-	return styleDim.Render(hint)
+	return bar(m.width, left, right)
 }
 
 // viewRead lays the tree beside the reader and its link panel.
 func (m *WikiModel) viewRead() []string {
 	h := m.bodyHeight()
-	tw, rw := m.treeWidth(), m.readerWidth()
+	tw, rw := m.treeWidth(), m.contentWidth()
 	tree := m.viewTree(tw, h)
 
 	var right []string
@@ -153,7 +202,15 @@ func (m *WikiModel) viewRead() []string {
 		if m.cur == nil {
 			right = []string{styleDim.Render(" no page open; n creates one")}
 		} else {
-			right = m.viewReader(rw, m.readerHeight())
+			if meta := m.metaLine(); m.metaHeight() > 0 {
+				line, _ := drawSegs(append([]seg{plain(" ")}, meta...), rw, same)
+				right = append(right, line)
+			}
+			buffer := m.viewBuffer(rw, m.contentHeight())
+			for len(buffer) < m.contentHeight() {
+				buffer = append(buffer, "")
+			}
+			right = append(right, buffer...)
 			right = append(right, m.viewPanel(rw)...)
 		}
 	}
@@ -170,7 +227,7 @@ func (m *WikiModel) viewRead() []string {
 		}
 		if rw > 0 {
 			if tw > 0 {
-				b.WriteString(styleDim.Render("|"))
+				b.WriteString(styleDim.Render("│"))
 			}
 			if i < len(right) {
 				b.WriteString(clip(right[i], rw))
@@ -201,11 +258,19 @@ func (m *WikiModel) viewTree(width, height int) []string {
 		indent := strings.Repeat("  ", row.depth)
 		var text string
 		if row.dir != "" {
-			marker := "v "
+			marker := "▾ "
 			if m.collapsed[row.dir] {
-				marker = "> "
+				marker = "▸ "
 			}
-			text = indent + marker + display.Line(path.Base(row.dir)) + "/"
+			name := path.Base(row.dir) + "/"
+			if row.hasPage {
+				// The README's title, or the directory's name.
+				name = m.pages[row.page].Title
+			}
+			text = indent + marker + display.Line(name)
+			if row.hasPage && m.cur != nil && m.pages[row.page].Path == m.cur.info.Path {
+				text = styleBold.Render(text)
+			}
 		} else {
 			p := m.pages[row.page]
 			name := p.Title
@@ -218,241 +283,83 @@ func (m *WikiModel) viewTree(width, height int) []string {
 			}
 		}
 		text = truncate(" "+text, width-1)
-		if i == m.treeCursor && m.focus == focusTree && m.screen == screenRead {
-			text = styleSelected.Render(pad(ansi.Strip(text), width-1))
+		if i == m.treeCursor && m.screen == screenRead {
+			if m.focus == focusTree {
+				text = selectRow(ansi.Strip(text), width-1)
+			} else {
+				// The row h returns to.
+				text = styleDim.Render(markInactive) + text[1:]
+			}
 		}
 		out = append(out, text)
 	}
 	return out
 }
 
-func (m *WikiModel) viewReader(width, height int) []string {
-	doc := m.doc()
-	r := m.cur
-	r.scroll = max(0, min(r.scroll, len(doc.Lines)-height))
-	end := min(len(doc.Lines), r.scroll+height)
-	out := make([]string, 0, height)
-	for _, l := range doc.Lines[r.scroll:end] {
-		out = append(out, " "+l)
+// metaLine is the open page's front matter: type, status, priority, due date
+// and tags.
+func (m *WikiModel) metaLine() []seg {
+	p := m.cur.info
+	var out []seg
+	add := func(s seg) {
+		if len(out) > 0 {
+			out = append(out, plain("  "))
+		}
+		out = append(out, s)
 	}
-	for len(out) < height {
-		out = append(out, "")
+	for _, field := range []string{p.Type, p.Status} {
+		if field != "" {
+			add(seg{display.Line(field), styleDim})
+		}
+	}
+	if p.Priority != "" {
+		style := styleDim
+		if strings.EqualFold(p.Priority, "high") {
+			style = styleError
+		}
+		add(seg{"!" + display.Line(p.Priority), style})
+	}
+	if due := m.dueCell(p.Due, p.Status == "done"); len(due) > 0 {
+		add(seg{"due " + due[0].text, due[0].style})
+	}
+	for _, tag := range p.Tags {
+		add(seg{"#" + display.Line(tag), styleTag})
 	}
 	return out
 }
 
-// viewPanel is the link panel: counts, the selected link, and backlinks.
+// viewPanel is the backlinks panel: a titled rule, then a row per linking
+// page.
 func (m *WikiModel) viewPanel(width int) []string {
 	ph := m.panelHeight()
 	if ph == 0 {
 		return nil
 	}
 	r := m.cur
-	lines := []string{styleDim.Render(strings.Repeat("-", width))}
-	lines = append(lines, fmt.Sprintf(" links %d  backlinks %d  broken %d", len(m.doc().Links), len(r.backlinks), r.broken))
+	title := fmt.Sprintf(" ── %s from %s ", plural(len(r.backlinks), "backlink"), plural(len(r.linkers), "page"))
+	lines := []string{styleDim.Render(truncate(title+strings.Repeat("─", max(0, width-ansi.StringWidth(title))), width))}
 
-	if l, ok := m.selectedLink(); ok {
-		text := " -> " + display.Line(l.Written())
-		switch {
-		case l.Status != wiki.StatusOK:
-			text += "  " + styleError.Render(l.Status) + styleDim.Render("  f repairs")
-		case l.Resolved != "":
-			text += styleDim.Render("  " + display.Line(l.Resolved))
+	t := &table{cols: []column{{shrink: 1, min: 8}, {shrink: 2}, {right: true}}}
+	for _, l := range r.linkers {
+		count := ""
+		if l.links > 1 {
+			count = fmt.Sprintf("×%d", l.links)
 		}
-		lines = append(lines, text)
-	} else {
-		lines = append(lines, styleDim.Render(" tab selects a link"))
+		t.rows = append(t.rows, []cell{
+			text("← "+display.Line(m.titleOf(l.page)), stylePlain),
+			text(display.Line(l.page), styleDim),
+			text(count, styleDim),
+		})
 	}
-
-	room := ph - len(lines)
-	start := 0
-	if r.backCursor >= room {
-		start = r.backCursor - room + 1
-	}
-	for i := start; i < len(r.backlinks) && len(lines) < ph; i++ {
-		l := r.backlinks[i]
-		text := fmt.Sprintf(" <- %s:%d  %s", display.Line(l.Page), l.Line, display.Line(l.Written()))
+	t.layout(width)
+	room := ph - 1
+	start := max(0, r.backCursor-room+1)
+	for i := start; i < len(t.rows) && len(lines) < ph; i++ {
+		text := t.draw(t.rows[i])
 		if i == r.backCursor && m.focus == focusPanel {
-			text = styleSelected.Render(pad(truncate(text, width), width))
+			text = selectRow(ansi.Strip(text), width)
 		}
 		lines = append(lines, text)
 	}
 	return lines
-}
-
-// listWindow returns the visible range of a list screen, scrolled to keep the
-// cursor in view with rowsPer lines per item.
-func (m *WikiModel) listWindow(n, rowsPer int) (int, int) {
-	visible := max(1, m.bodyHeight()/rowsPer)
-	m.cursor = max(0, min(m.cursor, n-1))
-	if m.cursor < m.scroll {
-		m.scroll = m.cursor
-	}
-	if m.cursor >= m.scroll+visible {
-		m.scroll = m.cursor - visible + 1
-	}
-	return m.scroll, min(n, m.scroll+visible)
-}
-
-func (m *WikiModel) row(i int, text string) string {
-	text = truncate(text, m.width)
-	if i == m.cursor {
-		return styleSelected.Render(pad(ansi.Strip(text), m.width))
-	}
-	return text
-}
-
-func pageLabel(p wiki.PageInfo) string {
-	s := display.Line(p.Path)
-	if p.Title != "" && p.Title != path.Base(p.Path) {
-		s += "  " + display.Line(p.Title)
-	}
-	return s
-}
-
-func (m *WikiModel) viewHits() []string {
-	if len(m.hits) == 0 {
-		if strings.TrimSpace(m.input.String()) == "" {
-			return []string{styleDim.Render(" type to search titles, headings, tags and text")}
-		}
-		return []string{styleDim.Render(" no pages match")}
-	}
-	start, end := m.listWindow(len(m.hits), 2)
-	var out []string
-	for i := start; i < end; i++ {
-		h := m.hits[i]
-		out = append(out, m.row(i, " "+pageLabel(h.PageInfo)))
-		out = append(out, "   "+snippet(h.Snippet))
-	}
-	return out
-}
-
-// snippet draws a search snippet with its matches in bold.
-func snippet(s string) string {
-	var b strings.Builder
-	for i, part := range strings.Split(strings.Join(strings.Fields(s), " "), "\x02") {
-		match, rest, found := strings.Cut(part, "\x03")
-		if i == 0 || !found {
-			b.WriteString(styleDim.Render(display.Line(part)))
-			continue
-		}
-		b.WriteString(styleBold.Render(display.Line(match)))
-		b.WriteString(styleDim.Render(display.Line(rest)))
-	}
-	return b.String()
-}
-
-func (m *WikiModel) viewMatches() []string {
-	if len(m.matches) == 0 {
-		return []string{styleDim.Render(" no pages match")}
-	}
-	start, end := m.listWindow(len(m.matches), 1)
-	var out []string
-	for i := start; i < end; i++ {
-		out = append(out, m.row(i, " "+pageLabel(m.matches[i])))
-	}
-	return out
-}
-
-func (m *WikiModel) viewBroken() []string {
-	if len(m.broken) == 0 {
-		return []string{styleOK.Render(" no broken links")}
-	}
-	start, end := m.listWindow(len(m.broken), 1)
-	var out []string
-	for i := start; i < end; i++ {
-		l := m.broken[i]
-		out = append(out, m.row(i, fmt.Sprintf(" %s:%d  %s  %s", display.Line(l.Page), l.Line, l.Status, display.Line(l.Written()))))
-	}
-	return out
-}
-
-func (m *WikiModel) viewTasks() []string {
-	if len(m.tasks) == 0 {
-		return []string{styleDim.Render(" no tasks")}
-	}
-	start, end := m.listWindow(len(m.tasks), 1)
-	var out []string
-	for i := start; i < end; i++ {
-		t := m.tasks[i]
-		var text string
-		if t.Line == 0 {
-			text = fmt.Sprintf(" [%s] %s  %s", t.Status, display.Line(t.Text), display.Line(t.Page))
-		} else {
-			box := "[ ]"
-			if t.Status == "done" {
-				box = "[x]"
-			}
-			text = fmt.Sprintf(" %s %s  %s:%d", box, display.Line(t.Text), display.Line(t.Page), t.Line)
-		}
-		if t.Due != "" {
-			text += "  due " + t.Due
-		}
-		out = append(out, m.row(i, text))
-	}
-	return out
-}
-
-func (m *WikiModel) viewOffers() []string {
-	l := m.offerFor
-	out := []string{fmt.Sprintf(" %s:%d  %s  %s", display.Line(l.Page), l.Line, styleError.Render(l.Status), display.Line(l.Written())), ""}
-	for i, o := range m.offers {
-		out = append(out, m.row(i, fmt.Sprintf(" %d  %s  %s", i+1, display.Line(o.New), styleDim.Render(display.Line(o.Label)))))
-	}
-	return out
-}
-
-func (m *WikiModel) viewWikiHelp() string {
-	var b strings.Builder
-	b.WriteString(styleBold.Render("gwiki") + "\n\n")
-	section := func(title string, rows [][2]string) {
-		b.WriteString(styleHeader.Render(title) + "\n")
-		for _, r := range rows {
-			fmt.Fprintf(&b, "  %s  %s\n", pad(r[0], 14), styleDim.Render(r[1]))
-		}
-		b.WriteByte('\n')
-	}
-	section("tree", [][2]string{
-		{"j k g G", "move"},
-		{"enter", "open a page, fold a directory"},
-		{"l tab", "to the reader"},
-	})
-	section("editor", [][2]string{
-		{"e", "edit the page here; E opens $EDITOR instead"},
-		{"vim keys", "modes, counts, operators, text objects, registers, . and u"},
-		{":w :q :wq", "write, leave, both; :q! discards, :e! reloads"},
-		{"[[ then ^n", "complete a page, a heading after #, a path after ]("},
-		{"ctrl-]", "follow the link under the cursor; ctrl-o goes back"},
-		{"ctrl-space", "tick the checklist item on this line"},
-		{":preview", "the page as the reader draws it"},
-	})
-	section("reader", [][2]string{
-		{"j k", "scroll"},
-		{"space ctrl-d", "half a page down"},
-		{"ctrl-u", "half a page up"},
-		{"tab shift-tab", "next and previous link"},
-		{"enter", "follow the link; a file opens in $EDITOR"},
-		{"backspace", "back"},
-		{"b", "backlinks"},
-		{"e", "edit the page"},
-		{"r", "move the page, rewriting links"},
-		{"f", "repairs for the selected broken link"},
-		{"h", "to the tree"},
-	})
-	section("anywhere", [][2]string{
-		{"/", "search"},
-		{"ctrl-p", "open a page by title or path"},
-		{"n", "new page"},
-		{"c", "broken links"},
-		{"t", "tasks; space toggles one"},
-		{"O", "the overview"},
-		{"esc", "back to the reader"},
-		{"q ctrl-c", "quit"},
-	})
-	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
-	lines = append(lines, styleDim.Render("any key to go back"))
-	for i, l := range lines {
-		lines[i] = clip(l, m.width)
-	}
-	return strings.Join(lines[:min(len(lines), m.height)], "\n")
 }

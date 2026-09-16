@@ -169,7 +169,7 @@ func TestTasks(t *testing.T) {
 	src := "- [ ] benchmark the lexer due:2026-08-21\n- [x] write the grammar\n  - [X] nested\n1. [ ] numbered\n- not a task\n\n```\n- [ ] in code\n```\n"
 	p := Parse([]byte(src))
 	want := []Task{
-		{Line: 1, Text: "benchmark the lexer due:2026-08-21", Due: "2026-08-21"},
+		{Line: 1, Text: "benchmark the lexer", Due: "2026-08-21"},
 		{Line: 2, Text: "write the grammar", Done: true},
 		{Line: 3, Text: "nested", Done: true},
 		{Line: 4, Text: "numbered"},

@@ -6,24 +6,11 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/shakfu/gwiki/internal/display"
 	"github.com/shakfu/gwiki/internal/render"
 	"github.com/shakfu/gwiki/internal/vim"
-)
-
-// Editor styles: markdown as source, not as rendered text.
-var (
-	styleEditHeading = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
-	styleEditCode    = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	styleEditLink    = lipgloss.NewStyle().Underline(true).Foreground(lipgloss.Color("6"))
-	styleEditBroken  = lipgloss.NewStyle().Underline(true).Foreground(lipgloss.Color("1"))
-	styleEditMarker  = lipgloss.NewStyle().Faint(true)
-	styleEditEmph    = lipgloss.NewStyle().Italic(true)
-	styleEditStrong  = lipgloss.NewStyle().Bold(true)
-	styleGutter      = lipgloss.NewStyle().Faint(true)
-	styleMatch       = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("3"))
+	"github.com/shakfu/gwiki/internal/wiki"
 )
 
 // span is a styled run of one line, in rune columns.
@@ -53,7 +40,7 @@ func (m *WikiModel) editSpans(line string, inCode bool) []span {
 	}
 	var out []span
 	if loc := reMarker.FindStringIndex(line); loc != nil {
-		out = append(out, span{at(loc[0]), at(loc[1]), styleEditMarker})
+		out = append(out, span{at(loc[0]), at(loc[1]), styleDim})
 	}
 	for _, re := range []struct {
 		re    *regexp.Regexp
@@ -100,7 +87,7 @@ func (m *WikiModel) styleRow(runes []rune, from, to int, spans []span, marks [][
 		case display.Control(r):
 			text = "?"
 		}
-		style, key := lipgloss.NewStyle(), -1
+		style, key := stylePlain, -1
 		for j, s := range spans {
 			if i >= s.from && i < s.to {
 				style, key = s.style, j
@@ -123,22 +110,29 @@ func (m *WikiModel) styleRow(runes []rune, from, to int, spans []span, marks [][
 	flush()
 	// The cursor past the last character needs a cell of its own.
 	if cursor >= to && cursor >= len(runes) && cursor < to+1 {
-		b.WriteString(lipgloss.NewStyle().Reverse(true).Render(" "))
+		b.WriteString(stylePlain.Reverse(true).Render(" "))
 	}
 	return b.String()
 }
 
-// viewEdit draws the buffer, or the preview when it is on.
-func (m *WikiModel) viewEdit() []string {
+// viewBuffer draws the page's buffer in width columns and height rows, or its
+// preview when that is on.
+func (m *WikiModel) viewBuffer(width, height int) []string {
 	e := m.edit
-	h := m.bodyHeight()
-	width := m.editorWidth()
-
+	e.ed.Width, e.ed.Height = m.bufferWidth(), height
 	if e.preview {
-		doc := render.Render([]byte(e.ed.Text()), render.Options{Width: max(10, m.width-2), Styles: m.styles, Selected: -1})
+		broken := map[string]bool{}
+		for _, l := range m.bufferLinks() {
+			if l.Status != wiki.StatusOK {
+				broken[l.Form+"\x00"+l.Target+"\x00"+l.Anchor] = true
+			}
+		}
+		doc := render.Render([]byte(e.ed.Text()), render.Options{Width: max(10, width-2), Styles: readerStyles, Selected: -1, Broken: func(l render.Link) bool {
+			return broken[string(l.Form)+"\x00"+l.Target+"\x00"+l.Anchor]
+		}})
 		top := min(e.ed.Top, max(0, len(doc.Lines)-1))
 		out := []string{}
-		for i := top; i < len(doc.Lines) && len(out) < h; i++ {
+		for i := top; i < len(doc.Lines) && len(out) < height; i++ {
 			out = append(out, " "+doc.Lines[i])
 		}
 		return out
@@ -147,9 +141,11 @@ func (m *WikiModel) viewEdit() []string {
 	cur := e.ed.Cursor
 	selA, selZ, hasSel := e.ed.Selection()
 	inCode := codeStateBefore(e.ed, e.ed.Top)
+	// The cursor is drawn only while the buffer has the focus.
+	focused := m.focus == focusContent
 
 	var out []string
-	for l := e.ed.Top; l < e.ed.Buf.Lines() && len(out) < h; l++ {
+	for l := e.ed.Top; l < e.ed.Buf.Lines() && len(out) < height; l++ {
 		text := e.ed.Buf.LineString(l)
 		fenced := strings.HasPrefix(strings.TrimSpace(text), "```")
 		spans := m.editSpans(text, inCode || fenced)
@@ -157,7 +153,7 @@ func (m *WikiModel) viewEdit() []string {
 			inCode = !inCode
 		}
 		runes := []rune(text)
-		rows := vim.Wrap(runes, width)
+		rows := vim.Wrap(runes, m.bufferWidth())
 		marks := e.ed.Matches(l)
 
 		sel := [2]int{-1, -2}
@@ -171,7 +167,7 @@ func (m *WikiModel) viewEdit() []string {
 			}
 		}
 		for r, start := range rows {
-			if len(out) >= h {
+			if len(out) >= height {
 				break
 			}
 			end := len(runes)
@@ -183,10 +179,10 @@ func (m *WikiModel) viewEdit() []string {
 				number = fmt.Sprintf("%4d", l+1)
 			}
 			cursorCol := -1
-			if l == cur.Line && cur.Col >= start && (cur.Col < end || r == len(rows)-1) {
+			if focused && l == cur.Line && cur.Col >= start && (cur.Col < end || r == len(rows)-1) {
 				cursorCol = cur.Col
 			}
-			out = append(out, styleGutter.Render(number)+" "+m.styleRow(runes, start, end, spans, marks, sel, cursorCol))
+			out = append(out, styleDim.Render(number)+" "+m.styleRow(runes, start, end, spans, marks, sel, cursorCol))
 		}
 	}
 	return out
@@ -203,36 +199,47 @@ func codeStateBefore(ed *vim.Editor, line int) bool {
 	return in
 }
 
-// viewEditStatus is the editor's status line.
+// viewEditStatus is the editor's status bar, or its command line. A message
+// is shown beside the mode, the page and the position rather than in place of
+// them.
 func (m *WikiModel) viewEditStatus() string {
 	e := m.edit
 	if line, ok := e.ed.CommandLine(); ok {
 		return line + "_"
 	}
-	if e.ed.Message != "" {
-		if e.ed.Err {
-			return styleError.Render(display.Line(e.ed.Message))
-		}
-		return display.Line(e.ed.Message)
-	}
-	left := styleBold.Render(e.ed.Mode.String())
+	label := e.ed.Mode.String()
 	if e.preview {
-		left = styleBold.Render("PREVIEW")
+		label = "PREVIEW"
 	}
-	left += "  " + display.Line(e.page)
+	left := []seg{plain(" "), {label, styleHeader}, plain("  " + display.Line(e.page))}
 	if e.ed.Dirty {
-		left += styleDoing.Render(" [+]")
+		left = append(left, seg{" [+]", styleWarn})
 	}
 	if e.outside {
-		left += styleError.Render("  changed on disk; :e! loads it")
+		left = append(left, seg{"  changed on disk; :e! loads it", styleError})
 	}
-	right := fmt.Sprintf("%d:%d", e.ed.Cursor.Line+1, e.ed.Cursor.Col+1)
+	message, failed := e.ed.Message, e.ed.Err
+	if message == "" {
+		message, failed = m.status, m.statusErr
+	}
+	switch l, onLink := m.linkAtCursor(); {
+	case message != "":
+		style := stylePlain
+		if failed {
+			style = styleError
+		}
+		left = append(left, seg{"  " + display.Line(message), style})
+	case onLink && e.ed.Mode == vim.Normal:
+		left = append(left, seg{"  → " + display.Line(l.Written()), stylePlain})
+		if l.Status != wiki.StatusOK {
+			left = append(left, seg{"  " + strings.ReplaceAll(l.Status, "-", " "), styleError})
+		} else if l.Resolved != "" {
+			left = append(left, seg{"  " + display.Line(l.Resolved), styleDim})
+		}
+	}
+	right := fmt.Sprintf("%d:%d ", e.ed.Cursor.Line+1, e.ed.Cursor.Col+1)
 	if p := e.ed.Pending(); p != "" {
 		right = p + "  " + right
 	}
-	gap := m.width - ansi.StringWidth(left) - ansi.StringWidth(right)
-	if gap < 1 {
-		return left
-	}
-	return left + strings.Repeat(" ", gap) + right
+	return bar(m.width, left, []seg{{right, styleDim}})
 }

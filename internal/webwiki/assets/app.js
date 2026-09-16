@@ -102,14 +102,31 @@ async function loadTree() {
 function drawTree() {
   tree.replaceChildren();
   const here = current().kind === "page" ? current().arg : "";
+  // A directory's README is its page: the directory's heading links to it.
+  const readme = new Map();
+  for (const p of pages) {
+    const at = p.path.lastIndexOf("/");
+    if (at > 0 && p.path.slice(at + 1).toLowerCase() === "readme") readme.set(p.path.slice(0, at), p);
+  }
   let dir = null;
   for (const p of pages) {
     const at = p.path.lastIndexOf("/");
     const group = at < 0 ? "" : p.path.slice(0, at);
     if (group !== dir) {
       dir = group;
-      if (group) tree.append(el("div", { class: "dir", text: group + "/" }));
+      const page = readme.get(group);
+      if (page) {
+        tree.append(el("a", {
+          href: pageHref(page.path),
+          class: "dir" + (page.path === here ? " here" : ""),
+          title: page.path,
+          text: group + "/ · " + (page.title || group),
+        }));
+      } else if (group) {
+        tree.append(el("div", { class: "dir", text: group + "/" }));
+      }
     }
+    if (readme.get(group) === p) continue;
     const link = el("a", {
       href: pageHref(p.path),
       class: (p.path === here ? "here " : "") + (group ? "nest" : ""),

@@ -6,7 +6,7 @@ Pages live in `.gwiki/wiki` and are committed with the code. They link to each o
 
 Pages are plain files, so any editor works. gwiki adds:
 
-- a terminal interface: an overview of the wiki, a page tree, a reader that follows links, backlinks, search, broken links and tasks;
+- a terminal interface: an overview of the wiki, a page tree beside the page in a vim buffer that follows links, backlinks, search, broken links and tasks;
 - a language server, so Neovim, Helix or Vim complete links, flag broken ones and follow them;
 - an MCP server, so a code agent can read and edit pages without overwriting yours;
 - a command line for all of the above.
@@ -14,16 +14,12 @@ Pages are plain files, so any editor works. gwiki adds:
 All of it is one executable. Every write checks that the page has not changed since it was read, and refuses rather than overwrite.
 
 ```
-myproject  overview
-Recent changes                                        | Health
-  Design sketch  lexer/design-sketch  3h ago  Ada     |   broken links   2
-  Grammar  lexer/grammar  1d ago  Ada  uncommitted    |   orphan pages   1
-                                                      |   dead ends      4
-Tasks  5 open, 1 overdue, 2 due within a week         |
-  Ship it  tasks/ship  overdue 2026-09-01             | Structure  38 pages
-  benchmark the lexer  lexer/design-sketch:12         |   lexer/  12
-                                                      |   #parser  7
-j k move  h l column  enter open  / search  ^p open  n new  c broken  t tasks  ? help
+ myproject   latest   tasks   stats                                  38 pages · ● uncommitted
+ PAGE            PATH                  CHANGED  AUTHOR
+ Design sketch   lexer/design-sketch    3h ago  Ada
+ Grammar         lexer/grammar          1d ago  Ada    ●
+ Ship it         tasks/ship             2d ago  Grace
+ LATEST  enter open  tab next tab  / search  ^p open  n new  c broken  t tasks       1/38  ? help
 ```
 
 ## Install
@@ -43,6 +39,8 @@ gwiki new "Design sketch" --in lexer -m "The lexer tokenizes input. See [[Gramma
 gwiki                                       # the interface, on the overview
 ```
 
+`init` also writes `.gwiki/config.json`, whose `name` is the project name the interface shows. It is the directory's name when `init` runs; edit it if you rename the directory.
+
 ## Pages and links
 
 A page is a markdown file under `.gwiki/wiki`; its path without `.md` names it, such as `lexer/design-sketch`. Its title is the front matter `title`, else its first level-one heading, else its file name. Front matter can also set `tags`, and `type: task` with `status`, `priority` and `due` for a task page. Checklist items (`- [ ] text`) in any page are tasks too.
@@ -52,53 +50,74 @@ A page is a markdown file under `.gwiki/wiki`; its path without `.md` names it, 
 | `[[Design sketch]]` | a page by path, then title, then file name |
 | `[[lexer/design-sketch#Tokens\|the tokens]]` | a heading, with a label |
 | `[notes](../grammar.md#rules)` | a page by relative path |
+| `[[lexer]]`, `[lexer](lexer/)` | a directory's `README.md` |
 | `[lexer](../../src/lexer.go#L42-L50)` | a file, or a line range in it |
 
 A reference names a page by its path, its title, its file name, or a fragment; an ambiguous one lists the candidates.
 
+Pages nest in directories to any depth. A directory's `README.md` is the directory's own page, as GitHub shows it when the directory is browsed: `[[lexer]]` and a link to `lexer/` reach it, it is titled by the directory's name when it has no title, and the tree draws it on the directory's row. This repository's `.gwiki/wiki` is an example: sections for guides, architecture, decisions and tasks, each with a README.
+
 ## The interface
 
-Run `gwiki` with no arguments. It opens on the overview:
+Run `gwiki` with no arguments. It opens on the overview, whose header is a bar of three tabs; `tab` and `shift-tab` move between them:
 
-- **Recent changes**, with the author and date of the last commit to each page, and pages git has not recorded;
-- **Tasks**, overdue and due soon first;
-- **Health**: broken links, orphan pages that nothing links to, and dead ends that link to nothing;
-- **Structure**: directories, tags and the most-linked pages.
+- **latest**: pages by when they changed, with the author of the last commit, and pages git has not recorded;
+- **tasks**: task pages and checklist items, overdue and due soon first;
+- **stats**: broken links, orphan pages that nothing links to, dead ends that link to nothing, the most-linked pages, directories and tags.
 
-Every row opens its page or list. `O` returns to the overview from anywhere.
+Every row opens its page or list. `O` returns to the tab last shown, and `t` goes to tasks.
+
+Opening a page shows the tree beside the page's markdown source, in a vim buffer, with the pages that link to it underneath. `tab` and `shift-tab` move between the three.
+
+In the tree, the overview and the lists:
 
 | key | |
 |---|---|
 | `j` `k` `g` `G` | move |
-| `h` `l` | between the tree and the reader, or the overview's columns |
-| `tab` `shift-tab` | next and previous link in the page |
-| `enter` | open, or follow the selected link; a file link opens `$EDITOR` at the line |
-| `backspace` | back |
-| `b` | backlinks |
-| `/` | search as you type |
+| `enter` | open the page, list, or a directory's README |
+| `space` | in the tree, fold a directory |
+| `tab` `shift-tab` | on the overview, the next and previous tab |
+| `l` `h`, `→` `←` | in the tree, unfold a directory or open a page; fold a directory or go to its parent. On stats, between columns |
+| `/` | search every page as you type |
 | `ctrl-p` | open a page by title or path |
-| `c` `f` | broken links; repairs for one |
-| `t` `space` | tasks; toggle one |
-| `n` `e` `r` | new page, edit the page here, move with links rewritten |
-| `E` | edit the page in `$EDITOR` instead |
-| `?` | every key |
+| `n` `c` `t` `O` | new page, broken links, the tasks tab, the overview |
+| `space` `a` `f` | in the tasks and broken-link lists: toggle a task, all or open tasks, repairs for a link |
+| `R` | reload, for git details after a commit |
+| `:` | a command |
+| `?` | every key and command, starting with the current screen's |
 
-Pages changed outside the interface, by an editor, git or an agent, reload within a second.
+### The page
 
-### The editor
+The page is edited where it is read. Its buffer follows vim: modes, counts, `d`, `c`, `y` and `>` with motions and text objects, `.`, `u` and `ctrl-r`, registers, visual mode, `/` and `?` search, and `:s`. `il` and `al` select the link at the cursor, and `ctrl-space` ticks a checklist item. In normal mode the wiki takes a few keys:
 
-`e` opens the page in gwiki's own editor, which is modal and follows vim: modes, counts, `d`, `c`, `y`, `>` and `<` with motions and text objects, quotes and brackets, `.`, `u` and `ctrl-r`, registers, `/` search and `:s`. Two additions are for the wiki: `il` and `al` select the link at the cursor, and `ctrl-space` ticks a checklist item.
+| key | |
+|---|---|
+| `<` `>` | previous and next link; the status bar names its target |
+| `enter` `ctrl-]` | follow the link under the cursor; a file link opens `$EDITOR` at the line |
+| `ctrl-o` | back to the previous page and position |
+| `[` `]` | half a screen up and down |
+| `tab` `shift-tab` | the next and previous pane |
+| `ctrl-p` | open a page |
+
+`<` and `>` do not indent in normal mode; select lines with `V` and indent them there, or use `ctrl-t` and `ctrl-d` in insert mode.
+
+Wiki actions are commands, typed in the page or after `:` elsewhere:
 
 ```
-:w   write the page      ctrl-]  follow the link under the cursor
-:q   leave the editor    ctrl-o  back
-:w!  write over a page saved elsewhere       :e!  load it and lose your edits
-:preview   the page as the reader draws it   :check  the broken links in it
+:w  :e!         write the page; load it again and lose your edits
+:q  :wq  :q!    quit gwiki; write and quit; quit and lose your edits
+:new [title]    a page beside this one        :mv [path]   move it, rewriting links
+:search text    search every page             :fix         repairs for the link under the cursor
+:broken :tasks  broken links; tasks           :backlinks   to the backlinks panel
+:preview        the page drawn as markdown    :check       the broken links in it
+:external       edit in $EDITOR               :overview :reload :help
 ```
 
-In insert mode, `enter` continues a list, numbering and checkboxes included, and `ctrl-n` completes a page after `[[`, a heading after `#`, or a path after `](`. The buffer is autosaved to `.gwiki/drafts/`, and offered again if the editor is interrupted. A write is refused when the page changed on disk since it was read.
+A page with unsaved changes is not left: `:w` writes it, `:e!` discards the edits. In insert mode, `enter` continues a list, numbering and checkboxes included, and `ctrl-n` completes a page after `[[`, a heading after `#`, or a path after `](`. `"+y` copies to the system clipboard through the terminal (OSC 52). The buffer is autosaved to `.gwiki/drafts/` and offered again if gwiki is interrupted. A write is refused when the page changed on disk since it was read.
 
-Macros, marks, blockwise visual, `:g`, folds and mappings are not there; `?` lists what is.
+Pages changed outside the interface, by an editor, git or an agent, reload within a second; a buffer with unsaved changes is marked instead.
+
+Macros, marks, blockwise visual, `:g`, folds and mappings are not there; `:help` lists what is.
 
 ## Editors
 
@@ -196,7 +215,7 @@ Copies the notes database into pages: a notebook becomes a directory, a note a p
 
 ## Notes
 
-`gwiki notes` is the older part of gwiki: notes and tasks in a SQLite database, `.gwiki/notes.db`, committed with the project. It shares `.gwiki` with the wiki and is independent of it. Its commands are under `gwiki notes`: `gwiki notes help` lists them, `gwiki notes -g` selects the global notes, and `gwiki notes` alone opens its interface.
+`gwiki notes` is the older part of gwiki: notes and tasks in a SQLite database, `.gwiki/notes.db`, committed with the project. It shares `.gwiki` with the wiki and is independent of it. Its commands are under `gwiki notes`: `gwiki notes help` lists them, and `gwiki notes -g` selects the global notes. They have no terminal interface; use the command line or the browser view.
 
 Notes and tasks are rows with typed columns, so any SQLite client can read, query and edit them. Every change, including one made outside gwiki, is recorded, so you can look at the project as it stood at any past moment. It is built for one user: git cannot merge two copies of a database file.
 
@@ -206,7 +225,7 @@ Notes and tasks are rows with typed columns, so any SQLite client can read, quer
 gwiki notes -g init                    # a project of your own, in ~/notes
 gwiki notes -g init ~/work/notes       # or wherever you choose
 gwiki notes -g task "renew passport"   # from any directory
-gwiki notes -g                         # the interactive interface, on global notes
+gwiki notes -g ls                      # list them
 ```
 
 Global notes belong to you, not to a repository. Only a leading `-g` reaches them. Without it, a command outside a project fails as before, so a note run in the wrong directory never lands in global notes.
@@ -219,7 +238,7 @@ The global notes are an ordinary project, in `.gwiki/notes.db` under the directo
 gwiki notes serve
 ```
 
-Opens a three-pane page in your browser: notebooks, entries, and one entry in full. It refreshes by itself when you write from the command line, from the terminal interface, or from an agent.
+Opens a three-pane page in your browser: notebooks, entries, and one entry in full. It refreshes by itself when you write from the command line or from an agent.
 
 `--no-open` prints the address without opening anything. No browser is launched where there is evidently no desktop to launch it on — over SSH, under a CI runner, or on a Unix session with no display server — since it would otherwise open on the wrong machine or hang on a headless one. `--open` forces the attempt anyway.
 
@@ -360,26 +379,6 @@ git config --global diff.gwiki.textconv \
 ```
 
 `git diff`, `git log -p` and `git show` then print the changed rows as SQL. The full-text index is left out of the dump, since its rows are binary. Without the setting, or without `sqlite3` on the path, git falls back to "Binary files differ".
-
-### The notes interface
-
-Run `gwiki notes` with no arguments. Notebooks on the left, their notes and tasks on the right. Writes from the command line, the browser or an agent appear within a second.
-
-| key | |
-|---|---|
-| `j` `k` `h` `l` | move, vim-style; arrows work too |
-| `g` `G` | first, last |
-| `enter` | open the entry full-screen |
-| `n` `t` `N` | new note, task, notebook |
-| `space` | toggle a task done |
-| `x` `s` `o` | done, doing, open |
-| `e` `r` `d` `u` | edit body, rename, delete, undo delete |
-| `J` `K` | reorder |
-| `/` | search as you type |
-| `:` | command line, with history and tab completion |
-| `?` | full key reference |
-
-`:filter kind task`, `:filter status open`, `:sort due` and `:help` are the commands you will reach for most. `esc` clears the search, then the filter.
 
 ### How it works
 

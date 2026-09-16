@@ -285,8 +285,10 @@ func task(src []byte, lines []int, n *extast.TaskCheckBox) (Task, bool) {
 	}
 	raw := trimCR(end)
 	t := Task{Line: line, Done: n.IsChecked, Text: strings.TrimSpace(string(raw[m[4]:m[5]])), Box: start + m[2]}
-	if d := dueWord.FindStringSubmatch(t.Text); d != nil {
-		t.Due = d[1]
+	if d := dueWord.FindStringSubmatchIndex(t.Text); d != nil {
+		// The date is the item's Due, so every listing shows it once.
+		t.Due = t.Text[d[2]:d[3]]
+		t.Text = strings.TrimSpace(t.Text[:d[0]] + t.Text[d[1]:])
 	}
 	return t, true
 }

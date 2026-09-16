@@ -277,7 +277,7 @@ func TestTasksBacklinksOrphansAndFind(t *testing.T) {
 	for _, tk := range tasks {
 		got = append(got, fmt.Sprintf("%s:%d %s %s %s", tk.Page, tk.Line, tk.Status, tk.Due, tk.Text))
 	}
-	want := "lexer/grammar-ambiguity:3 open 2026-08-21 resolve the ambiguity due:2026-08-21|" +
+	want := "lexer/grammar-ambiguity:3 open 2026-08-21 resolve the ambiguity|" +
 		"lexer/grammar-ambiguity:4 done  write it down|tasks/ship:0 doing 2026-09-01 Ship the parser"
 	if strings.Join(got, "|") != want {
 		t.Fatalf("tasks = %q", strings.Join(got, "|"))
