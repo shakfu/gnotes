@@ -2,7 +2,8 @@
 title: Guides
 tags: [guide]
 ---
-# Guides
+
+## Guides
 
 How to use gwiki, one task per page. For how the code works, see [[Architecture]].
 

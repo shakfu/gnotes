@@ -2,7 +2,8 @@
 title: Decisions
 tags: [decision]
 ---
-# Decisions
+
+## Decisions
 
 One page per decision: what was decided, the alternative, and why. A decision is not edited once made; a later one replaces it and says so.
 

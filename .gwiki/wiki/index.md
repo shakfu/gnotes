@@ -2,11 +2,12 @@
 title: Home
 tags: [meta]
 ---
-# Home
+
+## Home
 
 This wiki documents gwiki, and is kept in gwiki's own repository as an example of how a wiki can be organized. Every page is a markdown file under `.gwiki/wiki`, committed with the code it describes.
 
-## Sections
+### Sections
 
 Each section is a directory with a README, which is the section's own page.
 
@@ -19,13 +20,13 @@ Each section is a directory with a README, which is the section's own page.
 
 Pages that fit no section sit at the top: [[Glossary]] and [[2026 Objectives]].
 
-## Start here
+### Start here
 
 1. [[Getting started]] installs gwiki and makes a first page.
 2. [[Writing pages]] covers links, front matter, tasks and sections.
 3. [[The terminal interface]] lists the keys and commands.
 
-## How this wiki is organized
+### How this wiki is organized
 
 - **One directory per kind of page.** Guides explain, architecture describes, decisions justify, tasks track. A reader looking for "why" goes to [[Decisions]], not to a guide.
 - **A README per directory.** `[[Architecture]]` and a link to `architecture/` both reach `architecture/README.md`. See [[Writing pages#Sections]].

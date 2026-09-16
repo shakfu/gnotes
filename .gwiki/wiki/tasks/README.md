@@ -2,7 +2,8 @@
 title: Tasks
 tags: [task]
 ---
-# Tasks
+
+## Tasks
 
 Work to do, as task pages: `type: task` with a `status`, `priority` and `due` date in the front matter. `gwiki tasks`, the overview and the tasks screen list them with checklist items from every page.
 

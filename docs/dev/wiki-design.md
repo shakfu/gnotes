@@ -66,7 +66,7 @@ Costs:
 
 ## 3. Layout
 
-```
+```text
 project/
   .gnotes/
     config.json        committed: project name, options
@@ -446,7 +446,7 @@ the clipboard; each of those is bounded by the rows on screen, not by the page.
 
 ## 12. Terminal interface
 
-```
+```text
 wiki                        | Design sketch                     lexer/
  index                      |
  lexer/                     | The lexer tokenizes input. See

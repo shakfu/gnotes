@@ -407,11 +407,18 @@ func (m *WikiModel) treeWidth() int {
 
 func (m *WikiModel) bodyHeight() int { return max(1, m.height-2) }
 
+// hasPanel reports whether the page has a backlinks panel to show: something
+// links to it, and the terminal is tall enough.
+func (m *WikiModel) hasPanel() bool {
+	return m.cur != nil && len(m.cur.linkers) > 0 && m.bodyHeight() >= 12
+}
+
 // panelHeight is the backlinks panel under the page: a title row and a row
-// per linking page, at most a third of the body. Pages nothing links to, and
-// short terminals, get none.
+// per linking page, at most a third of the body. It is drawn only while it has
+// the focus, so the page keeps the height otherwise; the header bar counts the
+// backlinks.
 func (m *WikiModel) panelHeight() int {
-	if m.cur == nil || len(m.cur.linkers) == 0 || m.bodyHeight() < 12 {
+	if !m.hasPanel() || m.focus != focusPanel {
 		return 0
 	}
 	return min(len(m.cur.linkers)+1, m.bodyHeight()/3)
@@ -701,7 +708,7 @@ func (m *WikiModel) cycleFocus(by int) {
 	if m.cur != nil {
 		panes = append(panes, focusContent)
 	}
-	if m.panelHeight() > 0 {
+	if m.hasPanel() {
 		panes = append(panes, focusPanel)
 	}
 	for i, p := range panes {
@@ -715,7 +722,7 @@ func (m *WikiModel) cycleFocus(by int) {
 
 func (m *WikiModel) toPanel() error {
 	switch {
-	case m.panelHeight() > 0:
+	case m.hasPanel():
 		m.focus = focusPanel
 		return nil
 	case len(m.cur.linkers) == 0:

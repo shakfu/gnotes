@@ -7,13 +7,16 @@ Pages live in `.gwiki/wiki` and are committed with the code. They link to each o
 Pages are plain files, so any editor works. gwiki adds:
 
 - a terminal interface: an overview of the wiki, a page tree beside the page in a vim buffer that follows links, backlinks, search, broken links and tasks;
+
 - a language server, so Neovim, Helix or Vim complete links, flag broken ones and follow them;
+
 - an MCP server, so a code agent can read and edit pages without overwriting yours;
+
 - a command line for all of the above.
 
 All of it is one executable. Every write checks that the page has not changed since it was read, and refuses rather than overwrite.
 
-```
+```text
  myproject   latest   tasks   stats                                  38 pages · ● uncommitted
  PAGE            PATH                  CHANGED  AUTHOR
  Design sketch   lexer/design-sketch    3h ago  Ada
@@ -62,12 +65,14 @@ Pages nest in directories to any depth. A directory's `README.md` is the directo
 Run `gwiki` with no arguments. It opens on the overview, whose header is a bar of three tabs; `tab` and `shift-tab` move between them:
 
 - **latest**: pages by when they changed, with the author of the last commit, and pages git has not recorded;
+
 - **tasks**: task pages and checklist items, overdue and due soon first;
+
 - **stats**: broken links, orphan pages that nothing links to, dead ends that link to nothing, the most-linked pages, directories and tags.
 
 Every row opens its page or list. `O` returns to the tab last shown, and `t` goes to tasks.
 
-Opening a page shows the tree beside the page's markdown source, in a vim buffer, with the pages that link to it underneath. `tab` and `shift-tab` move between the three.
+Opening a page shows the tree beside the page's markdown source, in a vim buffer. `tab` and `shift-tab` move between the tree, the page and its backlinks: the pages linking to it open under the page while they have the focus, and fold away when it leaves, so the page keeps the screen's height. The header bar counts them.
 
 In the tree, the overview and the lists:
 
@@ -103,7 +108,7 @@ The page is edited where it is read. Its buffer follows vim: modes, counts, `d`,
 
 Wiki actions are commands, typed in the page or after `:` elsewhere:
 
-```
+```text
 :w  :e!         write the page; load it again and lose your edits
 :q  :wq  :q!    quit gwiki; write and quit; quit and lose your edits
 :new [title]    a page beside this one        :mv [path]   move it, rewriting links
@@ -248,7 +253,7 @@ The address gwiki prints carries an access token, and the API will not answer wi
 
 The detail pane ends with the recorded changes to the entry you are looking at.
 
-```
+```text
 3S2YEP  fix the lexer
 parser rewrite / work / fix the lexer
 
@@ -432,6 +437,7 @@ Reads cross over between 100 and 500 tasks. Writes are within 3% of each other a
 |---|---|---|
 | everything | 8.9 MB | 12.8 MB |
 | `-tags noweb` | 5.2 MB | 9.2 MB |
+
 ## Development
 
 ```sh

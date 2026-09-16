@@ -2,9 +2,10 @@
 title: Links
 tags: [architecture]
 ---
-# Links
 
-## Resolution
+## Links
+
+### Resolution
 
 A `[[wiki]]` link is resolved by [the resolver](/internal/wiki/resolve.go#L256), trying in order:
 
@@ -16,7 +17,7 @@ Each rule is case-insensitive. The first rule that matches anything decides; two
 
 A markdown link is a path relative to its page, or to the repository when it starts with `/`. A path to a directory of pages names its README ([isReadme](/internal/wiki/nested.go#L18)).
 
-## Statuses
+### Statuses
 
 | status | means |
 |---|---|
@@ -28,11 +29,11 @@ A markdown link is a path relative to its page, or to the repository when it sta
 | `line-out-of-range` | the file is shorter than the range |
 | `outside-repo` | the path leaves the repository |
 
-## Repairs
+### Repairs
 
 [Offers](/internal/wiki/fix.go#L27) suggests replacements for a broken link: pages with a similar name, a heading that exists, the link without its line anchor, or the file found elsewhere. `gwiki check --fix` and `:fix` in the page apply one.
 
-## Moves
+### Moves
 
 [PlanMove](/internal/wiki/move.go#L63) rewrites each link to a moved page in its own form. A wiki link that still resolves is left alone; a link to a section's directory stays a directory link.
 

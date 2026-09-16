@@ -6,7 +6,8 @@ priority: medium
 due: 2026-09-30
 tags: [task]
 ---
-# Due date shown twice in the CLI
+
+## Due date shown twice in the CLI
 
 A checklist item `- [ ] benchmark due:2026-10-01` kept `due:2026-10-01` in its text, so `gwiki tasks`, the MCP task list and the browser view printed the date twice.
 

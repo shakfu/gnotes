@@ -186,13 +186,29 @@ func TestWikiOpensTheIndexWithTreeAndPanel(t *testing.T) {
 		t.Fatalf("opened %q", f.page())
 	}
 	v := f.view()
-	for _, want := range []string{"▾ lexer/", "Design sketch", "Grammar", "   1 # Home", "Start at [[Design sketch]]", "- [ ] write docs", "✗ 1 broken  4 links  1 backlink", "── 1 backlink from 1 page ──"} {
+	for _, want := range []string{"▾ lexer/", "Design sketch", "Grammar", "   1 # Home", "Start at [[Design sketch]]", "- [ ] write docs", "✗ 1 broken  4 links  1 backlink"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("view lacks %q:\n%s", want, v)
 		}
 	}
 	if strings.Contains(f.m.View(), "\x1b]0;") || strings.Contains(f.m.View(), "\x07") {
 		t.Fatal("a control sequence from a title reached the terminal")
+	}
+
+	// The backlinks panel is folded away until tab reaches it, and folds
+	// again when the focus leaves.
+	f.m.focus = focusContent
+	full := f.m.contentHeight()
+	if strings.Contains(f.view(), "backlink from") || full != f.m.bodyHeight() {
+		t.Fatalf("the panel shows without the focus (page %d of %d):\n%s", full, f.m.bodyHeight(), f.view())
+	}
+	f.press("tab")
+	if f.m.focus != focusPanel || !strings.Contains(f.view(), "── 1 backlink from 1 page ──") || f.m.contentHeight() >= full {
+		t.Fatalf("tab did not open the panel:\n%s", f.view())
+	}
+	f.press("tab")
+	if f.m.contentHeight() != full {
+		t.Fatal("the panel stayed open after the focus left")
 	}
 }
 
@@ -450,6 +466,10 @@ func TestWikiPanelAndFrontMatter(t *testing.T) {
 	}
 
 	f.press("ctrl+p", "grammar", "enter")
+	if f.m.panelHeight() != 0 {
+		t.Errorf("panel height %d without the focus, want 0", f.m.panelHeight())
+	}
+	f.press("tab")
 	v = flat(f.view())
 	for _, want := range []string{"── 3 backlinks from 2 pages ──", "← Ship it tasks/ship ×2", "← Home index"} {
 		if !strings.Contains(v, want) {

@@ -2,7 +2,8 @@
 title: The terminal interface
 tags: [guide, tui]
 ---
-# The terminal interface
+
+## The terminal interface
 
 Run `gwiki`. It opens on the overview, three tabs in the header bar that `tab` and `shift-tab` move between:
 
@@ -10,7 +11,7 @@ Run `gwiki`. It opens on the overview, three tabs in the header bar that `tab` a
 - **tasks**: task pages and checklist items, soonest due first;
 - **stats**: broken links, orphans, dead ends, the most-linked pages, directories and tags.
 
-## The tree
+### The tree
 
 | key | |
 |---|---|
@@ -22,9 +23,9 @@ Run `gwiki`. It opens on the overview, three tabs in the header bar that `tab` a
 | `n` `c` `t` `O` | new page, broken links, tasks, overview |
 | `:` | a command |
 
-## The page
+### The page
 
-A page opens as markdown source in a vim buffer. `tab` moves between the tree, the page and its backlinks.
+A page opens as markdown source in a vim buffer. `tab` moves between the tree, the page and its backlinks. The backlinks open under the page only while they have the focus, so reading keeps the full height; the header bar counts them.
 
 | key | |
 |---|---|
@@ -34,7 +35,7 @@ A page opens as markdown source in a vim buffer. `tab` moves between the tree, t
 | `[` `]` | half a screen |
 | `i` `v` `:` `/` | vim's insert, visual, command and search |
 
-## Commands
+### Commands
 
 `:w` writes and `:q` quits. The wiki's own commands are `:new`, `:mv`, `:search`, `:broken`, `:tasks`, `:overview`, `:backlinks`, `:fix`, `:check`, `:preview`, `:external`, `:reload` and `:help`.
 

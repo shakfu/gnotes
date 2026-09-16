@@ -11,8 +11,9 @@ import (
 	"github.com/shakfu/gwiki/internal/cli"
 )
 
-// version is overridden at build time with -ldflags "-X main.version=...".
-var version = "dev"
+// version is this release. `make` overrides it with -ldflags "-X
+// main.version=..." when the commit is tagged.
+var version = "0.1.0"
 
 func main() {
 	cli.Version = version

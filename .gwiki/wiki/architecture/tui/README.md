@@ -2,14 +2,15 @@
 title: TUI
 tags: [architecture, tui]
 ---
-# TUI
+
+## TUI
 
 `internal/tui` is the terminal interface, built on Bubble Tea and lipgloss. It is a section of [[Architecture]] because it has several parts:
 
 - [[Keys and commands]]: keymaps, the `:` command table, and how the page's buffer takes keys.
 - [[Drawing]]: the theme, the bars, aligned tables and the markdown renderer.
 
-## Screens
+### Screens
 
 | screen | shows |
 |---|---|
@@ -18,7 +19,7 @@ tags: [architecture, tui]
 | lists | search, quick open, broken links, tasks, repairs, page lists |
 | help | every key and command |
 
-## Files
+### Files
 
 | file | holds |
 |---|---|

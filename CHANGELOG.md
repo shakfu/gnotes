@@ -6,7 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Fro
 
 ## [Unreleased]
 
-Nothing has been tagged yet, so everything below is the initial body of work.
+## [0.1.0] - 2026-09-16
+
+The first release.
 
 ### Changed
 
@@ -17,6 +19,8 @@ Nothing has been tagged yet, so everything below is the initial body of work.
 **The wiki interface has header and status bars.** The header names the project, the page's title and path, and the page's broken links, links and backlinks, which the link panel listed before. The status bar names the screen or the editor's mode, then hints or the last message.
 
 **The wiki interface's lists and overview are aligned tables.** Tasks, broken links, page lists, quick open, repairs and each overview section draw their fields in columns, and cut the path before the title when the terminal is narrow. The status bar shows the position in a list. Search snippets drop markdown syntax and highlight matches. On the overview, the most-linked pages go under whichever column is shorter.
+
+**Backlinks fold away until `tab` reaches them.** The panel under the page took up to a third of a short terminal on every page something links to. It now opens only while it has the focus, and the page keeps its full height otherwise; the header bar still counts the backlinks. Hidden rather than a one-line stub, since that count already says they exist.
 
 **The tree folds with left and right.** Right (`l`) moved focus to the page; it now unfolds a directory, steps into an unfolded one, or opens a page, and left (`h`) folds a directory or moves to its parent, as file trees in editors do. `tab` still moves to the page. Folds are drawn with `▾` and `▸` instead of `v` and `>`.
 
@@ -107,8 +111,11 @@ Nothing has been tagged yet, so everything below is the initial body of work.
 **Smaller fixes.**
 
 - The agent server answers a malformed JSON-RPC frame with -32600, ignores response frames, runs no request sent without an id, and always replies with a result or an error. `gwiki_update` reports only the fields that changed, and a missing `ref` is named.
+
 - The command line prints a flag's error before the usage line, answers `-h` after any command, and suggests `tag` for `tga`. It refuses standard input that is not UTF-8 or exceeds 16 MiB, and validates `mv` placements. `ls` shows assignees. `--json` always emits `tags`, `links` and `assignees` as arrays, and adds `notebookId`. Assigning someone twice writes nothing the second time, and a second notebook with an existing name is refused.
+
 - The interactive interface completes aliases without extending a complete command, draws the cursor anywhere in the line, keeps an answer visible after a long prompt, and counts tasks in progress as open in the header.
+
 - Search snippets no longer split a character, and the identity file is written atomically.
 
 ### Security

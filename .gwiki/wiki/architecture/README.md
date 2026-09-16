@@ -2,11 +2,12 @@
 title: Architecture
 tags: [architecture]
 ---
-# Architecture
+
+## Architecture
 
 gwiki is one Go binary. Every front end reads and writes through one package, so none can mean something different by an operation.
 
-```
+```text
 cmd/gwiki
   internal/cli ---------+
   internal/tui ---------+
@@ -15,18 +16,18 @@ cmd/gwiki
   internal/webwiki -----+         +--> .gwiki/cache.db (derived)
 ```
 
-## The wiki
+### The wiki
 
 - [[Cache and refresh]]: pages are the truth; the cache is rebuilt from them.
 - [[Links]]: how a link is resolved, checked, repaired and rewritten on a move.
 
-## Front ends
+### Front ends
 
 - [[TUI]]: the terminal interface, a section of its own.
 - [[Editor engine]]: `internal/vim`, the modal editor the page uses.
 - [[Servers]]: the language server, the MCP server and the browser view.
 
-## Shared packages
+### Shared packages
 
 | package | does |
 |---|---|

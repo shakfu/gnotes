@@ -57,7 +57,7 @@ be a drop-in.
 DuckDB 1.5.5 takes an exclusive lock on the database file. A second process is
 refused even in read-only mode while a read-write connection is open:
 
-```
+```text
 $ duckdb d.duckdb            # held open in another terminal
 $ duckdb -readonly d.duckdb -c "SELECT count(*) FROM a;"
 IO Error: Could not set lock on file "d.duckdb":
@@ -80,7 +80,7 @@ OLTP, which is the case a column store is worst at.
 files directly, so all the analytical upside is available without adopting it as
 the format. Verified:
 
-```
+```text
 $ duckdb -c "ATTACH 'notes.db' AS s (TYPE sqlite); SELECT count(*) FROM s.a;"
 4
 ```
@@ -113,7 +113,7 @@ specific, it is not worth building.
 The DB is the working store; the JSONL files become an export/import format
 produced at `sync` time.
 
-```
+```text
 write path:  session -> INSERT INTO events -> fold into nodes (same txn)
 sync out:    SELECT events WHERE user_id = me AND id > last_exported
              -> append to .gnotes/events/<id>.<name>.jsonl -> git commit
@@ -293,7 +293,7 @@ The real case is **queries the current design cannot answer cheaply**:
   increments when *another* connection commits and does not move for your own
   writes. Verified:
 
-  ```
+  ```text
   reader data_version: 2
   after external commit: 3
   own commit does not bump: 3

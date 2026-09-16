@@ -2,9 +2,10 @@
 title: Writing pages
 tags: [guide]
 ---
-# Writing pages
 
-## Links
+## Writing pages
+
+### Links
 
 | written | reaches |
 |---|---|
@@ -17,7 +18,7 @@ tags: [guide]
 
 A link that matches more than one page is ambiguous, and `gwiki check` lists the candidates. [[Links]] describes the rules in full.
 
-## Front matter
+### Front matter
 
 ```yaml
 ---
@@ -32,11 +33,11 @@ due: 2026-10-01
 
 `type: task` makes the page a task page; see [[Tasks]].
 
-## Checklists
+### Checklists
 
 Any `- [ ] item` is a task too, listed by `gwiki tasks` and ticked with `ctrl-space` in the page. An item can carry a date: `- [ ] benchmark the lexer due:2026-10-15`.
 
-## Sections
+### Sections
 
 A directory of pages is a section. Its `README.md` is the section's own page:
 
