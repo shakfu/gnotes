@@ -425,3 +425,20 @@ func TestADirectoryFromBeforeTheRenameIsNamed(t *testing.T) {
 		t.Fatalf("exit %d, %s", code, stderr)
 	}
 }
+
+func TestWikiServeFlags(t *testing.T) {
+	f := wikiFixture(t)
+	out := f.mustRun("help", "serve")
+	for _, want := range []string{"--no-open", "access token", "overview"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("help serve lacks %q:\n%s", want, out)
+		}
+	}
+	// Serving would block, so only the flags are exercised.
+	if _, stderr, code := f.run("serve", "--nonsense"); code != 2 || !strings.Contains(stderr, "usage:") {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if _, stderr, code := f.run("serve", "--token", "short"); code == 0 || !strings.Contains(stderr, "16 characters") {
+		t.Fatalf("a short token: exit %d, %s", code, stderr)
+	}
+}

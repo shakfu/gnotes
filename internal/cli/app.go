@@ -121,7 +121,7 @@ func init() {
 		cmdWikiCheck, cmdWikiOrphans, cmdWikiTasks,
 		cmdWikiNew, cmdWikiEdit, cmdWikiMove, cmdWikiRemove, cmdWikiTag, cmdWikiUntag,
 		cmdWikiDone, cmdWikiDoing, cmdWikiReopen, cmdWikiPromote,
-		cmdWikiUI, cmdWikiMCP, cmdWikiLSP, cmdWikiCache, cmdNotes, helpCommand(wikiHelp, &wikiTable),
+		cmdWikiUI, cmdWikiServe, cmdWikiMCP, cmdWikiLSP, cmdWikiCache, cmdNotes, helpCommand(wikiHelp, &wikiTable),
 	})
 	notesTable = newTable("gwiki notes", []*command{
 		cmdInit, cmdNotebook, cmdNote, cmdTask,

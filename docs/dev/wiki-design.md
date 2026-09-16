@@ -606,7 +606,7 @@ recorded here.
 5. **Language server** (`gwiki lsp`), then the editor of section 11. Both
    done; results below.
 6. **Migration** from `gnotes.db` and JSONL.
-7. **Browser view.**
+7. **Browser view.** Done; results below.
 
 The work belongs on a branch until phase 4: the two storage models cannot share
 a binary without doubling the front ends.
@@ -1059,6 +1059,45 @@ Changes from the design, found while building it:
 - **Following a link needs a saved buffer**, since the target is resolved from
   the page on disk.
 - **`:check`** reports the broken links in the buffer, unsaved.
+
+### Phase 7 results: browser view (2026-09-16)
+
+`gwiki serve` opens the wiki in a browser. `internal/webwiki` is a front end
+over the same wiki package as the other three, with the token, Host and Origin
+protections of the notes server.
+
+- **Views:** the overview of section 12, the page tree, a page with its links
+  and backlinks, search, broken links, tasks, pages by tag or directory, and a
+  source file at the line a link names.
+- **Editing:** a textarea against the hash the page was read at. A conflict
+  returns the current text with a 409 and writes nothing. Enter continues
+  markdown lists, by the same rules as the terminal editor.
+- **Live:** server-sent events carry a version; a change made anywhere reloads
+  the view, unless the editor is open.
+- **Markdown to HTML:** `markdown.HTML` renders through goldmark with the
+  wiki-link parser, resolving each link to an application address and marking
+  a broken one. Raw HTML in a page is escaped, not passed through: pages come
+  from a repository and from agents.
+
+**Exit criterion: the browser reads and writes the wiki safely.** Tests drive
+the server over HTTP: a request without the token, with a wrong token, from
+another origin, and with a rebinding Host is refused; the overview, pages,
+search, check and file views answer; a save writes, a stale save conflicts and
+changes nothing; a file outside the repository is refused; raw HTML in a page
+does not reach the browser; the event stream reports a page written outside.
+Two tests cover the page script without a browser: every `/api/` path it
+fetches must exist on the server, and its list continuation runs under node
+against the same cases as the editor's.
+
+Changes from the design, found while building it:
+
+- **No CodeMirror.** gopherwiki's editor needs a build step; the page is a
+  textarea with the list rules ported, and the terminal editor is where the
+  editing effort went.
+- **A file link opens the file** in the browser, at its line range, rather
+  than doing nothing.
+- **The page keeps no model**, as the notes view does not: every view is a
+  fetch and a redraw.
 
 ## 18. Open questions
 

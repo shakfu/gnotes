@@ -137,6 +137,18 @@ au User lsp_setup call lsp#register_server({'name': 'gwiki', 'cmd': {server_info
 
 A rename returns edits for the editor to apply, so the pages it changes are left modified and unsaved; save them all (`:wall`).
 
+## The browser view
+
+```sh
+gwiki serve
+```
+
+Opens the wiki in your browser: the same overview, the page tree, pages with their links and backlinks, search, broken links, tasks, and an editor. A link into the code opens that file at its lines. The view updates by itself when the command line, the terminal interface or an agent writes.
+
+The whole page is compiled into the binary, so there is nothing to install and it works with no network. The address carries an access token, and the API answers nothing without it: any page open in your browser can reach `127.0.0.1`, so the token, not the loopback binding, is the protection. `--no-open` prints the address without opening a browser, and `--addr` chooses the port.
+
+Editing is a text box saved against the hash the page was read at, so a page saved elsewhere in the meantime is refused rather than overwritten. `make build-slim` (`-tags noweb`) leaves the browser view out.
+
 ## Agents
 
 ```sh
@@ -165,6 +177,10 @@ gwiki tasks -s open
 gwiki done index:12   gwiki doing tasks/ship   gwiki reopen index:12
 gwiki promote index:12                      # a checklist item becomes a task page
 gwiki cache --rebuild
+gwiki serve                                 # the wiki in a browser
+gwiki ui                                    # the terminal interface
+gwiki lsp                                   # the language server, started by an editor
+gwiki mcp                                   # the agent server, started by a client
 ```
 
 Read commands take `--json`. [The design](docs/dev/wiki-design.md) covers the cache, link resolution and writes in detail.

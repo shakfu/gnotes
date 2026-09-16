@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gwiki</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <span id="project">gwiki</span>
+  <input id="search" type="search" placeholder="search pages" autocomplete="off" spellcheck="false">
+  <nav>
+    <a href="#/" data-key="o">overview</a>
+    <a href="#/broken" data-key="c">broken</a>
+    <a href="#/tasks" data-key="t">tasks</a>
+    <button id="new" type="button">new page</button>
+  </nav>
+  <span id="status"></span>
+</header>
+<div id="body">
+  <aside id="tree" aria-label="pages"></aside>
+  <main id="main"></main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
