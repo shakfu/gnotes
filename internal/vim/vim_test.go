@@ -364,3 +364,38 @@ func TestDirtyAndChangedHook(t *testing.T) {
 		t.Fatalf("changes = %d, want one per typed key", changes)
 	}
 }
+
+// Wrapped lines take several rows, so the cursor's line must be in the rows
+// drawn, not only within Height lines of Top.
+func TestScrollingCountsWrappedRows(t *testing.T) {
+	var lines []string
+	for i := 0; i < 20; i++ {
+		lines = append(lines, strings.Repeat("word ", 7)) // 35 runes: 2 rows at width 20
+	}
+	e := New(strings.Join(lines, "\n") + "\n")
+	e.Width, e.Height = 20, 10
+	rows := func() int {
+		n := 0
+		for l := e.Top; l <= e.Cursor.Line; l++ {
+			n += len(Wrap(e.Buf.Line(l), e.Width))
+		}
+		return n
+	}
+	for i := 1; i < 20; i++ {
+		e.Key("down")
+		if rows() > e.Height {
+			t.Fatalf("down %d: cursor line %d below the screen from top %d", i, e.Cursor.Line, e.Top)
+		}
+		if want := max(0, e.Cursor.Line-4); e.Top != want {
+			t.Fatalf("down %d: top %d, want %d", i, e.Top, want)
+		}
+	}
+	e.Keys("L")
+	if e.Cursor.Line != 19 {
+		t.Fatalf("L: cursor %d, want 19", e.Cursor.Line)
+	}
+	e.Keys("ctrl+y")
+	if e.Top != 14 || e.Cursor.Line != 18 {
+		t.Fatalf("ctrl+y: top %d, cursor %d, want 14 and 18", e.Top, e.Cursor.Line)
+	}
+}

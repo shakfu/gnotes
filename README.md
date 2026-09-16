@@ -16,14 +16,7 @@ Pages are plain files, so any editor works. gwiki adds:
 
 All of it is one executable. Every write checks that the page has not changed since it was read, and refuses rather than overwrite.
 
-```text
- myproject   latest   tasks   stats                                  38 pages · ● uncommitted
- PAGE            PATH                  CHANGED  AUTHOR
- Design sketch   lexer/design-sketch    3h ago  Ada
- Grammar         lexer/grammar          1d ago  Ada    ●
- Ship it         tasks/ship             2d ago  Grace
- LATEST  enter open  tab next tab  / search  ^p open  n new  c broken  t tasks       1/38  ? help
-```
+![The gwiki overview on the latest tab: pages listed by title, path and when they changed](https://raw.githubusercontent.com/shakfu/gwiki/main/docs/media/gwiki-latest.png)
 
 ## Install
 
@@ -73,6 +66,8 @@ Run `gwiki` with no arguments. It opens on the overview, whose header is a bar o
 Every row opens its page or list. `O` returns to the tab last shown, and `t` goes to tasks.
 
 Opening a page shows the tree beside the page's markdown source, in a vim buffer. `tab` and `shift-tab` move between the tree, the page and its backlinks: the pages linking to it open under the page while they have the focus, and fold away when it leaves, so the page keeps the screen's height. The header bar counts them.
+
+![A page open in gwiki: the page tree on the left, the page's markdown source in a vim buffer on the right, the cursor on a wiki link that the status bar resolves](https://raw.githubusercontent.com/shakfu/gwiki/main/docs/media/gwiki-wiki-editor.png)
 
 In the tree, the overview and the lists:
 

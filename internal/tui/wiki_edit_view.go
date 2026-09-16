@@ -130,9 +130,10 @@ func (m *WikiModel) viewBuffer(width, height int) []string {
 		doc := render.Render([]byte(e.ed.Text()), render.Options{Width: max(10, width-2), Styles: readerStyles, Selected: -1, Broken: func(l render.Link) bool {
 			return broken[string(l.Form)+"\x00"+l.Target+"\x00"+l.Anchor]
 		}})
-		top := min(e.ed.Top, max(0, len(doc.Lines)-1))
+		e.previewRows = len(doc.Lines)
+		e.previewTop = max(0, min(e.previewTop, len(doc.Lines)-height))
 		out := []string{}
-		for i := top; i < len(doc.Lines) && len(out) < height; i++ {
+		for i := e.previewTop; i < len(doc.Lines) && len(out) < height; i++ {
 			out = append(out, " "+doc.Lines[i])
 		}
 		return out

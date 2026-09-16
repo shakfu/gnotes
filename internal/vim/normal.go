@@ -284,7 +284,7 @@ func (e *Editor) run(keys []string, count int, reg rune) result {
 		return done
 	case "ctrl+y":
 		e.Top = max(0, e.Top-atLeast(count))
-		e.Cursor.Line = min(e.Cursor.Line, e.Top+e.Height-1)
+		e.Cursor.Line = min(e.Cursor.Line, e.bottom())
 		e.Cursor = e.Buf.clamp(e.Cursor, false)
 		return done
 

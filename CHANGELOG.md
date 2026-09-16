@@ -6,7 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Fro
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-09-16
+## [0.1.1]
+
+### Fixed
+
+**The page scrolls as the cursor moves down past wrapped lines.** The buffer counted buffer lines against the pane's height, but a wrapped line takes several rows. On a page of long paragraphs the cursor went below the pane, and the page scrolled only once the cursor was a pane's height of lines below the top. `H`, `M`, `L` and `ctrl-y` used the same count. The `:preview` view ignored the arrow keys, and `j` and `k` there moved a hidden cursor over the source. Arrows, `j`, `k`, `[`, `]`, page keys, `g` and `G` now scroll its rendered rows.
+
+## [0.1.0]
 
 The first release.
 

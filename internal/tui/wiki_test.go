@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -123,6 +124,8 @@ func (f *wikiFixture) press(keys ...string) tea.Cmd {
 			msgs = []tea.KeyMsg{{Type: tea.KeyCtrlAt}}
 		case "down":
 			msgs = []tea.KeyMsg{{Type: tea.KeyDown}}
+		case "up":
+			msgs = []tea.KeyMsg{{Type: tea.KeyUp}}
 		case "left":
 			msgs = []tea.KeyMsg{{Type: tea.KeyLeft}}
 		case "right":
@@ -1093,5 +1096,49 @@ func TestWikiEditorTakesAPaste(t *testing.T) {
 	f.press("esc")
 	if !strings.HasSuffix(f.m.edit.ed.Text(), "pasted text\n") {
 		t.Fatalf("after the paste:\n%s", f.m.edit.ed.Text())
+	}
+}
+
+// Arrows scroll a page of wrapped lines one step at a time, in the source and
+// in the preview.
+func TestWikiArrowsScrollWrappedPage(t *testing.T) {
+	f := newWikiFixture(t)
+	var body strings.Builder
+	for i := 1; i <= 40; i++ {
+		fmt.Fprintf(&body, "Para%02d %s\n\n", i, strings.Repeat("words that wrap ", 20))
+	}
+	f.write("long", body.String())
+	f.m.Update(pollMsg{})
+	f.m.focus = focusContent
+	f.press("ctrl+p", "long", "enter")
+
+	for i := 1; i < 60; i++ {
+		f.press("down")
+		want := fmt.Sprintf("%4d ", f.m.edit.ed.Cursor.Line+1)
+		if !strings.Contains(f.view(), want) {
+			t.Fatalf("down %d: line %d is off the screen:\n%s", i, f.m.edit.ed.Cursor.Line+1, f.view())
+		}
+	}
+
+	f.press("g", "g", ":preview", "enter")
+	if !strings.Contains(flat(f.view()), "Para01") {
+		t.Fatalf("preview does not start at the top:\n%s", f.view())
+	}
+	for i := 0; i < 8; i++ {
+		f.press("down")
+	}
+	if v := flat(f.view()); strings.Contains(v, "Para01") || !strings.Contains(v, "PREVIEW") {
+		t.Fatalf("down does not scroll the preview:\n%s", v)
+	}
+	top := f.m.edit.previewTop
+	f.press("up")
+	if f.m.edit.previewTop != top-1 {
+		t.Fatalf("up: top %d, want %d", f.m.edit.previewTop, top-1)
+	}
+	for i := 0; i < 1000; i++ {
+		f.press("down")
+	}
+	if v := flat(f.view()); !strings.Contains(v, "Para40") {
+		t.Fatalf("the preview does not reach the end:\n%s", v)
 	}
 }

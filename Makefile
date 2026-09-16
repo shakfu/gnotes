@@ -2,9 +2,9 @@
 
 BIN     := gwiki
 CMD     := ./cmd/gwiki
-# A tagged commit stamps its tag, without the v; otherwise the version in
-# cmd/gwiki/main.go stands.
-VERSION := $(patsubst v%,%,$(shell git describe --tags --dirty 2>/dev/null))
+# A clean checkout of a tagged commit stamps its tag, without the v; otherwise
+# the version in cmd/gwiki/main.go stands.
+VERSION := $(filter-out %-dirty,$(patsubst v%,%,$(shell git describe --tags --exact-match --dirty 2>/dev/null)))
 LDFLAGS := -s -w $(if $(VERSION),-X main.version=$(VERSION))
 
 .DEFAULT_GOAL := build

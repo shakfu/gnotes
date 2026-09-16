@@ -25,6 +25,9 @@ type editing struct {
 	base    string // the hash the buffer was read from
 	preview bool
 
+	// previewTop is the first rendered row the preview draws, of previewRows.
+	previewTop, previewRows int
+
 	// outside marks a page changed on disk under a modified buffer.
 	outside bool
 
@@ -397,8 +400,19 @@ func (m *WikiModel) keyContent(msg tea.KeyMsg) {
 			if k != ":" {
 				return
 			}
-		case "j", "k", "ctrl+d", "ctrl+u", "g", "G":
 		default:
+			// The preview has no cursor, so movement scrolls its rendered rows.
+			h := m.contentHeight()
+			half := max(1, h/2)
+			step, ok := map[string]int{
+				"j": 1, "down": 1, "ctrl+e": 1, "k": -1, "up": -1, "ctrl+y": -1,
+				"ctrl+d": half, "]": half, "ctrl+u": -half, "[": -half,
+				"ctrl+f": h, "pgdown": h, "ctrl+b": -h, "pgup": -h,
+				"g": -e.previewRows, "G": e.previewRows,
+			}[k]
+			if ok {
+				e.previewTop = max(0, min(e.previewTop+step, e.previewRows-h))
+			}
 			return
 		}
 	}

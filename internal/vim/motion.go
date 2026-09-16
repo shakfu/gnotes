@@ -58,7 +58,7 @@ func (e *Editor) motion(keys []string, count int, forOp bool) (Pos, bool, bool, 
 		}
 		return Pos{target, indentOf(e.Buf.Line(target))}, true, false, done
 	case "H", "M", "L":
-		top, bottom := e.Top, min(e.Top+e.Height-1, e.Buf.Lines()-1)
+		top, bottom := e.Top, e.bottom()
 		target := top
 		switch head {
 		case "M":

@@ -73,6 +73,7 @@ func init() {
 		{names: []string{"preview"}, help: "the page as markdown draws it, until esc", page: true, run: func(m *WikiModel, _ string) error {
 			m.screen, m.base, m.focus = screenRead, screenRead, focusContent
 			m.edit.preview = !m.edit.preview
+			m.edit.previewTop = m.edit.ed.Top
 			return nil
 		}},
 		{names: []string{"external"}, help: "edit the page in $EDITOR", page: true, run: func(m *WikiModel, _ string) error {

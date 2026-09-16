@@ -204,17 +204,34 @@ func (e *Editor) Type(text string) {
 	}
 }
 
-// scroll keeps the cursor on screen.
+// scroll keeps the cursor on screen, counting the rows wrapped lines take.
 func (e *Editor) scroll() {
 	h := max(1, e.Height)
-	e.Top = min(e.Top, max(0, e.Buf.Lines()-1))
-	if e.Cursor.Line < e.Top {
-		e.Top = e.Cursor.Line
+	// Every line takes at least one row.
+	e.Top = max(0, min(e.Top, e.Cursor.Line), e.Cursor.Line-h+1)
+	rows := rowOf(Wrap(e.Buf.Line(e.Cursor.Line), max(1, e.Width)), e.Cursor.Col) + 1
+	for l := e.Top; l < e.Cursor.Line; l++ {
+		rows += e.rows(l)
 	}
-	if e.Cursor.Line >= e.Top+h {
-		e.Top = e.Cursor.Line - h + 1
+	for rows > h && e.Top < e.Cursor.Line {
+		rows -= e.rows(e.Top)
+		e.Top++
 	}
-	e.Top = max(0, e.Top)
+}
+
+// rows is the display rows a line takes.
+func (e *Editor) rows(line int) int { return len(Wrap(e.Buf.Line(line), max(1, e.Width))) }
+
+// bottom is the last line drawn whole from Top.
+func (e *Editor) bottom() int {
+	last, used := e.Top, 0
+	for l := e.Top; l < e.Buf.Lines(); l++ {
+		if used += e.rows(l); used > max(1, e.Height) {
+			break
+		}
+		last = l
+	}
+	return last
 }
 
 func (e *Editor) setMessage(s string) { e.Message, e.Err = s, false }
