@@ -1,10 +1,10 @@
-// Package ulid implements the subset of ULID needed by gnotes: generation
+// Package ulid implements the subset of ULID needed by gwiki: generation
 // with monotonic ordering inside a millisecond, and timestamp extraction.
 //
 // A ULID is 128 bits (48-bit big-endian millisecond timestamp, 80 bits of
 // entropy) rendered as 26 characters of Crockford base32. The encoding is
 // order-preserving, so lexicographic comparison of two ULID strings matches
-// chronological comparison of the instants they encode. gnotes leans on that
+// chronological comparison of the instants they encode. gwiki leans on that
 // everywhere it needs a deterministic tiebreak between concurrent events.
 package ulid
 
@@ -47,14 +47,14 @@ func init() {
 var ErrInvalid = errors.New("ulid: invalid")
 
 // ID is an encoded ULID. It is a string rather than a [16]byte because every
-// consumer in gnotes (JSON payloads, map keys, sort keys, filenames) wants the
+// consumer in gwiki (JSON payloads, map keys, sort keys, filenames) wants the
 // text form, and the binary form would only be converted back immediately.
 type ID = string
 
 // Generator produces monotonically increasing ULIDs. The zero value is not
 // usable; call NewGenerator.
 //
-// Monotonicity matters because gnotes appends several events in a single
+// Monotonicity matters because gwiki appends several events in a single
 // operation (create a node, then rank it) and replay must see them in the
 // order they were written. Within a millisecond the generator increments the
 // entropy of the previous ID instead of drawing fresh bytes, which keeps the
@@ -135,7 +135,7 @@ func increment(b []byte) bool {
 }
 
 // randBytes fills b with cryptographic randomness. crypto/rand.Read does not
-// fail on any platform gnotes targets; a panic here is preferable to silently
+// fail on any platform gwiki targets; a panic here is preferable to silently
 // emitting predictable IDs that could collide across machines.
 func randBytes(b []byte) {
 	if _, err := rand.Read(b); err != nil {

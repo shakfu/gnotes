@@ -15,25 +15,29 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/shakfu/gnotes/internal/editor"
-	"github.com/shakfu/gnotes/internal/markdown"
-	"github.com/shakfu/gnotes/internal/render"
-	"github.com/shakfu/gnotes/internal/wiki"
+	"github.com/shakfu/gwiki/internal/editor"
+	"github.com/shakfu/gwiki/internal/markdown"
+	"github.com/shakfu/gwiki/internal/render"
+	"github.com/shakfu/gwiki/internal/wiki"
 )
 
 // wscreen is what the body of the wiki interface shows.
 type wscreen int
 
 const (
-	screenRead   wscreen = iota // tree and reader
+	screenHome   wscreen = iota // the overview
+	screenRead                  // tree and reader
 	screenSearch                // '/' results as you type
 	screenOpen                  // ctrl-p quick open
 	screenBroken                // 'c' broken links across the wiki
 	screenTasks                 // 't' tasks
 	screenOffers                // 'f' repairs for one link
+	screenPages                 // a list of pages, such as a tag's
+	screenEdit                  // the page in the editor
 	screenHelp
 )
 
@@ -55,6 +59,18 @@ type WikiModel struct {
 
 	screen wscreen
 	focus  wfocus
+
+	// base is the screen that lists and prompts return to: the overview or
+	// the reader, whichever was used last.
+	base wscreen
+
+	edit      *editing
+	clipboard string
+	home      *overview
+	homeCol   int
+	homeRow   [2]int
+	listTitle string
+	listed    []wiki.PageInfo
 
 	// input backs the search and open lines and prompts.
 	input  input
@@ -84,6 +100,7 @@ type WikiModel struct {
 	statusErr bool
 
 	getenv   func(string) string
+	now      func() time.Time
 	quitting bool
 
 	// exec runs a program with the terminal; tests replace it.
@@ -132,19 +149,21 @@ func NewWiki(w *wiki.Wiki) (*WikiModel, error) {
 		height:    24,
 		collapsed: map[string]bool{},
 		getenv:    os.Getenv,
+		now:       time.Now,
 		exec:      tea.ExecProcess,
 	}
 	if err := m.loadPages(); err != nil {
 		return nil, err
 	}
-	// The first page to read: index, else the first page.
+	m.loadHome()
+	// The page the reader starts on: index, else the first page.
 	for _, p := range m.pages {
 		if p.Path == "index" {
-			return m, m.open(p.Path)
+			return m, m.load(p.Path)
 		}
 	}
 	if len(m.pages) > 0 {
-		return m, m.open(m.pages[0].Path)
+		return m, m.load(m.pages[0].Path)
 	}
 	return m, nil
 }
@@ -223,10 +242,14 @@ func (m *WikiModel) rowKey(r treeRow) string {
 
 // open reads a page into the reader, remembering the page it replaces.
 func (m *WikiModel) open(page string) error {
-	if m.cur != nil && m.cur.info.Path != page {
+	if m.cur != nil && m.cur.info.Path != page && m.base == screenRead {
 		m.history = append(m.history, place{m.cur.info.Path, m.cur.scroll, m.cur.selected})
 	}
-	return m.load(page)
+	if err := m.load(page); err != nil {
+		return err
+	}
+	m.screen, m.base = screenRead, screenRead
+	return nil
 }
 
 // load reads a page into the reader without touching the back stack.
@@ -404,8 +427,10 @@ func (m *WikiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// pollDisk picks up pages changed outside the interface.
+// pollDisk picks up pages changed outside the interface, and saves the
+// editor's draft.
 func (m *WikiModel) pollDisk() {
+	m.writeDraft()
 	ch, err := m.w.Refresh()
 	if err != nil {
 		m.setError(err)
@@ -417,6 +442,17 @@ func (m *WikiModel) pollDisk() {
 	if err := m.loadPages(); err != nil {
 		m.setError(err)
 		return
+	}
+	if e := m.edit; e != nil {
+		// A page changed under the editor: reload a clean buffer, and warn
+		// about one with unsaved changes.
+		if _, hash, err := m.w.Read(e.page); err == nil && hash != e.base {
+			if e.ed.Dirty {
+				e.outside = true
+			} else {
+				m.editReload()
+			}
+		}
 	}
 	if m.cur != nil {
 		page := m.cur.info.Path
@@ -441,6 +477,8 @@ func (m *WikiModel) pollDisk() {
 		m.loadBroken()
 	case screenTasks:
 		m.loadTasks()
+	case screenHome:
+		m.loadHome()
 	}
 }
 
@@ -457,8 +495,11 @@ func (m *WikiModel) key(msg tea.KeyMsg) {
 	case screenSearch, screenOpen:
 		m.keyFind(msg)
 		return
+	case screenEdit:
+		m.keyEdit(msg)
+		return
 	case screenHelp:
-		m.screen = screenRead
+		m.screen = m.base
 		return
 	}
 
@@ -495,19 +536,25 @@ func (m *WikiModel) key(msg tea.KeyMsg) {
 	case "n":
 		m.promptNew()
 		return
+	case "O":
+		m.screen, m.base = screenHome, screenHome
+		m.loadHome()
+		return
 	case "esc":
 		if m.screen == screenOffers {
 			m.screen = m.offerFrom
 			return
 		}
-		if m.screen != screenRead {
-			m.screen = screenRead
+		if m.screen != m.base {
+			m.screen = m.base
 			return
 		}
 	}
 
 	switch m.screen {
-	case screenBroken, screenTasks, screenOffers:
+	case screenHome:
+		m.keyHome(k)
+	case screenBroken, screenTasks, screenOffers, screenPages:
 		m.keyList(msg)
 	default:
 		switch m.focus {
@@ -589,7 +636,13 @@ func (m *WikiModel) keyReader(k string) {
 			m.setStatus("no page links here")
 		}
 	case "e":
-		m.edit()
+		line := 0
+		if r := m.cur; r != nil && r.scroll < len(m.doc().Source) {
+			line = m.doc().Source[r.scroll]
+		}
+		m.openEditor(m.cur.info.Path, line)
+	case "E":
+		m.editExternal()
 	case "r":
 		m.promptMove()
 	case "f":
@@ -720,7 +773,7 @@ func (m *WikiModel) back() {
 func (m *WikiModel) keyFind(msg tea.KeyMsg) {
 	switch msg.String() {
 	case "esc":
-		m.screen = screenRead
+		m.screen = m.base
 		return
 	case "enter":
 		var page string
@@ -857,6 +910,8 @@ func (m *WikiModel) listLen() int {
 		return len(m.tasks)
 	case screenOffers:
 		return len(m.offers)
+	case screenPages:
+		return len(m.listed)
 	}
 	return 0
 }
@@ -936,6 +991,14 @@ func (m *WikiModel) listEnter() {
 		t := m.tasks[m.cursor]
 		m.screen = screenRead
 		m.openAt(t.Page, t.Line)
+	case screenPages:
+		if m.cursor < len(m.listed) {
+			if err := m.open(m.listed[m.cursor].Path); err != nil {
+				m.setError(err)
+				return
+			}
+			m.focus = focusReader
+		}
 	case screenOffers:
 		if m.cursor >= len(m.offers) {
 			return
@@ -994,6 +1057,9 @@ func (m *WikiModel) afterWrite() {
 		m.loadBroken()
 	case screenTasks:
 		m.loadTasks()
+	}
+	if m.base == screenHome {
+		m.loadHome()
 	}
 }
 
@@ -1122,9 +1188,11 @@ type wikiEditedMsg struct {
 
 type fileEditedMsg struct{ err error }
 
-// edit hands the page source to $EDITOR. The gnotes editor replaces this in
+// edit hands the page source to $EDITOR. The gwiki editor replaces this in
 // phase 5.
-func (m *WikiModel) edit() {
+// editExternal hands the page to $EDITOR, for a page the built-in editor is
+// not wanted for.
+func (m *WikiModel) editExternal() {
 	r := m.cur
 	e, err := editor.Start(string(r.src), m.getenv)
 	if err != nil {
@@ -1157,7 +1225,7 @@ func (m *WikiModel) edited(msg wikiEditedMsg) {
 	switch err := m.w.Write(msg.page, out, msg.hash); {
 	case errors.As(err, &conflict):
 		// Keep the edit rather than lose it with the temporary file.
-		kept, kerr := os.CreateTemp("", "gnotes-edit-*.md")
+		kept, kerr := os.CreateTemp("", "gwiki-edit-*.md")
 		if kerr == nil {
 			_, kerr = kept.Write(out)
 			kept.Close()

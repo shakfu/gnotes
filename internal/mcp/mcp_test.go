@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/session"
-	"github.com/shakfu/gnotes/internal/state"
-	"github.com/shakfu/gnotes/internal/store"
-	"github.com/shakfu/gnotes/internal/ulid"
-	"github.com/shakfu/gnotes/internal/wiki"
+	"github.com/shakfu/gwiki/internal/session"
+	"github.com/shakfu/gwiki/internal/state"
+	"github.com/shakfu/gwiki/internal/store"
+	"github.com/shakfu/gwiki/internal/ulid"
+	"github.com/shakfu/gwiki/internal/wiki"
 )
 
 var clock = func() time.Time { return time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC) }
@@ -61,9 +61,9 @@ func (f *fixture) exchange(frames ...string) []map[string]any {
 	f.t.Helper()
 
 	var out, logw bytes.Buffer
-	srv := New(f.sess, "gnotes", "test")
+	srv := New(f.sess, "gwiki", "test")
 	if f.wiki != nil {
-		srv = NewWiki(f.wiki, "gnotes-wiki", "test")
+		srv = NewWiki(f.wiki, "gwiki", "test")
 	}
 
 	if err := srv.Serve(strings.NewReader(strings.Join(frames, "\n")+"\n"), &out, &logw); err != nil {
@@ -157,7 +157,7 @@ func TestInitializeHandshake(t *testing.T) {
 		t.Errorf("the tools capability is not declared: %v", result["capabilities"])
 	}
 	info := result["serverInfo"].(map[string]any)
-	if info["name"] != "gnotes" || info["version"] != "test" {
+	if info["name"] != "gwiki" || info["version"] != "test" {
 		t.Errorf("serverInfo = %v", info)
 	}
 	if s, _ := result["instructions"].(string); !strings.Contains(s, "handle") {
@@ -264,9 +264,9 @@ func TestRepliesAreOneLineEach(t *testing.T) {
 	}
 
 	var out, logw bytes.Buffer
-	srv := New(f.sess, "gnotes", "test")
+	srv := New(f.sess, "gwiki", "test")
 	frame := f.frame(1, "tools/call", map[string]any{
-		"name": "gnotes_get", "arguments": map[string]any{"ref": "multi"},
+		"name": "gwiki_get", "arguments": map[string]any{"ref": "multi"},
 	})
 	if err := srv.Serve(strings.NewReader(frame+"\n"), &out, &logw); err != nil {
 		t.Fatal(err)
@@ -287,14 +287,14 @@ func TestLargeFrameIsRead(t *testing.T) {
 	f := newFixture(t)
 
 	body := strings.Repeat("lorem ipsum dolor sit amet ", 8000) // ~200 KB
-	text := f.mustCall("gnotes_create", map[string]any{
+	text := f.mustCall("gwiki_create", map[string]any{
 		"kind": "note", "title": "large", "body": body, "notebook": f.work,
 	})
 	if !strings.Contains(text, "Created note") {
 		t.Fatalf("create failed: %s", text)
 	}
 
-	got := f.mustCall("gnotes_get", map[string]any{"ref": "large"})
+	got := f.mustCall("gwiki_get", map[string]any{"ref": "large"})
 	if !strings.Contains(got, "lorem ipsum") {
 		t.Fatal("the large body did not round-trip")
 	}
@@ -306,7 +306,7 @@ func TestDiagnosticsGoToTheLogStreamOnly(t *testing.T) {
 	f := newFixture(t)
 
 	var out, logw bytes.Buffer
-	srv := New(f.sess, "gnotes", "test")
+	srv := New(f.sess, "gwiki", "test")
 
 	// A notification that fails: its error has nowhere to go but the log.
 	frames := strings.Join([]string{
@@ -355,7 +355,7 @@ func checkToolsList(t *testing.T, f *fixture, registry []registered) {
 		}
 		seen[name] = true
 
-		if !strings.HasPrefix(name, "gnotes_") {
+		if !strings.HasPrefix(name, "gwiki_") {
 			t.Errorf("%s is not namespaced; it could collide with another server's tool", name)
 		}
 
@@ -389,7 +389,7 @@ func checkToolsList(t *testing.T, f *fixture, registry []registered) {
 // Annotations tell a client what to confirm with the user, so they must match
 // what the tool actually does.
 func TestAnnotationsMatchBehaviour(t *testing.T) {
-	readOnly := map[string]bool{"gnotes_list": true, "gnotes_search": true, "gnotes_get": true}
+	readOnly := map[string]bool{"gwiki_list": true, "gwiki_search": true, "gwiki_get": true}
 
 	for _, entry := range registry {
 		if entry.Annotations == nil {
@@ -399,9 +399,9 @@ func TestAnnotationsMatchBehaviour(t *testing.T) {
 		if got := entry.Annotations.ReadOnlyHint; got != readOnly[entry.Name] {
 			t.Errorf("%s readOnlyHint = %v, want %v", entry.Name, got, readOnly[entry.Name])
 		}
-		if entry.Name == "gnotes_delete" {
+		if entry.Name == "gwiki_delete" {
 			if entry.Annotations.DestructiveHint == nil || !*entry.Annotations.DestructiveHint {
-				t.Error("gnotes_delete is not marked destructive")
+				t.Error("gwiki_delete is not marked destructive")
 			}
 		}
 	}
@@ -412,7 +412,7 @@ func TestAnnotationsMatchBehaviour(t *testing.T) {
 func TestCreateAndRead(t *testing.T) {
 	f := newFixture(t)
 
-	created := f.mustCall("gnotes_create", map[string]any{
+	created := f.mustCall("gwiki_create", map[string]any{
 		"kind": "task", "title": "fix the lexer", "notebook": "work",
 		"tags": []string{"bug"}, "priority": "high", "due": "2026-09-01",
 	})
@@ -420,7 +420,7 @@ func TestCreateAndRead(t *testing.T) {
 		t.Fatalf("create said: %s", created)
 	}
 
-	got := f.mustCall("gnotes_get", map[string]any{"ref": "fix the lexer"})
+	got := f.mustCall("gwiki_get", map[string]any{"ref": "fix the lexer"})
 	for _, want := range []string{"kind: task", "status: open", "priority: high", "due: 2026-09-01", "tags: bug"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("get output is missing %q:\n%s", want, got)
@@ -430,8 +430,8 @@ func TestCreateAndRead(t *testing.T) {
 
 func TestListFilters(t *testing.T) {
 	f := newFixture(t)
-	f.mustCall("gnotes_create", map[string]any{"kind": "note", "title": "design sketch", "notebook": "work", "tags": []string{"design"}})
-	f.mustCall("gnotes_create", map[string]any{"kind": "task", "title": "fix the lexer", "notebook": "work", "tags": []string{"bug"}})
+	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "design sketch", "notebook": "work", "tags": []string{"design"}})
+	f.mustCall("gwiki_create", map[string]any{"kind": "task", "title": "fix the lexer", "notebook": "work", "tags": []string{"bug"}})
 
 	cases := map[string]struct {
 		args    map[string]any
@@ -449,7 +449,7 @@ func TestListFilters(t *testing.T) {
 
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			got := f.mustCall("gnotes_list", c.args)
+			got := f.mustCall("gwiki_list", c.args)
 			if !strings.Contains(got, c.want) {
 				t.Errorf("missing %q:\n%s", c.want, got)
 			}
@@ -463,12 +463,12 @@ func TestListFilters(t *testing.T) {
 func TestListRespectsTheLimitAndSaysSo(t *testing.T) {
 	f := newFixture(t)
 	for i := 0; i < 5; i++ {
-		f.mustCall("gnotes_create", map[string]any{
+		f.mustCall("gwiki_create", map[string]any{
 			"kind": "note", "title": fmt.Sprintf("note %d", i), "notebook": "work",
 		})
 	}
 
-	got := f.mustCall("gnotes_list", map[string]any{"limit": 2})
+	got := f.mustCall("gwiki_list", map[string]any{"limit": 2})
 	if strings.Count(got, "note ") < 2 {
 		t.Fatalf("fewer than the limit returned:\n%s", got)
 	}
@@ -479,12 +479,12 @@ func TestListRespectsTheLimitAndSaysSo(t *testing.T) {
 
 func TestSearchFindsBodyText(t *testing.T) {
 	f := newFixture(t)
-	f.mustCall("gnotes_create", map[string]any{
+	f.mustCall("gwiki_create", map[string]any{
 		"kind": "note", "title": "design sketch", "notebook": "work",
 		"body": "The lexer tokenizes input before the parser runs.",
 	})
 
-	got := f.mustCall("gnotes_search", map[string]any{"query": "tokenizes"})
+	got := f.mustCall("gwiki_search", map[string]any{"query": "tokenizes"})
 	if !strings.Contains(got, "design sketch") {
 		t.Fatalf("search missed a body match:\n%s", got)
 	}
@@ -492,17 +492,17 @@ func TestSearchFindsBodyText(t *testing.T) {
 		t.Fatalf("no snippet explaining the match:\n%s", got)
 	}
 
-	if got := f.mustCall("gnotes_search", map[string]any{"query": "nothinglikethis"}); !strings.Contains(got, "Nothing matches") {
+	if got := f.mustCall("gwiki_search", map[string]any{"query": "nothinglikethis"}); !strings.Contains(got, "Nothing matches") {
 		t.Fatalf("a fruitless search said: %s", got)
 	}
 }
 
 func TestUpdateChangesOnlyWhatIsGiven(t *testing.T) {
 	f := newFixture(t)
-	f.mustCall("gnotes_create", map[string]any{"kind": "task", "title": "ship it", "notebook": "work", "body": "keep me"})
+	f.mustCall("gwiki_create", map[string]any{"kind": "task", "title": "ship it", "notebook": "work", "body": "keep me"})
 
-	f.mustCall("gnotes_update", map[string]any{"ref": "ship it", "status": "done"})
-	got := f.mustCall("gnotes_get", map[string]any{"ref": "ship it"})
+	f.mustCall("gwiki_update", map[string]any{"ref": "ship it", "status": "done"})
+	got := f.mustCall("gwiki_get", map[string]any{"ref": "ship it"})
 
 	if !strings.Contains(got, "status: done") {
 		t.Errorf("status did not change:\n%s", got)
@@ -514,9 +514,9 @@ func TestUpdateChangesOnlyWhatIsGiven(t *testing.T) {
 
 func TestUpdateWithNoFieldsSaysSo(t *testing.T) {
 	f := newFixture(t)
-	f.mustCall("gnotes_create", map[string]any{"kind": "note", "title": "untouched", "notebook": "work"})
+	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "untouched", "notebook": "work"})
 
-	got := f.mustCall("gnotes_update", map[string]any{"ref": "untouched"})
+	got := f.mustCall("gwiki_update", map[string]any{"ref": "untouched"})
 	if !strings.Contains(got, "Nothing to change") {
 		t.Fatalf("a no-op update said: %s", got)
 	}
@@ -524,12 +524,12 @@ func TestUpdateWithNoFieldsSaysSo(t *testing.T) {
 
 func TestUpdateTagsAndLinks(t *testing.T) {
 	f := newFixture(t)
-	f.mustCall("gnotes_create", map[string]any{"kind": "note", "title": "design sketch", "notebook": "work"})
-	f.mustCall("gnotes_create", map[string]any{"kind": "task", "title": "implement it", "notebook": "work"})
+	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "design sketch", "notebook": "work"})
+	f.mustCall("gwiki_create", map[string]any{"kind": "task", "title": "implement it", "notebook": "work"})
 
-	f.mustCall("gnotes_update", map[string]any{"ref": "implement it", "addTags": []string{"Bug", "parser"}, "link": "design sketch"})
+	f.mustCall("gwiki_update", map[string]any{"ref": "implement it", "addTags": []string{"Bug", "parser"}, "link": "design sketch"})
 
-	got := f.mustCall("gnotes_get", map[string]any{"ref": "implement it"})
+	got := f.mustCall("gwiki_get", map[string]any{"ref": "implement it"})
 	if !strings.Contains(got, "tags: bug, parser") {
 		t.Errorf("tags = %s", got)
 	}
@@ -538,13 +538,13 @@ func TestUpdateTagsAndLinks(t *testing.T) {
 	}
 
 	// And the other direction.
-	back := f.mustCall("gnotes_get", map[string]any{"ref": "design sketch"})
+	back := f.mustCall("gwiki_get", map[string]any{"ref": "design sketch"})
 	if !strings.Contains(back, "referenced by:") {
 		t.Errorf("no backlink:\n%s", back)
 	}
 
-	f.mustCall("gnotes_update", map[string]any{"ref": "implement it", "removeTags": []string{"bug"}})
-	if got := f.mustCall("gnotes_get", map[string]any{"ref": "implement it"}); strings.Contains(got, "bug") {
+	f.mustCall("gwiki_update", map[string]any{"ref": "implement it", "removeTags": []string{"bug"}})
+	if got := f.mustCall("gwiki_get", map[string]any{"ref": "implement it"}); strings.Contains(got, "bug") {
 		t.Errorf("the tag survived removal:\n%s", got)
 	}
 }
@@ -553,14 +553,14 @@ func TestUpdateTagsAndLinks(t *testing.T) {
 // it exactly as a person is.
 func TestTaskFieldsAreRefusedOnNotes(t *testing.T) {
 	f := newFixture(t)
-	f.mustCall("gnotes_create", map[string]any{"kind": "note", "title": "just a note", "notebook": "work"})
+	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "just a note", "notebook": "work"})
 
 	for _, args := range []map[string]any{
 		{"ref": "just a note", "status": "done"},
 		{"ref": "just a note", "priority": "high"},
 		{"ref": "just a note", "due": "2026-09-01"},
 	} {
-		text, isError := f.call("gnotes_update", args)
+		text, isError := f.call("gwiki_update", args)
 		if !isError {
 			t.Errorf("%v was accepted on a note", args)
 		}
@@ -580,7 +580,7 @@ func TestOperationFailuresAreToolErrorsNotProtocolErrors(t *testing.T) {
 		"empty reference": {"ref": ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			text, isError := f.call("gnotes_get", args)
+			text, isError := f.call("gwiki_get", args)
 			if !isError {
 				t.Fatal("the failure was not reported")
 			}
@@ -594,10 +594,10 @@ func TestOperationFailuresAreToolErrorsNotProtocolErrors(t *testing.T) {
 // An ambiguous reference must list the candidates so the model can pick one.
 func TestAmbiguousReferenceListsCandidates(t *testing.T) {
 	f := newFixture(t)
-	f.mustCall("gnotes_create", map[string]any{"kind": "note", "title": "parser one", "notebook": "work"})
-	f.mustCall("gnotes_create", map[string]any{"kind": "note", "title": "parser two", "notebook": "work"})
+	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "parser one", "notebook": "work"})
+	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "parser two", "notebook": "work"})
 
-	text, isError := f.call("gnotes_get", map[string]any{"ref": "parser"})
+	text, isError := f.call("gwiki_get", map[string]any{"ref": "parser"})
 	if !isError {
 		t.Fatal("an ambiguous reference was resolved")
 	}
@@ -613,7 +613,7 @@ func TestAmbiguousReferenceListsCandidates(t *testing.T) {
 func TestUnknownToolIsAProtocolError(t *testing.T) {
 	f := newFixture(t)
 
-	replies := f.exchange(f.frame(1, "tools/call", map[string]any{"name": "gnotes_teleport"}))
+	replies := f.exchange(f.frame(1, "tools/call", map[string]any{"name": "gwiki_teleport"}))
 	e, ok := replies[0]["error"].(map[string]any)
 	if !ok {
 		t.Fatalf("an unknown tool returned a result: %v", replies[0])
@@ -628,7 +628,7 @@ func TestUnknownToolIsAProtocolError(t *testing.T) {
 func TestUnknownArgumentIsRejected(t *testing.T) {
 	f := newFixture(t)
 
-	text, isError := f.call("gnotes_list", map[string]any{"kynd": "task"})
+	text, isError := f.call("gwiki_list", map[string]any{"kynd": "task"})
 	if !isError {
 		t.Fatalf("a mistyped argument was ignored: %s", text)
 	}
@@ -639,18 +639,18 @@ func TestUnknownArgumentIsRejected(t *testing.T) {
 
 func TestDeleteAndRestore(t *testing.T) {
 	f := newFixture(t)
-	f.mustCall("gnotes_create", map[string]any{"kind": "note", "title": "temporary", "notebook": "work"})
+	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "temporary", "notebook": "work"})
 
-	deleted := f.mustCall("gnotes_delete", map[string]any{"ref": "temporary"})
-	if !strings.Contains(deleted, "gnotes_restore") {
+	deleted := f.mustCall("gwiki_delete", map[string]any{"ref": "temporary"})
+	if !strings.Contains(deleted, "gwiki_restore") {
 		t.Errorf("the delete message does not say how to undo it: %s", deleted)
 	}
-	if got := f.mustCall("gnotes_list", nil); strings.Contains(got, "temporary") {
+	if got := f.mustCall("gwiki_list", nil); strings.Contains(got, "temporary") {
 		t.Errorf("the deleted note is still listed:\n%s", got)
 	}
 
-	f.mustCall("gnotes_restore", map[string]any{"ref": "temporary"})
-	if got := f.mustCall("gnotes_list", nil); !strings.Contains(got, "temporary") {
+	f.mustCall("gwiki_restore", map[string]any{"ref": "temporary"})
+	if got := f.mustCall("gwiki_list", nil); !strings.Contains(got, "temporary") {
 		t.Errorf("restore did not bring it back:\n%s", got)
 	}
 }
@@ -672,9 +672,9 @@ func TestCreateWithoutANotebookUsesTheDefault(t *testing.T) {
 	}
 
 	f := &fixture{t: t, sess: sess}
-	f.mustCall("gnotes_create", map[string]any{"kind": "note", "title": "straight in"})
+	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "straight in"})
 
-	if got := f.mustCall("gnotes_list", map[string]any{"kind": "notebook"}); !strings.Contains(got, "inbox") {
+	if got := f.mustCall("gwiki_list", map[string]any{"kind": "notebook"}); !strings.Contains(got, "inbox") {
 		t.Fatalf("no default notebook was created:\n%s", got)
 	}
 }
@@ -683,7 +683,7 @@ func TestCreateWithoutANotebookUsesTheDefault(t *testing.T) {
 // client may stop the server at any point.
 func TestWritesAreCommittedImmediately(t *testing.T) {
 	f := newFixture(t)
-	f.mustCall("gnotes_create", map[string]any{"kind": "note", "title": "persisted", "notebook": "work"})
+	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "persisted", "notebook": "work"})
 
 	if f.sess.Pending() != 0 {
 		t.Fatalf("%d events left uncommitted", f.sess.Pending())
@@ -700,7 +700,7 @@ func TestWritesAreCommittedImmediately(t *testing.T) {
 // The command line or another machine may write while the server is running.
 func TestOutsideWritesAreNoticed(t *testing.T) {
 	f := newFixture(t)
-	srv := New(f.sess, "gnotes", "test")
+	srv := New(f.sess, "gwiki", "test")
 
 	other, err := session.OpenProject(f.sess.Project, store.Actor{ID: ulid.NewGenerator().New(), Name: "bob"})
 	if err != nil {
@@ -716,7 +716,7 @@ func TestOutsideWritesAreNoticed(t *testing.T) {
 
 	// Going through the server, which refreshes before each call.
 	var out, logw bytes.Buffer
-	frame := f.frame(1, "tools/call", map[string]any{"name": "gnotes_list", "arguments": map[string]any{}})
+	frame := f.frame(1, "tools/call", map[string]any{"name": "gwiki_list", "arguments": map[string]any{}})
 	if err := srv.Serve(strings.NewReader(frame+"\n"), &out, &logw); err != nil {
 		t.Fatal(err)
 	}
@@ -735,10 +735,10 @@ func TestSequentialRequestsOnOneConnection(t *testing.T) {
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
 		f.frame(2, "tools/list", nil),
 		f.frame(3, "tools/call", map[string]any{
-			"name": "gnotes_create", "arguments": map[string]any{"kind": "note", "title": "one", "notebook": "work"},
+			"name": "gwiki_create", "arguments": map[string]any{"kind": "note", "title": "one", "notebook": "work"},
 		}),
 		f.frame(4, "tools/call", map[string]any{
-			"name": "gnotes_list", "arguments": map[string]any{},
+			"name": "gwiki_list", "arguments": map[string]any{},
 		}),
 	)
 
@@ -762,14 +762,14 @@ func TestAFailedToolDoesNotLeakIntoTheNextCall(t *testing.T) {
 
 	// The task is staged before the priority is parsed, so this fails with an
 	// event already in the session.
-	text, isError := f.call("gnotes_create", map[string]any{
+	text, isError := f.call("gwiki_create", map[string]any{
 		"kind": "task", "title": "leaked", "notebook": f.work, "priority": "screaming",
 	})
 	if !isError {
 		t.Fatalf("an unknown priority was accepted: %s", text)
 	}
 
-	f.mustCall("gnotes_create", map[string]any{
+	f.mustCall("gwiki_create", map[string]any{
 		"kind": "note", "title": "kept", "notebook": f.work,
 	})
 
@@ -794,7 +794,7 @@ func TestAFailedToolDoesNotLeakIntoTheNextCall(t *testing.T) {
 	}
 }
 
-// A link to a deleted entry is listed by gnotes_get, so gnotes_update must be
+// A link to a deleted entry is listed by gwiki_get, so gwiki_update must be
 // able to remove it by the handle shown.
 func TestUnlinkADeletedTarget(t *testing.T) {
 	f := newFixture(t)
@@ -810,7 +810,7 @@ func TestUnlinkADeletedTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	text, isError := f.call("gnotes_update", map[string]any{"ref": "source", "unlink": dst.ID[len(dst.ID)-6:]})
+	text, isError := f.call("gwiki_update", map[string]any{"ref": "source", "unlink": dst.ID[len(dst.ID)-6:]})
 	if isError {
 		t.Fatalf("unlink failed: %s", text)
 	}
@@ -850,7 +850,7 @@ func TestInvalidEnvelopesAreRejected(t *testing.T) {
 // the project with nobody told.
 func TestFramesWithoutARequestAreNotAnsweredOrRun(t *testing.T) {
 	f := newFixture(t)
-	call := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"gnotes_create","arguments":{"title":"ghost"}}}`
+	call := `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"gwiki_create","arguments":{"title":"ghost"}}}`
 	replies := f.exchange(`{"jsonrpc":"2.0","id":5,"result":{}}`, call)
 	if len(replies) != 0 {
 		t.Fatalf("got replies %v, want none", replies)
@@ -874,13 +874,13 @@ func TestEveryReplyCarriesAResultOrAnError(t *testing.T) {
 // An update reports what it changed, not every field it was given.
 func TestUpdateReportsOnlyRealChanges(t *testing.T) {
 	f := newFixture(t)
-	f.mustCall("gnotes_create", map[string]any{"kind": "task", "title": "steady"})
+	f.mustCall("gwiki_create", map[string]any{"kind": "task", "title": "steady"})
 
-	text := f.mustCall("gnotes_update", map[string]any{"ref": "steady", "status": "open"})
+	text := f.mustCall("gwiki_update", map[string]any{"ref": "steady", "status": "open"})
 	if !strings.HasPrefix(text, "No change") {
 		t.Fatalf("setting the current status reported %q", text)
 	}
-	text = f.mustCall("gnotes_update", map[string]any{"ref": "steady", "status": "done", "priority": ""})
+	text = f.mustCall("gwiki_update", map[string]any{"ref": "steady", "status": "done", "priority": ""})
 	if !strings.Contains(text, "(status)") {
 		t.Fatalf("reply = %q, want status reported", text)
 	}
@@ -888,17 +888,17 @@ func TestUpdateReportsOnlyRealChanges(t *testing.T) {
 
 func TestNotebooksRefuseEntryFields(t *testing.T) {
 	f := newFixture(t)
-	if text, isError := f.call("gnotes_create", map[string]any{"kind": "notebook", "title": "nb", "tags": []string{"x"}}); !isError {
+	if text, isError := f.call("gwiki_create", map[string]any{"kind": "notebook", "title": "nb", "tags": []string{"x"}}); !isError {
 		t.Fatalf("a notebook with tags was created: %s", text)
 	}
-	if text, isError := f.call("gnotes_update", map[string]any{"ref": "work", "notebook": "work"}); !isError {
+	if text, isError := f.call("gwiki_update", map[string]any{"ref": "work", "notebook": "work"}); !isError {
 		t.Fatalf("a notebook was moved into a notebook: %s", text)
 	}
 }
 
 func TestAMissingRefIsNamed(t *testing.T) {
 	f := newFixture(t)
-	for _, tool := range []string{"gnotes_get", "gnotes_update", "gnotes_delete", "gnotes_restore"} {
+	for _, tool := range []string{"gwiki_get", "gwiki_update", "gwiki_delete", "gwiki_restore"} {
 		text, isError := f.call(tool, map[string]any{})
 		if !isError || !strings.Contains(text, `"ref" is required`) {
 			t.Errorf("%s without ref = %q", tool, text)

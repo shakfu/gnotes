@@ -11,12 +11,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/shakfu/gnotes/internal/event"
-	"github.com/shakfu/gnotes/internal/state"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/event"
+	"github.com/shakfu/gwiki/internal/state"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
-// A legacy project is a .gnotes directory holding project.json and one JSONL
+// A legacy project is a .gwiki directory holding project.json and one JSONL
 // event log per author under events/. It is imported into an empty database
 // the first time it opens, and its files are left in place.
 const (

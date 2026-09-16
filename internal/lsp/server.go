@@ -2,7 +2,7 @@
 // completion of links, diagnostics for broken ones, following a link, backlinks,
 // and renaming a page with its links rewritten.
 //
-// It runs as `gnotes wiki lsp`, speaking LSP on standard input and output.
+// It runs as `gwiki lsp`, speaking LSP on standard input and output.
 // Buffers the editor has open are resolved as they are, saved or not; every
 // other page is read from the cache, which the server refreshes once a second
 // and when a buffer is saved.
@@ -18,7 +18,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/wiki"
+	"github.com/shakfu/gwiki/internal/wiki"
 )
 
 // Opener opens the wiki for a workspace root, which is empty when the editor
@@ -120,7 +120,7 @@ func (s *Server) Serve(in io.Reader, out io.Writer, logw io.Writer) error {
 }
 
 func (s *Server) logf(format string, args ...any) {
-	fmt.Fprintf(s.logw, "gnotes lsp: "+format+"\n", args...)
+	fmt.Fprintf(s.logw, "gwiki lsp: "+format+"\n", args...)
 }
 
 func (s *Server) send(v any) {
@@ -272,7 +272,7 @@ func (s *Server) initialize(raw json.RawMessage) (any, error) {
 	}
 	w, err := s.open(root)
 	if err != nil {
-		return nil, fmt.Errorf("%w; run 'gnotes wiki init' in the project", err)
+		return nil, fmt.Errorf("%w; run 'gwiki init' in the project", err)
 	}
 	snap, err := w.Snapshot()
 	if err != nil {
@@ -493,7 +493,7 @@ func (s *Server) publish(d *document) {
 		diags = append(diags, map[string]any{
 			"range":    linkRange(d.text, l),
 			"severity": 2,
-			"source":   "gnotes",
+			"source":   "gwiki",
 			"code":     l.Status,
 			"message":  problem(l),
 		})

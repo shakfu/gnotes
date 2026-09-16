@@ -19,7 +19,7 @@ type Front struct {
 	Due       string  `yaml:"due"`
 	Assignees Strings `yaml:"assignees"`
 
-	// Raw is the whole mapping, including keys gnotes does not use.
+	// Raw is the whole mapping, including keys gwiki does not use.
 	Raw map[string]any `yaml:"-"`
 }
 

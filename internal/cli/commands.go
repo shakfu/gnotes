@@ -15,13 +15,13 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/shakfu/gnotes/internal/editor"
-	"github.com/shakfu/gnotes/internal/rank"
-	"github.com/shakfu/gnotes/internal/search"
-	"github.com/shakfu/gnotes/internal/session"
-	"github.com/shakfu/gnotes/internal/state"
-	"github.com/shakfu/gnotes/internal/store"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/editor"
+	"github.com/shakfu/gwiki/internal/rank"
+	"github.com/shakfu/gwiki/internal/search"
+	"github.com/shakfu/gwiki/internal/session"
+	"github.com/shakfu/gwiki/internal/state"
+	"github.com/shakfu/gwiki/internal/store"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // flags builds a FlagSet that reports errors through the command's usage line
@@ -36,7 +36,7 @@ func (a *App) flags(name string) *flag.FlagSet {
 // parse reads arguments, allowing flags to appear after positional ones.
 //
 // The standard parser stops at the first non-flag argument, which is unusable
-// here: almost every command takes its subject first, so "gnotes note 'a
+// here: almost every command takes its subject first, so "gwiki notes note 'a
 // title' -t bug" would silently treat the flag as part of the title. Sorting
 // the flags ahead of the positionals before parsing gives the behaviour people
 // expect from every other tool.
@@ -94,15 +94,15 @@ var cmdInit = &command{
 	name:    "init",
 	args:    "[name] [--user <you>]",
 	summary: "create a project here, and set your name the first time",
-	help: `Creates .gnotes/gnotes.db in the current directory, a SQLite database
+	help: `Creates .gwiki/notes.db in the current directory, a SQLite database
 for you to commit. The name defaults to the directory's own.
 
 The first time you run it anywhere, it also records your name and mints the
 identity that every change you make is attributed to. That identity is stored
 outside the project, so it follows you across all of them.
 
-'gnotes -g init [dir]' sets up the global notes instead: a project that belongs
-to you rather than to a repository, reached from anywhere with a leading -g. It
+'gwiki notes -g init [dir]' sets up the global notes instead: a project that
+belongs to you rather than to a repository, reached from anywhere with -g. It
 is created in dir, or ~/notes, and its location is recorded. A project already
 in dir, such as a clone from another machine, is used as it is.`,
 	run: func(a *App, args []string) error {
@@ -163,7 +163,7 @@ in dir, such as a clone from another machine, is used as it is.`,
 			// A project above, in the same repository, would be shadowed for
 			// every command run below the new one.
 			if top, inGit := store.GitRoot(a.Dir); !inGit || within(resolvedPath(existing.Root), resolvedPath(top)) {
-				return fmt.Errorf("a gnotes project already covers this directory, at %s", existing.Root)
+				return fmt.Errorf("a notes database already covers this directory, at %s", existing.Root)
 			}
 			existing = nil
 		}
@@ -176,7 +176,7 @@ in dir, such as a clone from another machine, is used as it is.`,
 			if s.State.Workspace != "" {
 				if actor.Valid() {
 					if *user != "" {
-						return errors.New("this project is already initialised; change your name with 'gnotes whoami --set'")
+						return errors.New("this project is already initialised; change your name with 'gwiki notes whoami --set'")
 					}
 					if !a.Global {
 						return errors.New("this project is already initialised")
@@ -235,7 +235,7 @@ in dir, such as a clone from another machine, is used as it is.`,
 		if a.Global {
 			g = "-g "
 		}
-		a.printf("\nnext: gnotes %snote \"a first note\"  or  gnotes %stask \"a first task\"\n", g, g)
+		a.printf("\nnext: gwiki notes %snote \"a first note\"  or  gwiki notes %stask \"a first task\"\n", g, g)
 		return nil
 	},
 }
@@ -358,7 +358,7 @@ notebook, creating one called "inbox" if the project has none.
 The body can be given with -m, or piped in with --stdin, which is the usual way
 to capture something longer:
 
-    git log --oneline -20 | gnotes note "release notes" --stdin`,
+    git log --oneline -20 | gwiki notes note "release notes" --stdin`,
 	run: func(a *App, args []string) error { return a.createEntry(args, false) },
 }
 
@@ -372,7 +372,7 @@ priority, a due date and assignees.
 
 The due date accepts a plain date or a relative word:
 
-    gnotes task "ship the parser" -d friday -p high -a me`,
+    gwiki notes task "ship the parser" -d friday -p high -a me`,
 	run: func(a *App, args []string) error { return a.createEntry(args, true) },
 }
 
@@ -502,15 +502,15 @@ var cmdList = &command{
 
 Filters combine, so this shows only the open, high-priority tasks tagged bug:
 
-    gnotes ls -k task -s open -p high -t bug
+    gwiki notes ls -k task -s open -p high -t bug
 
 --at replays the recorded changes up to a past moment and lists the project as
 it stood then. It
 reads a date, a timestamp, or a duration ago. A date means the start of that
 day in your time zone:
 
-    gnotes ls --at 2026-08-01
-    gnotes ls --at 3d`,
+    gwiki notes ls --at 2026-08-01
+    gwiki notes ls --at 3d`,
 	run: func(a *App, args []string) error {
 		fs := a.flags("ls")
 		notebook := fs.String("b", "", "notebook")
@@ -863,9 +863,9 @@ var cmdEdit = &command{
 	summary: "change a title or body",
 	help: `With no flags, opens the body in $EDITOR and saves what you write.
 
-    gnotes edit lexer --title "fix the lexer properly"
-    gnotes edit lexer -m "a short body"
-    cat notes.md | gnotes edit lexer --stdin`,
+    gwiki notes edit lexer --title "fix the lexer properly"
+    gwiki notes edit lexer -m "a short body"
+    cat notes.md | gwiki notes edit lexer --stdin`,
 	run: func(a *App, args []string) error {
 		fs := a.flags("edit")
 		title := fs.String("title", "", "new title")
@@ -916,7 +916,7 @@ var cmdEdit = &command{
 // came back.
 //
 // Interrupts are ignored while the editor runs. The editor shares the
-// terminal and receives ctrl-c itself; gnotes exiting on it would leave the
+// terminal and receives ctrl-c itself; gwiki exiting on it would leave the
 // temporary file, which holds the body, behind.
 func (a *App) editInEditor(current string) (string, error) {
 	edit, err := editor.Start(current, a.Env)
@@ -946,15 +946,15 @@ var cmdStatus = &command{
 	help: `Sets a task's status. The command name doubles as the status, so
 these are the same:
 
-    gnotes done lexer
-    gnotes status lexer done
+    gwiki notes done lexer
+    gwiki notes status lexer done
 
 "reopen" sets it back to open.`,
 	runNamed: statusRun,
 }
 
 // statusRun handles the status command and its aliases. The alias carries the
-// intent, so "gnotes done x" needs no further argument.
+// intent, so "gwiki notes done x" needs no further argument.
 func statusRun(a *App, invoked string, args []string) error {
 	want := ""
 	switch invoked {
@@ -991,9 +991,9 @@ var cmdDue = &command{
 	summary: "set or clear a task's due date",
 	help: `Accepts a date, a weekday, or a relative word:
 
-    gnotes due lexer 2026-09-01
-    gnotes due lexer friday
-    gnotes due lexer none
+    gwiki notes due lexer 2026-09-01
+    gwiki notes due lexer friday
+    gwiki notes due lexer none
 
 Relative words are resolved now, so the stored date never shifts.`,
 	run: func(a *App, args []string) error {
@@ -1087,7 +1087,7 @@ var cmdLink = &command{
 	name:    "link",
 	args:    "<from> <to>",
 	summary: "point one entry at another",
-	help:    `Records a reference, which is how a task points at the note it came out of. "gnotes show" lists both directions.`,
+	help:    `Records a reference, which is how a task points at the note it came out of. "gwiki notes show" lists both directions.`,
 	run: func(a *App, args []string) error {
 		if len(args) < 2 {
 			return errUsage
@@ -1268,7 +1268,7 @@ var cmdRemove = &command{
 	args:    "<ref>",
 	summary: "delete an entry",
 	help: `Deletion is recorded as an event rather than by rewriting history, so
-"gnotes restore" can undo it and the original is always recoverable from the
+"gwiki notes restore" can undo it and the original is always recoverable from the
 log. Deleting a notebook deletes what is in it.`,
 	run: func(a *App, args []string) error {
 		if len(args) == 0 {
@@ -1424,7 +1424,7 @@ var cmdWho = &command{
 			}
 		}
 		if !actor.Valid() {
-			return errors.New("no identity configured; run 'gnotes init'")
+			return errors.New("no identity configured; run 'gwiki notes init'")
 		}
 
 		path, _ := store.UserConfigPath()
@@ -1439,44 +1439,52 @@ var cmdWho = &command{
 
 // ---------------------------------------------------------------- help
 
-var cmdHelp = &command{
-	name:    "help",
-	args:    "[command]",
-	summary: "show this help, or the detail for one command",
-	run: func(a *App, args []string) error {
-		if len(args) > 0 {
-			c, ok := byName[args[0]]
-			if !ok {
-				return fmt.Errorf("%w: unknown command %q", errUsage, args[0])
+// helpCommand lists a table's commands, or shows one command's detail. It
+// takes the table variable's address, since the table is built after the
+// command.
+func helpCommand(intro func(a *App), tableVar **commandTable) *command {
+	return &command{
+		name:    "help",
+		args:    "[command]",
+		summary: "show this help, or the detail for one command",
+		run: func(a *App, args []string) error {
+			t := *tableVar
+			if len(args) > 0 {
+				c, ok := t.byName[args[0]]
+				if !ok {
+					return fmt.Errorf("%w: unknown command %q", errUsage, args[0])
+				}
+				a.printf("usage: %s %s %s\n\n%s\n", t.prefix, c.name, c.args, c.summary)
+				if c.help != "" {
+					a.printf("\n%s\n", c.help)
+				}
+				if len(c.aliases) > 0 {
+					a.printf("\naliases: %s\n", strings.Join(c.aliases, ", "))
+				}
+				return nil
 			}
-			a.printf("usage: gnotes %s %s\n\n%s\n", c.name, c.args, c.summary)
-			if c.help != "" {
-				a.printf("\n%s\n", c.help)
+
+			intro(a)
+			var out table
+			for _, c := range t.list {
+				name := c.name
+				if len(c.aliases) > 0 {
+					name += ", " + strings.Join(c.aliases, ", ")
+				}
+				out.addStyled([]string{name, c.summary}, []string{a.style(ansiBold, name), ""})
 			}
-			if len(c.aliases) > 0 {
-				a.printf("\naliases: %s\n", strings.Join(c.aliases, ", "))
-			}
+			out.write(a.Stdout)
+			a.printf("\nrun '%s help <command>' for detail.\n", t.prefix)
 			return nil
-		}
+		},
+	}
+}
 
-		a.printf("gnotes keeps notes and tasks in a SQLite database in your project.\n\n")
-		a.printf("usage: gnotes <command> [arguments]\n")
-		a.printf("       gnotes -g <command>  use the global notes, not this directory's project\n")
-		a.printf("       gnotes               open the interactive interface\n\n")
-
-		var t table
-		for _, c := range commands {
-			name := c.name
-			if len(c.aliases) > 0 {
-				name += ", " + strings.Join(c.aliases, ", ")
-			}
-			t.addStyled([]string{name, c.summary}, []string{a.style(ansiBold, name), ""})
-		}
-		t.write(a.Stdout)
-
-		a.printf("\nrun 'gnotes help <command>' for detail.\n")
-		return nil
-	},
+func notesHelp(a *App) {
+	a.printf("gwiki notes keeps notes and tasks in a SQLite database, .gwiki/notes.db.\n\n")
+	a.printf("usage: gwiki notes <command> [arguments]\n")
+	a.printf("       gwiki notes -g <command>  use the global notes, not this directory's project\n")
+	a.printf("       gwiki notes               open the notes interface\n\n")
 }
 
 // parseWhen reads a point in the past, for time travel. It accepts a date, a

@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/shakfu/gnotes/internal/search"
+	"github.com/shakfu/gwiki/internal/search"
 )
 
 // PageInfo is a page's summary.
@@ -273,6 +273,13 @@ func (w *Wiki) Backlinks(p string) ([]Link, error) {
 // Broken returns every link whose target is not found.
 func (w *Wiki) Broken() ([]Link, error) {
 	return w.links(`status NOT IN ('ok', '')`)
+}
+
+// BrokenCount is the number of links Broken returns.
+func (w *Wiki) BrokenCount() (int, error) {
+	var n int
+	err := w.db.QueryRow(`SELECT count(*) FROM links WHERE status NOT IN ('ok', '')`).Scan(&n)
+	return n, err
 }
 
 // Check re-examines every file and line link, since a file outside the wiki can

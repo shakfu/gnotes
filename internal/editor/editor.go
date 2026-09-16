@@ -44,7 +44,7 @@ func Start(text string, getenv func(string) string) (*Edit, error) {
 
 	// A .md suffix so the editor turns on markdown highlighting. CreateTemp
 	// makes the file readable by its owner only.
-	f, err := os.CreateTemp("", "gnotes-*.md")
+	f, err := os.CreateTemp("", "gwiki-*.md")
 	if err != nil {
 		return nil, err
 	}

@@ -1,7 +1,7 @@
 // Package store owns everything on disk: locating a project, and reading and
 // writing its SQLite database.
 //
-// The database is .gnotes/gnotes.db, in the working tree, for the user to
+// The database is .gwiki/notes.db, in the working tree, for the user to
 // commit. Its tables hold the notes themselves; a changes table, filled by
 // triggers, records every edit, including edits made with other SQLite
 // clients. Projects that predate the database are imported from their JSONL
@@ -17,33 +17,33 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // Layout constants.
 const (
 	// DirName is the project directory, found by walking up from the working
 	// directory the way git finds .git.
-	DirName = ".gnotes"
+	DirName = ".gwiki"
 
 	// DBFile names the database inside DirName.
-	DBFile = "gnotes.db"
+	DBFile = "notes.db"
 
 	// gitignore keeps the rollback journal, which exists only during a write,
 	// out of commits.
-	gitignore = "gnotes.db-journal\n"
+	gitignore = "notes.db-journal\n"
 
 	// gitattributes names a diff driver for the database. git shows a binary
 	// diff until the driver is configured; see the README.
-	gitattributes = "gnotes.db diff=gnotes\n"
+	gitattributes = "notes.db diff=gwiki\n"
 )
 
 // ErrNotFound reports that no project exists at or above the starting
 // directory.
-var ErrNotFound = errors.New("no gnotes project found; run 'gnotes init'")
+var ErrNotFound = errors.New("no notes database found; run 'gwiki notes init'")
 
 // ErrExists reports an attempt to initialise a project where one already is.
-var ErrExists = errors.New("a gnotes project already exists here")
+var ErrExists = errors.New("a notes database already exists here")
 
 // Config describes a project. It is stored in the database's meta table.
 type Config struct {
@@ -56,7 +56,7 @@ type Config struct {
 
 // Project is a located, open project.
 type Project struct {
-	// Root is the directory holding .gnotes.
+	// Root is the directory holding .gwiki.
 	Root string
 
 	// Path is the database file.

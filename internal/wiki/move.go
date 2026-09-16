@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/shakfu/gnotes/internal/markdown"
+	"github.com/shakfu/gwiki/internal/markdown"
 )
 
 // Edit is one link a move or fix rewrites.

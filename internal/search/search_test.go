@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/shakfu/gnotes/internal/state"
+	"github.com/shakfu/gwiki/internal/state"
 )
 
 func node(id, title, body string, tags ...string) *state.Node {

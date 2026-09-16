@@ -1,4 +1,4 @@
-// Package wiki is a project's markdown wiki: pages under .gnotes/wiki, and a
+// Package wiki is a project's markdown wiki: pages under .gwiki/wiki, and a
 // derived SQLite cache of their titles, headings, links, tags and tasks.
 //
 // The pages are the truth. The cache is rebuilt from them whenever it is
@@ -18,27 +18,30 @@ import (
 
 // Layout, relative to the project root.
 const (
-	DirName   = ".gnotes"
+	DirName   = ".gwiki"
 	PagesDir  = "wiki"
 	CacheFile = "cache.db"
 
 	configFile = "config.json"
+
+	// oldDirName is the directory before the project was renamed from gnotes.
+	oldDirName = ".gnotes"
 )
 
-// gitignored are the .gnotes entries that are local to a clone.
+// gitignored are the .gwiki entries that are local to a clone.
 var gitignored = []string{CacheFile + "*", "drafts/"}
 
 // ErrNotFound reports that no wiki exists at or above a directory.
-var ErrNotFound = errors.New("no gnotes wiki found; run 'gnotes wiki init'")
+var ErrNotFound = errors.New("no gwiki found; run 'gwiki init'")
 
-// Config is .gnotes/config.json.
+// Config is .gwiki/config.json.
 type Config struct {
 	Name string `json:"name"`
 }
 
 // Project is a located wiki.
 type Project struct {
-	// Root holds .gnotes.
+	// Root holds .gwiki.
 	Root string
 
 	// Repo is the top of the enclosing git working tree, or Root outside one.
@@ -54,18 +57,25 @@ func (p *Project) PagesPath() string { return filepath.Join(p.Root, DirName, Pag
 // Cache returns the absolute cache path.
 func (p *Project) Cache() string { return filepath.Join(p.Root, DirName, CacheFile) }
 
-// Discover walks up from dir to the nearest directory holding .gnotes/wiki.
+// Discover walks up from dir to the nearest directory holding .gwiki/wiki.
 func Discover(dir string) (*Project, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
 	}
+	old := ""
 	for {
 		if info, err := os.Stat(filepath.Join(dir, DirName, PagesDir)); err == nil && info.IsDir() {
 			return load(dir)
 		}
+		if info, err := os.Stat(filepath.Join(dir, oldDirName, PagesDir)); err == nil && info.IsDir() && old == "" {
+			old = dir
+		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
+			if old != "" {
+				return nil, fmt.Errorf("%w; %s has %s from before the rename to gwiki: rename it to %s, then run 'gwiki check' for links that name %s", ErrNotFound, old, oldDirName, DirName, oldDirName)
+			}
 			return nil, ErrNotFound
 		}
 		dir = parent

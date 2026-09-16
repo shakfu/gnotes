@@ -8,91 +8,67 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/shakfu/gnotes/internal/display"
-	"github.com/shakfu/gnotes/internal/lsp"
-	"github.com/shakfu/gnotes/internal/mcp"
-	"github.com/shakfu/gnotes/internal/tui"
-	"github.com/shakfu/gnotes/internal/wiki"
+	"github.com/shakfu/gwiki/internal/display"
+	"github.com/shakfu/gwiki/internal/lsp"
+	"github.com/shakfu/gwiki/internal/mcp"
+	"github.com/shakfu/gwiki/internal/tui"
+	"github.com/shakfu/gwiki/internal/wiki"
 )
 
-// cmdWiki groups the commands for the markdown wiki under .gnotes/wiki. They
-// sit beside the notes commands until the wiki replaces them; see
-// docs/dev/wiki-design.md.
-var cmdWiki = &command{
-	name:    "wiki",
-	args:    "<command> [arguments]",
-	summary: "the markdown wiki in .gnotes/wiki",
-	help: `Pages are markdown files under .gnotes/wiki, committed with the project.
-.gnotes/cache.db indexes their titles, headings, links, tags and tasks, and is
-rebuilt from the pages whenever it is missing or stale.
+// The wiki commands, at the top level. The notes database has its own under
+// "gwiki notes"; see app.go.
 
-  init                      create .gnotes/wiki here
-  ls [dir] [-t tag]         list pages
-  show <page>               a page with its links and backlinks
-  search <query> [-n N]     ranked full-text search
-  links <page>              a page's outgoing links and their status
-  backlinks <page>          the links that reach a page
-  check [--fix[=first]]     every broken link, and repairs to choose from;
-                            exit status 1 while any remain
-  orphans                   pages no other page links to
-  tasks [-s status]         checklist items and task pages
-  cache --rebuild           delete the cache and index every page again
-  ui                        the interactive interface
-  mcp                       serve the wiki to an agent over MCP
-  lsp                       serve the wiki to an editor over LSP
-
-  new <title> [--in dir] [--task] [-t tag]... [-m body | --stdin]
-  edit <page> [-m body | --stdin]   replace the body, or open $EDITOR
-  mv <page> <path> [--dry-run]      rename, rewriting links to and from it
-  rm <page> [--force]               delete; refused while pages link to it
-  tag <page> <tag>...    untag <page> <tag>...
-  done <task>    doing <task>    reopen <task>
-  promote <item> [--in dir]         a checklist item becomes a task page
-
-A page is named by its path, its title, its file name, or a fragment. A task is
-a task page, "page:line" for a checklist item, or a fragment of its text. Every
-write checks that the page has not changed since it was read, and refuses
-rather than overwrite. Read commands and mv --dry-run take --json.`,
-	run: func(a *App, args []string) error {
-		if len(args) == 0 {
-			return byName["help"].run(a, []string{"wiki"})
-		}
-		sub, ok := wikiCommands[args[0]]
-		if !ok {
-			return fmt.Errorf("%w: unknown wiki command %q", errUsage, args[0])
-		}
-		if a.Global {
-			return errors.New("the wiki does not support -g yet")
-		}
-		return sub(a, args[1:])
-	},
+func wikiHelp(a *App) {
+	a.printf("gwiki keeps a wiki of markdown pages in your project, under .gwiki/wiki.\n\n")
+	a.printf("usage: gwiki <command> [arguments]\n")
+	a.printf("       gwiki               open the wiki interface\n\n")
+	a.printf("A page is named by its path, its title, its file name, or a fragment. A task\n")
+	a.printf("is a task page, \"page:line\" for a checklist item, or a fragment of its text.\n")
+	a.printf("Every write checks that the page has not changed since it was read.\n\n")
 }
 
-var wikiCommands = map[string]func(*App, []string) error{
-	"init":      wikiInit,
-	"ls":        wikiList,
-	"show":      wikiShow,
-	"search":    wikiSearch,
-	"links":     wikiLinks,
-	"backlinks": wikiBacklinks,
-	"check":     wikiCheck,
-	"orphans":   wikiOrphans,
-	"tasks":     wikiTasks,
-	"cache":     wikiCache,
-	"new":       wikiNew,
-	"edit":      wikiEdit,
-	"mv":        wikiMove,
-	"rm":        wikiRemove,
-	"tag":       func(a *App, args []string) error { return wikiTag(a, args, true) },
-	"untag":     func(a *App, args []string) error { return wikiTag(a, args, false) },
-	"done":      func(a *App, args []string) error { return wikiStatus(a, args, "done") },
-	"doing":     func(a *App, args []string) error { return wikiStatus(a, args, "doing") },
-	"reopen":    func(a *App, args []string) error { return wikiStatus(a, args, "open") },
-	"promote":   wikiPromote,
-	"mcp":       wikiMCP,
-	"ui":        wikiUI,
-	"lsp":       wikiLSP,
-}
+var (
+	cmdWikiInit = &command{name: "init", summary: "create .gwiki/wiki here", run: wikiInit,
+		help: `Creates .gwiki/wiki for pages, .gwiki/config.json, and a .gwiki/.gitignore
+that keeps the cache and drafts out of commits. Pages are committed with the
+project; .gwiki/cache.db is derived from them and rebuilt whenever it is
+missing or stale.`}
+	cmdWikiList      = &command{name: "ls", args: "[dir] [-t tag] [--json]", summary: "list pages", run: wikiList}
+	cmdWikiShow      = &command{name: "show", args: "<page> [--json]", summary: "a page with its links and backlinks", run: wikiShow}
+	cmdWikiSearch    = &command{name: "search", args: "<query> [-n N] [--json]", summary: "ranked full-text search; the last word matches as a prefix", run: wikiSearch}
+	cmdWikiLinks     = &command{name: "links", args: "<page> [--json]", summary: "a page's outgoing links and their status", run: wikiLinks}
+	cmdWikiBacklinks = &command{name: "backlinks", args: "<page> [--json]", summary: "the links that reach a page", run: wikiBacklinks}
+	cmdWikiCheck     = &command{name: "check", args: "[--fix[=first]] [--json]", summary: "broken links; exit status 1 while any remain", run: wikiCheck,
+		help: `Re-examines every link, file and line links included, and lists those whose
+target is missing, ambiguous or out of range. --fix offers repairs for each
+one to choose from; --fix=first applies a repair when it is the only one.`}
+	cmdWikiOrphans = &command{name: "orphans", args: "[--json]", summary: "pages no other page links to", run: wikiOrphans}
+	cmdWikiTasks   = &command{name: "tasks", args: "[-s status] [--json]", summary: "checklist items and task pages", run: wikiTasks}
+	cmdWikiNew     = &command{name: "new", args: "<title> [--in dir] [--task] [-t tag]... [-m body | --stdin]", summary: "create a page, or a task page", run: wikiNew}
+	cmdWikiEdit    = &command{name: "edit", args: "<page> [-m body | --stdin]", summary: "replace a page's body, or open the page in $EDITOR", run: wikiEdit}
+	cmdWikiMove    = &command{name: "mv", args: "<page> <path> [--dry-run] [--json]", summary: "rename a page, rewriting links to and from it", run: wikiMove,
+		help: `Moves a page and rewrites every link to it, and its own relative links, in
+each link's own form. A path ending in / keeps the file name. --dry-run lists
+the changes without making them. The move is refused, and nothing written, if
+a page it edits changed since it was read.`}
+	cmdWikiRemove  = &command{name: "rm", args: "<page> [--force]", summary: "delete a page; refused while pages link to it", run: wikiRemove}
+	cmdWikiTag     = &command{name: "tag", args: "<page> <tag>...", summary: "add tags to a page's front matter", run: func(a *App, args []string) error { return wikiTag(a, args, true) }}
+	cmdWikiUntag   = &command{name: "untag", args: "<page> <tag>...", summary: "remove tags from a page's front matter", run: func(a *App, args []string) error { return wikiTag(a, args, false) }}
+	cmdWikiDone    = &command{name: "done", args: "<task>", summary: "tick a checklist item, or mark a task page done", run: func(a *App, args []string) error { return wikiStatus(a, args, "done") }}
+	cmdWikiDoing   = &command{name: "doing", args: "<task>", summary: "mark a task page in progress", run: func(a *App, args []string) error { return wikiStatus(a, args, "doing") }}
+	cmdWikiReopen  = &command{name: "reopen", args: "<task>", summary: "clear a checklist item, or reopen a task page", run: func(a *App, args []string) error { return wikiStatus(a, args, "open") }}
+	cmdWikiPromote = &command{name: "promote", args: "<item> [--in dir]", summary: "turn a checklist item into a task page linked from where it was", run: wikiPromote}
+	cmdWikiUI      = &command{name: "ui", summary: "the wiki interface (also what a bare 'gwiki' does)", run: wikiUI}
+	cmdWikiMCP     = &command{name: "mcp", summary: "serve the wiki to an agent over the Model Context Protocol", run: wikiMCP,
+		help: `Speaks MCP on standard input and output. Register it with Claude Code from
+inside the project:
+
+    claude mcp add gwiki -- gwiki mcp`}
+	cmdWikiLSP = &command{name: "lsp", summary: "serve the wiki to an editor over the Language Server Protocol", run: wikiLSP,
+		help: `Speaks LSP on standard input and output, started by an editor. See the
+README for Neovim, Helix and Vim configuration.`}
+	cmdWikiCache = &command{name: "cache", args: "--rebuild", summary: "delete the cache and index every page again", run: wikiCache}
+)
 
 // wikiLSP serves the wiki to an editor on standard input and output. The
 // editor starts it; see the README for configuration.
@@ -109,7 +85,7 @@ func wikiLSP(a *App, args []string) error {
 			return nil, err
 		}
 		return wiki.Open(p)
-	}, "gnotes-wiki", Version)
+	}, "gwiki", Version)
 	defer s.Close()
 	return s.Serve(a.Stdin, a.Stdout, a.Stderr)
 }
@@ -124,14 +100,14 @@ func wikiUI(a *App, args []string) error {
 // wikiMCP serves the wiki on standard input and output. Register it with
 // Claude Code from inside the project:
 //
-//	claude mcp add gnotes-wiki -- gnotes wiki mcp
+//	claude mcp add gwiki -- gwiki mcp
 func wikiMCP(a *App, args []string) error {
 	if len(args) > 0 {
 		return fmt.Errorf("%w: mcp takes no arguments", errUsage)
 	}
 	// Standard output carries only protocol frames from here on.
 	return a.withWiki(func(w *wiki.Wiki) error {
-		return mcp.NewWiki(w, "gnotes-wiki", Version).Serve(a.Stdin, a.Stdout, a.Stderr)
+		return mcp.NewWiki(w, "gwiki", Version).Serve(a.Stdin, a.Stdout, a.Stderr)
 	})
 }
 
@@ -176,7 +152,7 @@ func wikiInit(a *App, args []string) error {
 }
 
 func wikiList(a *App, args []string) error {
-	fs := a.flags("wiki ls")
+	fs := a.flags("ls")
 	tag := fs.String("t", "", "only pages with this tag")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	if err := parse(fs, args); err != nil {
@@ -300,7 +276,7 @@ func (a *App) linkTable(links []wiki.Link, from bool) {
 }
 
 func wikiSearch(a *App, args []string) error {
-	fs := a.flags("wiki search")
+	fs := a.flags("search")
 	limit := fs.Int("n", 20, "maximum results")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	if err := parse(fs, args); err != nil {
@@ -404,7 +380,7 @@ func (f *fixFlag) Set(v string) error {
 }
 
 func wikiCheck(a *App, args []string) error {
-	fs := a.flags("wiki check")
+	fs := a.flags("check")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	var fix fixFlag
 	fs.Var(&fix, "fix", "offer repairs for each broken link; =first applies an only offer")
@@ -516,7 +492,7 @@ func linkKey(l wiki.Link) string {
 }
 
 func wikiOrphans(a *App, args []string) error {
-	fs := a.flags("wiki orphans")
+	fs := a.flags("orphans")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	if err := parse(fs, args); err != nil {
 		return err
@@ -535,7 +511,7 @@ func wikiOrphans(a *App, args []string) error {
 }
 
 func wikiTasks(a *App, args []string) error {
-	fs := a.flags("wiki tasks")
+	fs := a.flags("tasks")
 	status := fs.String("s", "", "open, doing or done")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	if err := parse(fs, args); err != nil {
@@ -576,7 +552,7 @@ func wikiTasks(a *App, args []string) error {
 }
 
 func wikiCache(a *App, args []string) error {
-	fs := a.flags("wiki cache")
+	fs := a.flags("cache")
 	rebuild := fs.Bool("rebuild", false, "delete the cache and index every page again")
 	if err := parse(fs, args); err != nil {
 		return err
@@ -598,8 +574,8 @@ func wikiCache(a *App, args []string) error {
 }
 
 func wikiNew(a *App, args []string) error {
-	fs := a.flags("wiki new")
-	dir := fs.String("in", "", "directory under .gnotes/wiki")
+	fs := a.flags("new")
+	dir := fs.String("in", "", "directory under .gwiki/wiki")
 	task := fs.Bool("task", false, "a task page")
 	body := fs.String("m", "", "body text")
 	stdin := fs.Bool("stdin", false, "read the body from standard input")
@@ -631,7 +607,7 @@ func wikiNew(a *App, args []string) error {
 }
 
 func wikiEdit(a *App, args []string) error {
-	fs := a.flags("wiki edit")
+	fs := a.flags("edit")
 	body := fs.String("m", "", "new body")
 	stdin := fs.Bool("stdin", false, "read the body from standard input")
 	if err := parse(fs, args); err != nil {
@@ -686,7 +662,7 @@ func wikiEdit(a *App, args []string) error {
 }
 
 func wikiMove(a *App, args []string) error {
-	fs := a.flags("wiki mv")
+	fs := a.flags("mv")
 	dry := fs.Bool("dry-run", false, "print the changes without writing")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	if err := parse(fs, args); err != nil {
@@ -760,7 +736,7 @@ func (a *App) unrewritten(links []wiki.Link) {
 }
 
 func wikiRemove(a *App, args []string) error {
-	fs := a.flags("wiki rm")
+	fs := a.flags("rm")
 	force := fs.Bool("force", false, "delete even while pages link to it")
 	if err := parse(fs, args); err != nil {
 		return err
@@ -836,7 +812,7 @@ func wikiStatus(a *App, args []string, status string) error {
 }
 
 func wikiPromote(a *App, args []string) error {
-	fs := a.flags("wiki promote")
+	fs := a.flags("promote")
 	dir := fs.String("in", "tasks", "directory for the task page")
 	if err := parse(fs, args); err != nil {
 		return err

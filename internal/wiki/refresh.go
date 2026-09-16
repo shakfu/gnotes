@@ -16,7 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/shakfu/gnotes/internal/markdown"
+	"github.com/shakfu/gwiki/internal/markdown"
 )
 
 // Changes reports what a refresh found.

@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/event"
-	"github.com/shakfu/gnotes/internal/rank"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/event"
+	"github.com/shakfu/gwiki/internal/rank"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // builder assembles a log the way a session would, chaining refs and handing

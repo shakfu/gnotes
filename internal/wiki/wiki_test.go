@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -324,14 +325,14 @@ func TestTasksBacklinksOrphansAndFind(t *testing.T) {
 
 func TestInitKeepsExistingFiles(t *testing.T) {
 	root := t.TempDir()
-	write(t, filepath.Join(root, DirName, ".gitignore"), "gnotes.db-journal")
+	write(t, filepath.Join(root, DirName, ".gitignore"), "notes.db-journal")
 	write(t, filepath.Join(root, DirName, configFile), `{"name": "kept"}`)
 	p, err := Init(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(root, DirName, ".gitignore"))
-	if string(raw) != "gnotes.db-journal\ncache.db*\ndrafts/\n" || p.Config.Name != "kept" {
+	if string(raw) != "notes.db-journal\ncache.db*\ndrafts/\n" || p.Config.Name != "kept" {
 		t.Fatalf(".gitignore = %q, name = %q", raw, p.Config.Name)
 	}
 	if _, err := Init(root); err != nil {
@@ -473,5 +474,99 @@ func TestSnapshotMatchesTheCache(t *testing.T) {
 		if id, ok := w.PageOf(file); ok {
 			t.Errorf("PageOf(%s) = %q", file, id)
 		}
+	}
+}
+
+func TestOverviewQueries(t *testing.T) {
+	w, root := fixture(t)
+	write(t, filepath.Join(root, DirName, PagesDir, "fan.md"), "# Fan\n\n[[Design sketch]] and [[Design sketch#Tokens]]\n")
+	if _, err := w.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two pages link to the sketch; one link each to the rest, by name.
+	hubs, err := w.Hubs(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hubs) != 2 || hubs[0] != (Count{"lexer/design-sketch", 2}) || hubs[1] != (Count{"design-sketch-stem", 1}) {
+		t.Fatalf("hubs = %+v", hubs)
+	}
+	if n, err := w.BrokenCount(); err != nil || n != 7 {
+		broken, _ := w.Broken()
+		t.Fatalf("BrokenCount = %d, %v; Broken has %d", n, err, len(broken))
+	}
+	tags, err := w.TagCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 2 || tags[0] != (Count{"design", 1}) || tags[1] != (Count{"parser", 1}) {
+		t.Fatalf("tags = %+v", tags)
+	}
+	ends, err := w.DeadEnds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, p := range ends {
+		names = append(names, p.Path)
+	}
+	if strings.Join(names, ",") != "a/dup,b/dup,design-sketch-stem,lexer/grammar-ambiguity,orphan,tasks/ship" {
+		t.Fatalf("dead ends = %v", names)
+	}
+
+	// Outside git: modification order, no commit information.
+	sketch := filepath.Join(root, DirName, PagesDir, "lexer", "design-sketch.md")
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(sketch, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	recent, err := w.Recent(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recent) != 3 || recent[0].Path != "lexer/design-sketch" || !recent[0].Modified.Equal(later) {
+		t.Fatalf("recent = %+v", recent)
+	}
+}
+
+func TestRecentReadsGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	w, root := emptyWiki(t)
+	os.RemoveAll(filepath.Join(root, ".git"))
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root, "-c", "user.name=Ada", "-c", "user.email=ada@example.com"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	put(t, w, root, map[string]string{"committed": "# Committed\n", "edited": "# Edited\n"})
+	git("add", ".gwiki/wiki")
+	git("commit", "-q", "-m", "pages")
+	put(t, w, root, map[string]string{"edited": "# Edited again\n", "new": "# New\n"})
+
+	recent, err := w.Recent(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]Change{}
+	for _, c := range recent {
+		by[c.Path] = c
+	}
+	if c := by["committed"]; c.Author != "Ada" || c.Committed.IsZero() || c.Uncommitted {
+		t.Errorf("committed = %+v", c)
+	}
+	if c := by["edited"]; c.Author != "Ada" || !c.Uncommitted {
+		t.Errorf("edited = %+v", c)
+	}
+	if c := by["new"]; c.Author != "" || !c.Uncommitted {
+		t.Errorf("new = %+v", c)
 	}
 }

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/shakfu/gnotes/internal/markdown"
+	"github.com/shakfu/gwiki/internal/markdown"
 	"gopkg.in/yaml.v3"
 )
 
@@ -72,10 +72,10 @@ func (w *Wiki) file(page string) string {
 // commit applies a batch of writes, then refreshes the cache.
 //
 // Every base is checked before anything is written, under the cache's write
-// lock, so gnotes processes writing at once take turns and a batch never lands
+// lock, so gwiki processes writing at once take turns and a batch never lands
 // half-checked. Each page is written to a temporary file, synced and renamed
 // over the old one, so an interrupted write leaves the old page. An editor
-// outside gnotes takes no lock; the checks still refuse to overwrite what it
+// outside gwiki takes no lock; the checks still refuse to overwrite what it
 // saved first.
 func (w *Wiki) commit(writes []fileWrite) error {
 	tx, err := w.db.Begin()

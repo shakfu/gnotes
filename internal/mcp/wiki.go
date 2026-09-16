@@ -8,37 +8,37 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/shakfu/gnotes/internal/wiki"
+	"github.com/shakfu/gwiki/internal/wiki"
 )
 
 // wikiInstructions tell the model what the wiki server is for.
-const wikiInstructions = `This project keeps a wiki of markdown pages under .gnotes/wiki, committed with
+const wikiInstructions = `This project keeps a wiki of markdown pages under .gwiki/wiki, committed with
 the code. Pages link with [[Page title]] or [[path/page#Heading|label]], and
 with markdown links to pages, files and line ranges such as ../../src/lexer.go#L42.
 
-A page is named by its path under .gnotes/wiki, without .md, such as
+A page is named by its path under .gwiki/wiki, without .md, such as
 lexer/design-sketch. Reading tools also accept a title or a fragment; writing
 tools take the exact path.
 
 Every write takes the hash returned when the page was read. If the page changed
 since, nothing is written and the error carries the current hash and content;
-read it, redo the change against it, and retry. Prefer gnotes_edit for changing
+read it, redo the change against it, and retry. Prefer gwiki_edit for changing
 part of a page, so text someone else added is kept.
 
-gnotes does not stage or commit. The developer reviews changes with git.`
+gwiki does not stage or commit. The developer reviews changes with git.`
 
 var wikiRegistry = []registered{
 	// ------------------------------------------------------------ reading
 
 	{
 		tool: tool{
-			Name:  "gnotes_list",
+			Name:  "gwiki_list",
 			Title: "List wiki pages",
 			Description: `List the wiki's pages with their paths, titles, tags and, for task pages,
 status and due date.
 
 Call this to see what exists before creating a page, or to find the path of a
-page to read. Use gnotes_search to find pages by what they say.`,
+page to read. Use gwiki_search to find pages by what they say.`,
 			Annotations: &annotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: ptr(false)},
 			InputSchema: props(nil, object{
 				"dir":   str("Restrict to pages under this directory, such as \"lexer\"."),
@@ -51,7 +51,7 @@ page to read. Use gnotes_search to find pages by what they say.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_search",
+			Name:  "gwiki_search",
 			Title: "Search the wiki",
 			Description: `Search the full text of every page: titles, headings, tags and bodies.
 
@@ -69,13 +69,13 @@ are ranked, title matches first, each with the fragment that matched.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_read",
+			Name:  "gwiki_read",
 			Title: "Read a page",
 			Description: `Read one page: its source exactly as stored, its hash, headings, outgoing
 links with their status, and the links from other pages that reach it.
 
 Call this before changing a page. Every write needs the hash returned here, and
-gnotes_edit needs text copied exactly from the source.`,
+gwiki_edit needs text copied exactly from the source.`,
 			Annotations: &annotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: ptr(false)},
 			InputSchema: props([]string{"page"}, object{
 				"page": str("The page's path, its title, or a distinctive fragment of either."),
@@ -86,14 +86,14 @@ gnotes_edit needs text copied exactly from the source.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_check",
+			Name:  "gwiki_check",
 			Title: "Find broken links",
 			Description: `List broken links: links to missing pages, headings or files, ambiguous wiki
 links, and line ranges past the end of a file. Each comes with the repairs
-gnotes can offer.
+gwiki can offer.
 
 Call this after renaming or deleting things, or before finishing work on the
-wiki. Apply a repair with gnotes_fix_link.`,
+wiki. Apply a repair with gwiki_fix_link.`,
 			Annotations: &annotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: ptr(false)},
 			InputSchema: props(nil, object{
 				"page":  str("Restrict to links on this page, by path."),
@@ -105,13 +105,13 @@ wiki. Apply a repair with gnotes_fix_link.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_tasks",
+			Name:  "gwiki_tasks",
 			Title: "List tasks",
 			Description: `List tasks: checklist items ("- [ ] text") in any page, and task pages, which
 have type: task in their front matter.
 
 Call this to see what is outstanding. A checklist item is named page:line; a
-task page by its path. Pass either to gnotes_set_task.`,
+task page by its path. Pass either to gwiki_set_task.`,
 			Annotations: &annotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: ptr(false)},
 			InputSchema: props(nil, object{
 				"status": enum("Restrict to tasks with this status. Checklist items are open or done.", "open", "doing", "done"),
@@ -125,7 +125,7 @@ task page by its path. Pass either to gnotes_set_task.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_create",
+			Name:  "gwiki_create",
 			Title: "Create a page",
 			Description: `Create a page, or a task page. Its file name is made from the title; a name
 already taken gets a numeric suffix. The page starts with the title as a
@@ -136,7 +136,7 @@ new page's path and hash.`,
 			Annotations: &annotations{DestructiveHint: ptr(false), OpenWorldHint: ptr(false)},
 			InputSchema: props([]string{"title"}, object{
 				"title": str("The page's title, on one line."),
-				"dir":   str("Directory under .gnotes/wiki to create it in, such as \"lexer\". Omit for the top."),
+				"dir":   str("Directory under .gwiki/wiki to create it in, such as \"lexer\". Omit for the top."),
 				"task":  boolean("Create a task page, with type: task and status: open."),
 				"tags":  strList("Tags for the front matter."),
 				"body":  str("Markdown after the title heading."),
@@ -147,13 +147,13 @@ new page's path and hash.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_edit",
+			Name:  "gwiki_edit",
 			Title: "Replace text in a page",
 			Description: `Replace one exact piece of a page's source with new text.
 
 This is the way to change part of a page. The old text must occur exactly once;
 include enough of the surrounding text to make it unique. The base hash must be
-the page's current hash, from gnotes_read or the last write. Returns the new
+the page's current hash, from gwiki_read or the last write. Returns the new
 hash.`,
 			Annotations: &annotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(false)},
 			InputSchema: props([]string{"page", "base", "old", "new"}, object{
@@ -168,11 +168,11 @@ hash.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_write",
+			Name:  "gwiki_write",
 			Title: "Replace a whole page",
 			Description: `Replace a page's whole source, front matter included, with new content.
 
-Use gnotes_edit instead unless most of the page changes. The base hash must be
+Use gwiki_edit instead unless most of the page changes. The base hash must be
 the page's current hash; a page changed since is refused, so another writer's
 text is never lost silently. Returns the new hash.`,
 			Annotations: &annotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(false)},
@@ -187,7 +187,7 @@ text is never lost silently. Returns the new hash.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_rename",
+			Name:  "gwiki_rename",
 			Title: "Rename a page",
 			Description: `Move a page to a new path and rewrite the links to it and its own relative
 links, each in its own form.
@@ -207,20 +207,20 @@ reported, not rewritten.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_fix_link",
+			Name:  "gwiki_fix_link",
 			Title: "Repair a broken link",
-			Description: `Apply one of the repairs gnotes_check offered for a broken link, rewriting
+			Description: `Apply one of the repairs gwiki_check offered for a broken link, rewriting
 only the link's destination.
 
-Pass the page, line and link as gnotes_check listed them, and the new
+Pass the page, line and link as gwiki_check listed them, and the new
 destination of the chosen repair. A wiki link that showed its target keeps
 showing the old text as its label.`,
 			Annotations: &annotations{DestructiveHint: ptr(false), OpenWorldHint: ptr(false)},
 			InputSchema: props([]string{"page", "line", "link", "new"}, object{
 				"page": str("The path of the page holding the link."),
 				"line": object{"type": "integer", "description": "The link's line."},
-				"link": str("The link as gnotes_check wrote it, such as [[Old title]] or ../src/x.go."),
-				"new":  str("The new destination, one of those gnotes_check offered."),
+				"link": str("The link as gwiki_check wrote it, such as [[Old title]] or ../src/x.go."),
+				"new":  str("The new destination, one of those gwiki_check offered."),
 			}),
 		},
 		run: (*Server).wikiFixLink,
@@ -228,12 +228,12 @@ showing the old text as its label.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_set_task",
+			Name:  "gwiki_set_task",
 			Title: "Change a task's status",
 			Description: `Set a task page's status, or tick or clear a checklist item.
 
 A checklist item is open or done; a task page can also be doing. Pass the
-item's text as gnotes_tasks listed it, so a line that now holds a different
+item's text as gwiki_tasks listed it, so a line that now holds a different
 item is refused.`,
 			Annotations: &annotations{DestructiveHint: ptr(false), IdempotentHint: true, OpenWorldHint: ptr(false)},
 			InputSchema: props([]string{"task", "status"}, object{
@@ -253,7 +253,7 @@ func (s *Server) pagePath(ref string) (string, error) {
 		return "", err
 	}
 	if _, _, err := s.wiki.Read(p); err != nil {
-		return "", fmt.Errorf("no page at %q; gnotes_list and gnotes_search give paths", p)
+		return "", fmt.Errorf("no page at %q; gwiki_list and gwiki_search give paths", p)
 	}
 	return p, nil
 }
@@ -578,7 +578,7 @@ func (s *Server) wikiWrite(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	if a.Base == "" {
-		return "", errors.New("base is the hash from gnotes_read; use gnotes_create for a new page")
+		return "", errors.New("base is the hash from gwiki_read; use gwiki_create for a new page")
 	}
 	if err := s.wiki.Write(p, []byte(a.Content), a.Base); err != nil {
 		return "", writeErr(err)
@@ -682,11 +682,11 @@ func (s *Server) wikiFixLink(raw json.RawMessage) (string, error) {
 			news = append(news, o.New)
 		}
 		if len(news) == 0 {
-			return "", fmt.Errorf("gnotes offers no repair for %s; change it with gnotes_edit", a.Link)
+			return "", fmt.Errorf("gwiki offers no repair for %s; change it with gwiki_edit", a.Link)
 		}
 		return "", fmt.Errorf("%q is not an offered repair; the offers are: %s", a.New, strings.Join(news, ", "))
 	}
-	return "", fmt.Errorf("no broken link %s on line %d of %s; run gnotes_check again", a.Link, a.Line, p)
+	return "", fmt.Errorf("no broken link %s on line %d of %s; run gwiki_check again", a.Link, a.Line, p)
 }
 
 func (s *Server) wikiSetTask(raw json.RawMessage) (string, error) {
@@ -709,7 +709,7 @@ func (s *Server) wikiSetTask(raw json.RawMessage) (string, error) {
 			return "", err
 		}
 		if a.Text == "" {
-			return "", errors.New("pass the item's text as gnotes_tasks listed it")
+			return "", errors.New("pass the item's text as gwiki_tasks listed it")
 		}
 	} else {
 		p, err := s.pagePath(a.Task)

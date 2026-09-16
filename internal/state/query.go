@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/rank"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/rank"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // Get returns a node by exact id, or nil. A superseded workspace id resolves

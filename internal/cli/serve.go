@@ -14,8 +14,8 @@ import (
 	"os/exec"
 	"runtime"
 
-	"github.com/shakfu/gnotes/internal/store"
-	"github.com/shakfu/gnotes/internal/web"
+	"github.com/shakfu/gwiki/internal/store"
+	"github.com/shakfu/gwiki/internal/web"
 )
 
 var cmdServe = &command{
@@ -27,7 +27,7 @@ var cmdServe = &command{
 third view of the same project, alongside the command line and the interactive
 interface, and it updates by itself when any of them writes.
 
-The whole page is compiled into the gnotes binary, so there is nothing to
+The whole page is compiled into the gwiki binary, so there is nothing to
 install and it works with no network at all.
 
 The address carries an access token. That token, not the loopback binding, is
@@ -39,13 +39,13 @@ No browser is opened when there is evidently no desktop to open it on: over
 SSH, under a continuous integration runner, or on a Unix session with no
 display. The address is printed either way, and --open forces the attempt.
 
-    gnotes serve
-    gnotes serve --no-open
-    gnotes serve --addr 127.0.0.1:7777`,
+    gwiki notes serve
+    gwiki notes serve --no-open
+    gwiki notes serve --addr 127.0.0.1:7777`,
 	run: func(a *App, args []string) error {
 		fs := a.flags("serve")
 		addr := fs.String("addr", "127.0.0.1:0", "address to listen on")
-		token := fs.String("token", a.Env("GNOTES_TOKEN"), "use this access token instead of a generated one; $GNOTES_TOKEN keeps it out of the shell history")
+		token := fs.String("token", a.Env("GWIKI_TOKEN"), "use this access token instead of a generated one; $GWIKI_TOKEN keeps it out of the shell history")
 		noOpen := fs.Bool("no-open", false, "print the address without opening a browser")
 		forceOpen := fs.Bool("open", false, "open a browser even where one is not expected")
 		if err := parse(fs, args); err != nil {
@@ -55,12 +55,12 @@ display. The address is printed either way, and --open forces the attempt.
 		s, err := a.open()
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("%w\n\nrun 'gnotes init' here to start one", err)
+				return fmt.Errorf("%w\n\nrun 'gwiki notes init' here to start one", err)
 			}
 			return err
 		}
 		if s.State.Workspace == "" {
-			return errors.New("this project has no workspace yet; run 'gnotes init'")
+			return errors.New("this project has no workspace yet; run 'gwiki notes init'")
 		}
 		a.warnProblems(s)
 
@@ -84,7 +84,7 @@ display. The address is printed either way, and --open forces the attempt.
 		}
 
 		url := srv.URL(ln.Addr().String())
-		a.printf("%s  %s\n", a.style(ansiBold, "gnotes"), s.Project.Config.Name)
+		a.printf("%s  %s\n", a.style(ansiBold, "gwiki"), s.Project.Config.Name)
 		a.printf("%s\n", url)
 		if tcp, ok := ln.Addr().(*net.TCPAddr); ok && !tcp.IP.IsLoopback() {
 			a.printf("%s\n", a.style(ansiRed, "warning: listening beyond this machine over plain HTTP; anyone who sees the address can read and change these notes"))
@@ -113,7 +113,7 @@ display. The address is printed either way, and --open forces the attempt.
 // hasDesktop reports whether there is evidently a desktop session to open a
 // browser on.
 //
-// Getting this wrong is worse than not trying. A "gnotes serve" run over SSH
+// Getting this wrong is worse than not trying. A "gwiki notes serve" run over SSH
 // would otherwise launch a browser on the far machine, where nobody can see
 // it, and on a headless box the opener can hang holding the terminal.
 func hasDesktop(env func(string) string) bool {

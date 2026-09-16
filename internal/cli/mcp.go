@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/shakfu/gnotes/internal/mcp"
-	"github.com/shakfu/gnotes/internal/store"
+	"github.com/shakfu/gwiki/internal/mcp"
+	"github.com/shakfu/gwiki/internal/store"
 )
 
 var cmdMCP = &command{
@@ -18,7 +18,7 @@ starts it, talks to it, and stops it by closing the connection.
 
 Register it with Claude Code from inside the project:
 
-    claude mcp add gnotes -- gnotes mcp
+    claude mcp add gwiki-notes -- gwiki notes mcp
 
 The agent gets the same rules as every other view: task fields are refused on
 notes, deletion is recoverable, and writes go to the same database the command
@@ -38,17 +38,17 @@ where the client will surface them if it shows anything at all.`,
 		s, err := a.open()
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("%w\n\nrun 'gnotes init' in the project you want the agent to see", err)
+				return fmt.Errorf("%w\n\nrun 'gwiki notes init' in the project you want the agent to see", err)
 			}
 			return err
 		}
 		if s.State.Workspace == "" {
-			return errors.New("this project has no workspace yet; run 'gnotes init'")
+			return errors.New("this project has no workspace yet; run 'gwiki notes init'")
 		}
 		a.warnProblems(s)
 
 		// Standard output is the protocol channel and carries nothing else, so
 		// nothing in this command prints to it before Serve.
-		return mcp.New(s, "gnotes", Version).Serve(a.Stdin, a.Stdout, a.Stderr)
+		return mcp.New(s, "gwiki", Version).Serve(a.Stdin, a.Stdout, a.Stderr)
 	},
 }

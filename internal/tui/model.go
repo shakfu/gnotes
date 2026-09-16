@@ -15,8 +15,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/shakfu/gnotes/internal/session"
-	"github.com/shakfu/gnotes/internal/state"
+	"github.com/shakfu/gwiki/internal/session"
+	"github.com/shakfu/gwiki/internal/state"
 )
 
 // pane names the focused column.

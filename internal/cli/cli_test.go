@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/event"
-	"github.com/shakfu/gnotes/internal/rank"
-	"github.com/shakfu/gnotes/internal/store"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/event"
+	"github.com/shakfu/gwiki/internal/rank"
+	"github.com/shakfu/gwiki/internal/store"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // fixture drives the whole command line in-process: no subprocess, no
@@ -22,6 +22,9 @@ type fixture struct {
 	t   *testing.T
 	dir string
 	now time.Time
+
+	// prefix precedes every command: "notes" for the notes fixture.
+	prefix []string
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -29,12 +32,13 @@ func newFixture(t *testing.T) *fixture {
 
 	// The identity lives outside any project, so it has to be redirected or
 	// the tests would read and overwrite the developer's own.
-	t.Setenv("GNOTES_HOME", t.TempDir())
+	t.Setenv("GWIKI_HOME", t.TempDir())
 
 	f := &fixture{
-		t:   t,
-		dir: t.TempDir(),
-		now: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC),
+		t:      t,
+		dir:    t.TempDir(),
+		now:    time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC),
+		prefix: []string{"notes"},
 	}
 	f.mustRun("init", "demo", "--user", "sa")
 	return f
@@ -53,7 +57,7 @@ func (f *fixture) run(args ...string) (stdout, stderr string, code int) {
 		Now:    func() time.Time { return f.now },
 		Color:  false,
 	}
-	code = app.Run(args)
+	code = app.Run(append(append([]string{}, f.prefix...), args...))
 	return out.String(), errBuf.String(), code
 }
 
@@ -70,7 +74,7 @@ func (f *fixture) runIn(stdin string, args ...string) (string, string, int) {
 		Now:    func() time.Time { return f.now },
 		Color:  false,
 	}
-	code := app.Run(args)
+	code := app.Run(append(append([]string{}, f.prefix...), args...))
 	return out.String(), errBuf.String(), code
 }
 
@@ -79,7 +83,7 @@ func (f *fixture) mustRun(args ...string) string {
 	f.t.Helper()
 	stdout, stderr, code := f.run(args...)
 	if code != 0 {
-		f.t.Fatalf("gnotes %s: exit %d\nstdout: %s\nstderr: %s",
+		f.t.Fatalf("gwiki %s: exit %d\nstdout: %s\nstderr: %s",
 			strings.Join(args, " "), code, stdout, stderr)
 	}
 	return stdout
@@ -122,7 +126,7 @@ func TestIdentityIsSharedBetweenProjects(t *testing.T) {
 	other := t.TempDir()
 	var out, errBuf bytes.Buffer
 	app := &App{Stdout: &out, Stderr: &errBuf, Stdin: strings.NewReader(""), Dir: other, Now: func() time.Time { return f.now }}
-	if code := app.Run([]string{"init", "second"}); code != 0 {
+	if code := app.Run([]string{"notes", "init", "second"}); code != 0 {
 		t.Fatalf("init in a second project failed: %s%s", out.String(), errBuf.String())
 	}
 	if strings.Contains(out.String(), "Your name:") {
@@ -535,15 +539,15 @@ func TestUsageErrorsExitTwo(t *testing.T) {
 }
 
 func TestCommandsOutsideAProjectExplainThemselves(t *testing.T) {
-	t.Setenv("GNOTES_HOME", t.TempDir())
+	t.Setenv("GWIKI_HOME", t.TempDir())
 
 	var out, errBuf bytes.Buffer
 	app := &App{Stdout: &out, Stderr: &errBuf, Stdin: strings.NewReader(""), Dir: t.TempDir(), Now: time.Now}
 
-	if code := app.Run([]string{"ls"}); code == 0 {
+	if code := app.Run([]string{"notes", "ls"}); code == 0 {
 		t.Fatal("ls succeeded outside a project")
 	}
-	if !strings.Contains(errBuf.String(), "gnotes init") {
+	if !strings.Contains(errBuf.String(), "gwiki notes init") {
 		t.Fatalf("the error does not say what to do: %s", errBuf.String())
 	}
 }
@@ -559,7 +563,7 @@ func TestHelp(t *testing.T) {
 	}
 
 	// Every command must have its own page, or help is a lie.
-	for _, c := range commands {
+	for _, c := range notesTable.list {
 		out, stderr, code := f.run("help", c.name)
 		if code != 0 {
 			t.Errorf("help %s: exit %d %s", c.name, code, stderr)
@@ -567,6 +571,16 @@ func TestHelp(t *testing.T) {
 		if !strings.Contains(out, c.summary) {
 			t.Errorf("help %s does not print its summary", c.name)
 		}
+	}
+	wiki := &fixture{t: t, dir: f.dir, now: f.now}
+	for _, c := range wikiTable.list {
+		out, stderr, code := wiki.run("help", c.name)
+		if code != 0 || !strings.Contains(out, c.summary) || !strings.Contains(out, "usage: gwiki "+c.name) {
+			t.Errorf("gwiki help %s: exit %d %s\n%s", c.name, code, stderr, out)
+		}
+	}
+	if out := wiki.mustRun("help"); !strings.Contains(out, "notes") || !strings.Contains(out, "backlinks") {
+		t.Errorf("gwiki help:\n%s", out)
 	}
 }
 
@@ -749,10 +763,10 @@ func TestOutsideControlCharactersAreNotPrinted(t *testing.T) {
 	for _, args := range [][]string{{"ls"}, {"show", id[len(id)-6:]}, {"log"}, {"search", "evil"}} {
 		out := f.mustRun(args...)
 		if strings.ContainsAny(out, "\x1b\x07") {
-			t.Errorf("gnotes %s printed a control character: %q", strings.Join(args, " "), out)
+			t.Errorf("gwiki %s printed a control character: %q", strings.Join(args, " "), out)
 		}
 		if strings.Contains(out, "\nforged row") {
-			t.Errorf("gnotes %s let a title break its line: %q", strings.Join(args, " "), out)
+			t.Errorf("gwiki %s let a title break its line: %q", strings.Join(args, " "), out)
 		}
 	}
 }
@@ -795,7 +809,7 @@ func TestRefusedInitLeavesTheIdentityAlone(t *testing.T) {
 // identity and succeeds.
 func TestInitOnAFreshCloneOnlySetsTheIdentity(t *testing.T) {
 	f := newFixture(t)
-	t.Setenv("GNOTES_HOME", t.TempDir())
+	t.Setenv("GWIKI_HOME", t.TempDir())
 
 	stdout, stderr, code := f.run("init", "--user", "bob")
 	if code != 0 {
@@ -818,7 +832,7 @@ func TestInitRefusesToNestAProject(t *testing.T) {
 	if _, stderr, code := f.run("init", "inner"); code == 0 || !strings.Contains(stderr, "already covers") {
 		t.Fatalf("exit %d, stderr %q; want the nested init refused", code, stderr)
 	}
-	if _, err := os.Stat(filepath.Join(sub, ".gnotes")); err == nil {
+	if _, err := os.Stat(filepath.Join(sub, ".gwiki")); err == nil {
 		t.Fatal("a nested project was created")
 	}
 }
@@ -827,7 +841,7 @@ func TestHelpFlagsAndUsageErrors(t *testing.T) {
 	f := newFixture(t)
 
 	stdout, _, code := f.run("tag", "x", "--help")
-	if code != 0 || !strings.Contains(stdout, "usage: gnotes tag") {
+	if code != 0 || !strings.Contains(stdout, "usage: gwiki notes tag") {
 		t.Fatalf("tag --help: exit %d, stdout %q", code, stdout)
 	}
 	if _, stderr, code := f.run("ls", "--bogus"); code != 2 || !strings.Contains(stderr, "bogus") {
@@ -840,7 +854,7 @@ func TestHelpFlagsAndUsageErrors(t *testing.T) {
 
 func TestTyposGetASuggestion(t *testing.T) {
 	for typed, want := range map[string]string{"shwo": "show", "sreach": "search", "tga": "tag"} {
-		if got := closest(typed); got != want {
+		if got := notesTable.closest(typed); got != want {
 			t.Errorf("closest(%q) = %q, want %q", typed, got, want)
 		}
 	}
@@ -867,7 +881,7 @@ func TestMovePlacementIsValidated(t *testing.T) {
 		{"mv", "here", "work", "--after", "there"}, // still elsewhere
 	} {
 		if _, _, code := f.run(args...); code == 0 {
-			t.Errorf("gnotes %s succeeded", strings.Join(args, " "))
+			t.Errorf("gwiki %s succeeded", strings.Join(args, " "))
 		}
 	}
 	f.mustRun("mv", "here", "home", "--before", "there")
@@ -927,7 +941,7 @@ func TestGlobalNotesNeedTheFlag(t *testing.T) {
 	global := filepath.Join(t.TempDir(), "notes")
 
 	out := f.mustRun("-g", "init", global)
-	if !strings.Contains(out, "global notes: "+global) || !strings.Contains(out, "gnotes -g note") {
+	if !strings.Contains(out, "global notes: "+global) || !strings.Contains(out, "gwiki notes -g note") {
 		t.Fatalf("-g init did not report the location:\n%s", out)
 	}
 	f.mustRun("-g", "note", "global entry")
@@ -941,7 +955,7 @@ func TestGlobalNotesNeedTheFlag(t *testing.T) {
 
 	// Outside any project, a command without -g still refuses.
 	f.dir = t.TempDir()
-	if _, stderr, code := f.run("ls"); code == 0 || !strings.Contains(stderr, "gnotes init") {
+	if _, stderr, code := f.run("ls"); code == 0 || !strings.Contains(stderr, "gwiki notes init") {
 		t.Fatalf("ls outside a project: exit %d, stderr %q; want the usual refusal", code, stderr)
 	}
 	if out := f.mustRun("-g", "ls"); !strings.Contains(out, "global entry") {
@@ -989,7 +1003,7 @@ func TestGlobalInitAdoptsAnExistingProject(t *testing.T) {
 
 func TestGlobalWithoutSetupSaysHow(t *testing.T) {
 	f := newFixture(t)
-	if _, stderr, code := f.run("-g", "ls"); code == 0 || !strings.Contains(stderr, "gnotes -g init") {
+	if _, stderr, code := f.run("-g", "ls"); code == 0 || !strings.Contains(stderr, "gwiki notes -g init") {
 		t.Fatalf("exit %d, stderr %q; want a pointer to -g init", code, stderr)
 	}
 }

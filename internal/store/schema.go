@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/shakfu/gnotes/internal/state"
+	"github.com/shakfu/gwiki/internal/state"
 )
 
 // schemaVersion is stored in PRAGMA user_version.
@@ -37,8 +37,8 @@ func (t setTable) values(n *state.Node) []string {
 	return n.Assignees
 }
 
-// The writer row carries the time and author of the transaction gnotes is
-// committing, for the history triggers to read. gnotes sets it at the start of
+// The writer row carries the time and author of the transaction gwiki is
+// committing, for the history triggers to read. gwiki sets it at the start of
 // a write and clears it before committing, so a write from any other client
 // finds it empty and is recorded at the wall clock with no author.
 const (

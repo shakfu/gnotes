@@ -11,7 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // Version is the schema version stamped on every persisted line. Bump it only
@@ -70,7 +70,7 @@ const (
 )
 
 // known is the runtime registry of understood actions. An event naming an
-// action outside this set was written by a newer gnotes; replay skips it rather
+// action outside this set was written by a newer gwiki; replay skips it rather
 // than failing, so a downgrade degrades instead of breaking. The log is never
 // rewritten, so upgrading restores the skipped events.
 var known = map[Action]bool{

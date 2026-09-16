@@ -11,8 +11,8 @@
 ### Global notes
 
 - [ ] Nothing marks the global notes in the terminal interface or browser view beyond the workspace name. A new project is named `global`; an adopted clone keeps its own name.
-- [ ] `-g` is read only before the command. `gnotes ls -g` fails with "flag provided but not defined: -g" and no hint.
-- [ ] A quoted `~` is not expanded: `gnotes -g init "~/notes"` creates a directory named `~`.
+- [ ] `-g` is read only before the command. `gwiki ls -g` fails with "flag provided but not defined: -g" and no hint.
+- [ ] A quoted `~` is not expanded: `gwiki -g init "~/notes"` creates a directory named `~`.
 
 ## Ideas
 

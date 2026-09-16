@@ -1,27 +1,35 @@
-# gnotes
+# gwiki
 
-Notes and tasks for one person, kept in a SQLite database in the repository they belong to.
+A wiki of markdown pages kept in the repository it documents.
 
-gnotes stores everything in `.gnotes/gnotes.db`, which you commit like any other file. Notes and tasks are rows with typed columns, so any SQLite client can read, query and edit them. Every change, including one made outside gnotes, is recorded, so you can look at the project as it stood at any past moment.
+Pages live in `.gwiki/wiki` and are committed with the code. They link to each other with `[[Page title]]` or markdown links, and to source files and line ranges such as `../../src/lexer.go#L42`. gwiki indexes the links, headings, tags and tasks in a cache it rebuilds from the pages, reports broken links, and rewrites links when a page moves.
 
-It is built for one user. git cannot merge two copies of a database file, so edits made on two machines without committing in between cannot be combined.
+Pages are plain files, so any editor works. gwiki adds:
 
-Notes and tasks are distinct kinds sharing one tree. A note has a title, a markdown body and tags. A task has those plus a status, a priority, a due date and assignees. They sit side by side in a notebook, in whatever order you put them.
+- a terminal interface: an overview of the wiki, a page tree, a reader that follows links, backlinks, search, broken links and tasks;
+- a language server, so Neovim, Helix or Vim complete links, flag broken ones and follow them;
+- an MCP server, so a code agent can read and edit pages without overwriting yours;
+- a command line for all of the above.
 
-Four ways in: a command line, an interactive terminal interface, a browser page compiled into the binary, and an MCP server for agents. All four write through the same layer, so none of them can mean something different by an operation, and each notices when another writes.
+All of it is one executable. Every write checks that the page has not changed since it was read, and refuses rather than overwrite.
 
 ```
-parser rewrite                                                          1 open
- work                1| -- design sketch                              #design
- personal             | [ ] fix the lexer      ! #bug #parser 2026-08-21 @sa
-                      | [x] benchmark it                              #parser
-n note  t task  space done  e edit  d delete  / search  : command  ? help
+myproject  overview
+Recent changes                                        | Health
+  Design sketch  lexer/design-sketch  3h ago  Ada     |   broken links   2
+  Grammar  lexer/grammar  1d ago  Ada  uncommitted    |   orphan pages   1
+                                                      |   dead ends      4
+Tasks  5 open, 1 overdue, 2 due within a week         |
+  Ship it  tasks/ship  overdue 2026-09-01             | Structure  38 pages
+  benchmark the lexer  lexer/design-sketch:12         |   lexer/  12
+                                                      |   #parser  7
+j k move  h l column  enter open  / search  ^p open  n new  c broken  t tasks  ? help
 ```
 
 ## Install
 
 ```sh
-go install github.com/shakfu/gnotes/cmd/gnotes@latest
+go install github.com/shakfu/gwiki/cmd/gwiki@latest
 ```
 
 Or from a clone: `make install`.
@@ -30,29 +38,160 @@ Or from a clone: `make install`.
 
 ```sh
 cd your-project
-gnotes init                       # asks your name the first time only
-gnotes note "design sketch" -m "The lexer tokenizes input."
-gnotes task "fix the lexer" -t bug -d friday -p high
-gnotes                            # open the interactive interface
+gwiki init                                  # .gwiki/wiki, committed; .gwiki/cache.db, ignored
+gwiki new "Design sketch" --in lexer -m "The lexer tokenizes input. See [[Grammar]]."
+gwiki                                       # the interface, on the overview
 ```
 
-## Global notes
+## Pages and links
+
+A page is a markdown file under `.gwiki/wiki`; its path without `.md` names it, such as `lexer/design-sketch`. Its title is the front matter `title`, else its first level-one heading, else its file name. Front matter can also set `tags`, and `type: task` with `status`, `priority` and `due` for a task page. Checklist items (`- [ ] text`) in any page are tasks too.
+
+| link | reaches |
+|---|---|
+| `[[Design sketch]]` | a page by path, then title, then file name |
+| `[[lexer/design-sketch#Tokens\|the tokens]]` | a heading, with a label |
+| `[notes](../grammar.md#rules)` | a page by relative path |
+| `[lexer](../../src/lexer.go#L42-L50)` | a file, or a line range in it |
+
+A reference names a page by its path, its title, its file name, or a fragment; an ambiguous one lists the candidates.
+
+## The interface
+
+Run `gwiki` with no arguments. It opens on the overview:
+
+- **Recent changes**, with the author and date of the last commit to each page, and pages git has not recorded;
+- **Tasks**, overdue and due soon first;
+- **Health**: broken links, orphan pages that nothing links to, and dead ends that link to nothing;
+- **Structure**: directories, tags and the most-linked pages.
+
+Every row opens its page or list. `O` returns to the overview from anywhere.
+
+| key | |
+|---|---|
+| `j` `k` `g` `G` | move |
+| `h` `l` | between the tree and the reader, or the overview's columns |
+| `tab` `shift-tab` | next and previous link in the page |
+| `enter` | open, or follow the selected link; a file link opens `$EDITOR` at the line |
+| `backspace` | back |
+| `b` | backlinks |
+| `/` | search as you type |
+| `ctrl-p` | open a page by title or path |
+| `c` `f` | broken links; repairs for one |
+| `t` `space` | tasks; toggle one |
+| `n` `e` `r` | new page, edit the page here, move with links rewritten |
+| `E` | edit the page in `$EDITOR` instead |
+| `?` | every key |
+
+Pages changed outside the interface, by an editor, git or an agent, reload within a second.
+
+### The editor
+
+`e` opens the page in gwiki's own editor, which is modal and follows vim: modes, counts, `d`, `c`, `y`, `>` and `<` with motions and text objects, quotes and brackets, `.`, `u` and `ctrl-r`, registers, `/` search and `:s`. Two additions are for the wiki: `il` and `al` select the link at the cursor, and `ctrl-space` ticks a checklist item.
+
+```
+:w   write the page      ctrl-]  follow the link under the cursor
+:q   leave the editor    ctrl-o  back
+:w!  write over a page saved elsewhere       :e!  load it and lose your edits
+:preview   the page as the reader draws it   :check  the broken links in it
+```
+
+In insert mode, `enter` continues a list, numbering and checkboxes included, and `ctrl-n` completes a page after `[[`, a heading after `#`, or a path after `](`. The buffer is autosaved to `.gwiki/drafts/`, and offered again if the editor is interrupted. A write is refused when the page changed on disk since it was read.
+
+Macros, marks, blockwise visual, `:g`, folds and mappings are not there; `?` lists what is.
+
+## Editors
+
+`gwiki lsp` is a language server in the same executable. An editor starts it and gets, in wiki pages: `[[` and `](` completion of pages, headings and paths; warnings on broken links; go to definition to follow a link; references for backlinks; hover; heading outlines; rename of a page with its links rewritten; and quick fixes for broken links. Open buffers are checked as typed, before saving.
+
+Neovim 0.11 or later:
+
+```lua
+vim.lsp.config('gwiki', {
+  cmd = { 'gwiki', 'lsp' },
+  filetypes = { 'markdown' },
+  root_markers = { '.gwiki' },
+})
+vim.lsp.enable('gwiki')
+```
+
+Its default LSP keys then apply: `ctrl-]` follows a link, `grr` lists backlinks, `grn` renames the page, `gra` offers fixes, `K` hovers, `ctrl-x ctrl-o` completes.
+
+Helix, in `.helix/languages.toml` or `~/.config/helix/languages.toml`:
+
+```toml
+[language-server.gwiki]
+command = "gwiki"
+args = ["lsp"]
+
+[[language]]
+name = "markdown"
+language-servers = ["gwiki"]
+```
+
+Vim has no built-in LSP client; with [vim-lsp](https://github.com/prabirshrestha/vim-lsp):
+
+```vim
+au User lsp_setup call lsp#register_server({'name': 'gwiki', 'cmd': {server_info->['gwiki', 'lsp']}, 'allowlist': ['markdown']})
+```
+
+A rename returns edits for the editor to apply, so the pages it changes are left modified and unsaved; save them all (`:wall`).
+
+## Agents
 
 ```sh
-gnotes -g init                    # a project of your own, in ~/notes
-gnotes -g init ~/work/notes       # or wherever you choose
-gnotes -g task "renew passport"   # from any directory
-gnotes -g                         # the interactive interface, on global notes
+claude mcp add gwiki -- gwiki mcp
+```
+
+The agent gets tools to list, search and read pages, create them, edit exact text or write whole pages against the hash it read, rename pages, list and repair broken links, and change task status. A write against a stale hash is refused and returns the current page to retry against. There is no delete tool.
+
+## Commands
+
+```sh
+gwiki ls lexer                              # pages under a directory
+gwiki show "design sketch"                  # a page, its links and backlinks
+gwiki search tokeniz                        # ranked; the last word matches as a prefix
+gwiki links index    gwiki backlinks grammar
+gwiki check                                 # broken links; exit status 1 while any remain
+gwiki check --fix                           # choose a repair for each
+gwiki orphans
+gwiki new "Parser notes" --in lexer -t parser -m "First line."
+gwiki new "Ship it" --task
+gwiki edit "parser notes"                   # opens $EDITOR on the page
+gwiki mv lexer/parser-notes archive/ --dry-run   # the links it would rewrite
+gwiki rm lexer/parser-notes                 # refused while pages link to it
+gwiki tag grammar parser    gwiki untag grammar parser
+gwiki tasks -s open
+gwiki done index:12   gwiki doing tasks/ship   gwiki reopen index:12
+gwiki promote index:12                      # a checklist item becomes a task page
+gwiki cache --rebuild
+```
+
+Read commands take `--json`. [The design](docs/dev/wiki-design.md) covers the cache, link resolution and writes in detail.
+
+## Notes
+
+`gwiki notes` is the older part of gwiki: notes and tasks in a SQLite database, `.gwiki/notes.db`, committed with the project. It shares `.gwiki` with the wiki and is independent of it. Its commands are under `gwiki notes`: `gwiki notes help` lists them, `gwiki notes -g` selects the global notes, and `gwiki notes` alone opens its interface.
+
+Notes and tasks are rows with typed columns, so any SQLite client can read, query and edit them. Every change, including one made outside gwiki, is recorded, so you can look at the project as it stood at any past moment. It is built for one user: git cannot merge two copies of a database file.
+
+### Global notes
+
+```sh
+gwiki notes -g init                    # a project of your own, in ~/notes
+gwiki notes -g init ~/work/notes       # or wherever you choose
+gwiki notes -g task "renew passport"   # from any directory
+gwiki notes -g                         # the interactive interface, on global notes
 ```
 
 Global notes belong to you, not to a repository. Only a leading `-g` reaches them. Without it, a command outside a project fails as before, so a note run in the wrong directory never lands in global notes.
 
-The global notes are an ordinary project, in `.gnotes/gnotes.db` under the directory given. A second `-g init` prints the recorded location, which is kept in `global.json` beside your identity.
+The global notes are an ordinary project, in `.gwiki/notes.db` under the directory given. A second `-g init` prints the recorded location, which is kept in `global.json` beside your identity.
 
-## The browser view
+### The browser view
 
 ```sh
-gnotes serve
+gwiki notes serve
 ```
 
 Opens a three-pane page in your browser: notebooks, entries, and one entry in full. It refreshes by itself when you write from the command line, from the terminal interface, or from an agent.
@@ -61,7 +200,7 @@ Opens a three-pane page in your browser: notebooks, entries, and one entry in fu
 
 The whole page is compiled into the binary, so there is nothing to install and it works with no network at all.
 
-The address gnotes prints carries an access token, and the API will not answer without it. That token, not the loopback binding, is the protection: any page open in your browser can make requests to `127.0.0.1`, so without a secret one of them could read and rewrite your notes. Because the page reads the token from its own URL and sends it in a header, a script on another origin cannot obtain it.
+The address gwiki prints carries an access token, and the API will not answer without it. That token, not the loopback binding, is the protection: any page open in your browser can make requests to `127.0.0.1`, so without a secret one of them could read and rewrite your notes. Because the page reads the token from its own URL and sends it in a header, a script on another origin cannot obtain it.
 
 The detail pane ends with the recorded changes to the entry you are looking at.
 
@@ -84,142 +223,84 @@ HISTORY · 4 CHANGES
 
 The view costs about 3 MB of binary, almost all of it `net/http`. Build with `make build-slim` (`-tags noweb`) to leave it out; the command line and the terminal interface are unaffected.
 
-## Agents
+### Notes for agents
 
 ```sh
-claude mcp add gnotes -- gnotes mcp
-claude mcp add gnotes-global -- gnotes -g mcp   # the global notes
+claude mcp add gwiki-notes -- gwiki notes mcp
+claude mcp add gwiki-notes-global -- gwiki notes -g mcp   # the global notes
 ```
 
 Registers the project with Claude Code over the Model Context Protocol. The agent gets seven tools — list, search, get, create, update, delete and restore — and the same rules as every other view: task fields are refused on notes, an ambiguous reference lists the candidates rather than guessing, and deletion is recoverable.
 
 Entries are addressed by the same six-character handle the command line prints, so a handle you read in your terminal can be pasted straight to the agent.
 
-`gnotes mcp` speaks the protocol on standard input and output and is not meant to be run by hand; a client starts and stops it. Everything on standard output is protocol, and diagnostics go to standard error.
+`gwiki notes mcp` speaks the protocol on standard input and output and is not meant to be run by hand; a client starts and stops it. Everything on standard output is protocol, and diagnostics go to standard error.
 
-## Wiki (preview)
-
-```sh
-gnotes wiki init                            # .gnotes/wiki, committed; .gnotes/cache.db, ignored
-gnotes wiki ls lexer                        # pages under a directory
-gnotes wiki show "design sketch"            # a page, its links and backlinks
-gnotes wiki search tokeniz                  # ranked, the last word by prefix
-gnotes wiki check                           # broken links; exit status 1 when any
-gnotes wiki tasks -s open                   # checklist items and task pages
-gnotes wiki new "Parser notes" --in lexer -t parser -m "First line."
-gnotes wiki edit "parser notes"             # opens $EDITOR on the page
-gnotes wiki mv lexer/parser-notes archive/ --dry-run   # the links it would rewrite
-gnotes wiki check --fix                     # choose a repair for each broken link
-gnotes wiki promote "index:12"              # a checklist item becomes a task page
-gnotes wiki ui                              # tree, reader, links, search; ? for keys
-gnotes wiki lsp                             # language server for your editor; see Editors
-claude mcp add gnotes-wiki -- gnotes wiki mcp   # the wiki for a code agent
-```
-
-Pages are markdown files under `.gnotes/wiki`, edited with any editor. They link with `[[Page title]]`, `[[path/page#Heading|label]]`, or markdown links to pages, files and line ranges such as `../../src/lexer.go#L42`. The cache is derived from the pages and rebuilt whenever it is missing or stale. A write refuses, and changes nothing, when a page changed after gnotes read it. An agent works through the same writes: it reads a page's hash and edits exact text against it. This will replace the database; [the design](docs/dev/wiki-design.md) describes the plan.
-
-### Editors
-
-`gnotes wiki lsp` is a language server in the same executable. An editor starts it and gets, in wiki pages: `[[` and `](` completion of pages, headings and paths; warnings on broken links; go to definition to follow a link; references for backlinks; hover; heading outlines; rename of a page with its links rewritten; and quick fixes for broken links. Open buffers are checked as typed, before saving.
-
-Neovim 0.11 or later:
-
-```lua
-vim.lsp.config('gnotes', {
-  cmd = { 'gnotes', 'wiki', 'lsp' },
-  filetypes = { 'markdown' },
-  root_markers = { '.gnotes' },
-})
-vim.lsp.enable('gnotes')
-```
-
-Its default LSP keys then apply: `ctrl-]` follows a link, `grr` lists backlinks, `grn` renames the page, `gra` offers fixes, `K` hovers, `ctrl-x ctrl-o` completes.
-
-Helix, in `.helix/languages.toml` or `~/.config/helix/languages.toml`:
-
-```toml
-[language-server.gnotes]
-command = "gnotes"
-args = ["wiki", "lsp"]
-
-[[language]]
-name = "markdown"
-language-servers = ["gnotes"]
-```
-
-Vim has no built-in LSP client; with [vim-lsp](https://github.com/prabirshrestha/vim-lsp):
-
-```vim
-au User lsp_setup call lsp#register_server({'name': 'gnotes', 'cmd': {server_info->['gnotes', 'wiki', 'lsp']}, 'allowlist': ['markdown']})
-```
-
-A rename returns edits for the editor to apply, so the pages it changes are left modified and unsaved; save them all (`:wall`).
-
-## Commands
+### Notes commands
 
 Creating and editing:
 
 ```sh
-gnotes notebook work                        # or: gnotes nb work
-gnotes note "design sketch" -b work -t design -m "body text"
-gnotes task "fix the lexer" -b work -t bug -d friday -p high -a me
-gnotes edit lexer --title "fix the lexer properly"
-gnotes edit lexer                           # opens $EDITOR on the body
-git log --oneline -20 | gnotes note "release notes" --stdin
+gwiki notes notebook work                        # or: gwiki notes nb work
+gwiki notes note "design sketch" -b work -t design -m "body text"
+gwiki notes task "fix the lexer" -b work -t bug -d friday -p high -a me
+gwiki notes edit lexer --title "fix the lexer properly"
+gwiki notes edit lexer                           # opens $EDITOR on the body
+git log --oneline -20 | gwiki notes note "release notes" --stdin
 ```
 
 Tasks:
 
 ```sh
-gnotes done lexer        gnotes doing lexer      gnotes reopen lexer
-gnotes due lexer friday  gnotes prio lexer high  gnotes assign lexer me
+gwiki notes done lexer        gwiki notes doing lexer      gwiki notes reopen lexer
+gwiki notes due lexer friday  gwiki notes prio lexer high  gwiki notes assign lexer me
 ```
 
 Finding things:
 
 ```sh
-gnotes ls                                   # everything, in your own order
-gnotes ls -k task -s open -p high -t bug    # filters combine
-gnotes ls --overdue --sort due
-gnotes search "lexer ambiguity"             # full text, ranked
-gnotes show lexer                           # one entry, with its backlinks
-gnotes tags
+gwiki notes ls                                   # everything, in your own order
+gwiki notes ls -k task -s open -p high -t bug    # filters combine
+gwiki notes ls --overdue --sort due
+gwiki notes search "lexer ambiguity"             # full text, ranked
+gwiki notes show lexer                           # one entry, with its backlinks
+gwiki notes tags
 ```
 
-Entries can be named by a handle (`3S2YEP`, the last six or more characters of the id), by title, or by a fragment of the title. An ambiguous name lists the candidates rather than guessing. Quotes around a title are optional, unless the words could be split into an entry and its arguments in more than one way; then gnotes asks for them.
+Entries can be named by a handle (`3S2YEP`, the last six or more characters of the id), by title, or by a fragment of the title. An ambiguous name lists the candidates rather than guessing. Quotes around a title are optional, unless the words could be split into an entry and its arguments in more than one way; then gwiki asks for them.
 
 Organising:
 
 ```sh
-gnotes tag lexer parser        gnotes untag lexer parser
-gnotes link lexer "design sketch"           # a task pointing at its note
-gnotes mv lexer personal                    # to another notebook
-gnotes mv lexer --top                       # or --bottom, --before X, --after X
-gnotes rm lexer                gnotes restore lexer
+gwiki notes tag lexer parser        gwiki notes untag lexer parser
+gwiki notes link lexer "design sketch"           # a task pointing at its note
+gwiki notes mv lexer personal                    # to another notebook
+gwiki notes mv lexer --top                       # or --bottom, --before X, --after X
+gwiki notes rm lexer                gwiki notes restore lexer
 ```
 
 History and other views:
 
 ```sh
-gnotes log                                  # the recorded changes
-gnotes ls --at 2026-08-01                   # the project as it stood at the start of that day
-gnotes ls --at 3d
-gnotes serve                                # the browser view
-gnotes serve --no-open                      # just print the address
-gnotes mcp                                  # serve to an agent (clients run this)
+gwiki notes log                                  # the recorded changes
+gwiki notes ls --at 2026-08-01                   # the project as it stood at the start of that day
+gwiki notes ls --at 3d
+gwiki notes serve                                # the browser view
+gwiki notes serve --no-open                      # just print the address
+gwiki notes mcp                                  # serve to an agent (clients run this)
 ```
 
 Put `-g` before any command to run it on the [global notes](#global-notes).
 
 Add `--json` to `ls`, `show` or `search` for machine-readable output.
 
-## SQL
+### SQL
 
 The database is the project; there is nothing to export.
 
 ```sh
-sqlite3 .gnotes/gnotes.db "SELECT title, due FROM nodes WHERE status = 'open' AND deleted_at IS NULL"
-duckdb -c "ATTACH '.gnotes/gnotes.db' AS n (TYPE sqlite); SELECT tag, count(*) FROM n.tags GROUP BY tag"
+sqlite3 .gwiki/notes.db "SELECT title, due FROM nodes WHERE status = 'open' AND deleted_at IS NULL"
+duckdb -c "ATTACH '.gwiki/notes.db' AS n (TYPE sqlite); SELECT tag, count(*) FROM n.tags GROUP BY tag"
 ```
 
 | table | holds |
@@ -242,22 +323,22 @@ SELECT n.title FROM nodes_fts JOIN nodes n ON n.num = nodes_fts.rowid
  WHERE nodes_fts MATCH 'lexer' ORDER BY bm25(nodes_fts, 8.0, 1.0, 5.0);
 ```
 
-A running `gnotes serve` or terminal interface picks up an outside edit within a second. The edit is recorded with no author.
+A running `gwiki notes serve` or terminal interface picks up an outside edit within a second. The edit is recorded with no author.
 
-### Diffs
+#### Diffs
 
-git sees `gnotes.db` as binary. `.gnotes/.gitattributes` assigns it a diff driver named `gnotes`, and git config defines the driver, once per machine:
+git sees `notes.db` as binary. `.gwiki/.gitattributes` assigns it a diff driver named `gwiki`, and git config defines the driver, once per machine:
 
 ```sh
-git config --global diff.gnotes.textconv \
+git config --global diff.gwiki.textconv \
   'echo .dump meta contributors nodes tags links assignees changes | sqlite3 -readonly'
 ```
 
 `git diff`, `git log -p` and `git show` then print the changed rows as SQL. The full-text index is left out of the dump, since its rows are binary. Without the setting, or without `sqlite3` on the path, git falls back to "Binary files differ".
 
-## The interactive interface
+### The notes interface
 
-Run `gnotes` with no arguments. Notebooks on the left, their notes and tasks on the right. Writes from the command line, the browser or an agent appear within a second.
+Run `gwiki notes` with no arguments. Notebooks on the left, their notes and tasks on the right. Writes from the command line, the browser or an agent appear within a second.
 
 | key | |
 |---|---|
@@ -275,17 +356,17 @@ Run `gnotes` with no arguments. Notebooks on the left, their notes and tasks on 
 
 `:filter kind task`, `:filter status open`, `:sort due` and `:help` are the commands you will reach for most. `esc` clears the search, then the filter.
 
-## How it works
+### How it works
 
 The design follows [epiq](https://github.com/ljtn/epiq), a git-backed issue tracker, reimplemented in Go for notes and tasks.
 
 **The tables are the notes.** A command changes the in-memory tree first, checked against the rules: a task field on a note is refused, a notebook cannot nest. Commit then writes the rows that changed, in one transaction. A command that fails partway writes nothing.
 
-**History is recorded by triggers.** Each changed field becomes one row in `changes`. A write from gnotes is dated by the session's clock and carries your id; a write from any other client is dated by the wall clock. Nothing depends on gnotes being the writer.
+**History is recorded by triggers.** Each changed field becomes one row in `changes`. A write from gwiki is dated by the session's clock and carries your id; a write from any other client is dated by the wall clock. Nothing depends on gwiki being the writer.
 
-**The file is complete after every write.** The database uses a rollback journal rather than WAL, so there is no second file holding recent writes. What you commit is what you have. `.gnotes/.gitignore` keeps out the journal, which exists only during a write.
+**The file is complete after every write.** The database uses a rollback journal rather than WAL, so there is no second file holding recent writes. What you commit is what you have. `.gwiki/.gitignore` keeps out the journal, which exists only during a write.
 
-**Projects from before the database are imported.** A `.gnotes/events` directory of JSONL logs is replayed into the tables the first time it opens, each change dated by its original event, so history survives. The logs are left in place, for you to remove.
+**Projects from before the database are imported.** A `.gwiki/events` directory of JSONL logs is replayed into the tables the first time it opens, each change dated by its original event, so history survives. The logs are left in place, for you to remove.
 
 **Fractional ranks.** Sibling order is a fixed-width 96-bit hex string, so comparing two of them is a string comparison and inserting between two is a midpoint. When repeated insertion at one spot exhausts the space, every sibling is respaced.
 
@@ -297,19 +378,19 @@ The design follows [epiq](https://github.com/ljtn/epiq), a git-backed issue trac
 
 **Every front end is a shell over one write path.** The command line, the terminal interface, the browser and the agent all call the same session layer, which is the only place that mints ids, checks the rules and resolves ranks. A rule added there holds everywhere at once; a rule added in a front end would hold in one place and quietly not in the other three.
 
-### Differences from epiq
+#### Differences from epiq
 
 - **Domain**: notebooks holding notes and tasks as peers, rather than boards, swimlanes and issues.
 
 - **Tags are plain strings**, not registry entries with ids. A registry buys renaming a tag everywhere at once, which is not worth a layer of indirection. Contributors do keep a registry, because their identity has to outlive their display name.
 
-- **Storage is a database, not a log.** epiq's append-only logs merge across authors; gnotes keeps typed rows for one user, and gives up that merge.
+- **Storage is a database, not a log.** epiq's append-only logs merge across authors; gwiki keeps typed rows for one user, and gives up that merge.
 
 - **The browser view is one page of vanilla HTML, CSS and JavaScript** with no build step and no framework, pushed live over server-sent events rather than a websocket. The traffic is one-way and tiny, and the browser reconnects on its own.
 
 - **The MCP server is hand-written against the protocol** rather than taken from a framework: JSON-RPC over newline-delimited stdio is a few hundred lines of standard library, and it adds about 0.1 MB to the binary.
 
-### Performance
+#### Performance
 
 Old JSONL build against the SQLite build, on the same projects: each task has a body, two tags and a priority, five events as JSONL. Median of 50 runs, process start included, on a 16-thread Linux machine.
 
@@ -327,7 +408,6 @@ Reads cross over between 100 and 500 tasks. Writes are within 3% of each other a
 |---|---|---|
 | everything | 8.9 MB | 12.8 MB |
 | `-tags noweb` | 5.2 MB | 9.2 MB |
-
 ## Development
 
 ```sh

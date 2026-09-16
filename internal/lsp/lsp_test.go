@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/wiki"
+	"github.com/shakfu/gwiki/internal/wiki"
 )
 
 // client is an editor driving a server through its framing.
@@ -42,7 +42,7 @@ func newRepo(t *testing.T) string {
 		t.Fatal(err)
 	}
 	for id, body := range pages {
-		writeFile(t, filepath.Join(root, ".gnotes", "wiki", filepath.FromSlash(id)+".md"), body)
+		writeFile(t, filepath.Join(root, ".gwiki", "wiki", filepath.FromSlash(id)+".md"), body)
 	}
 	writeFile(t, filepath.Join(root, "src", "lexer.go"), "package lexer\n\nfunc Lex() {}\nvar x = 1\n")
 	return root
@@ -78,7 +78,7 @@ func startPolling(t *testing.T, root string, poll time.Duration) *client {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	c := &client{t: t, root: root, in: inW, frames: make(chan message, 1000), done: make(chan error, 1)}
-	c.srv = New(opener, "gnotes-wiki", "test")
+	c.srv = New(opener, "gwiki", "test")
 	c.srv.Poll = poll
 	go func() {
 		err := c.srv.Serve(inR, outW, io.Discard)
@@ -234,7 +234,7 @@ func diagnosticsFor(m message, uri string) ([]diagnostic, bool) {
 }
 
 func (c *client) pageURI(id string) string {
-	return fileURI(filepath.Join(c.root, ".gnotes", "wiki", filepath.FromSlash(id)+".md"))
+	return fileURI(filepath.Join(c.root, ".gwiki", "wiki", filepath.FromSlash(id)+".md"))
 }
 
 func (c *client) open(uri, body string) {
@@ -293,7 +293,7 @@ func TestInitializeWithoutAWiki(t *testing.T) {
 	os.Mkdir(filepath.Join(root, ".git"), 0o755)
 	c := start(t, root)
 	err := c.call("initialize", map[string]any{"rootUri": fileURI(root), "capabilities": map[string]any{}}, nil)
-	if err == nil || !strings.Contains(err.Message, "gnotes wiki init") {
+	if err == nil || !strings.Contains(err.Message, "gwiki init") {
 		t.Fatalf("initialize without a wiki = %v", err)
 	}
 }
@@ -326,7 +326,7 @@ func TestDiagnosticsFollowTheBuffer(t *testing.T) {
 	}
 
 	// A page created outside the editor clears the last one on save.
-	writeFile(t, filepath.Join(c.root, ".gnotes", "wiki", "nope.md"), "# Nope\n")
+	writeFile(t, filepath.Join(c.root, ".gwiki", "wiki", "nope.md"), "# Nope\n")
 	c.notify("textDocument/didSave", map[string]any{"textDocument": map[string]any{"uri": uri}})
 	if d := c.diagnostics(uri); len(d) != 0 {
 		t.Fatalf("after the outside change = %+v", d)
@@ -346,7 +346,7 @@ func TestPollNoticesOutsideChanges(t *testing.T) {
 	if d := c.diagnostics(uri); len(d) != 2 {
 		t.Fatalf("diagnostics = %+v", d)
 	}
-	writeFile(t, filepath.Join(c.root, ".gnotes", "wiki", "orphn.md"), "# Orphn\n")
+	writeFile(t, filepath.Join(c.root, ".gwiki", "wiki", "orphn.md"), "# Orphn\n")
 	if d := c.diagnostics(uri); len(d) != 1 {
 		t.Fatalf("after the poll = %+v", d)
 	}
@@ -586,7 +586,7 @@ func TestRename(t *testing.T) {
 	}
 	apply(t, edit)
 
-	raw, _ := os.ReadFile(filepath.Join(c.root, ".gnotes", "wiki", "index.md"))
+	raw, _ := os.ReadFile(filepath.Join(c.root, ".gwiki", "wiki", "index.md"))
 	if want := strings.Replace(pages["index"], "[md](lexer/design-sketch.md)", "[md](archive/design-sketch.md)", 1); string(raw) != want {
 		t.Fatalf("index after the rename:\n%s", raw)
 	}
@@ -611,7 +611,7 @@ func TestRename(t *testing.T) {
 	c2.diagnostics(i2)
 	params = at(i2, p.Line, p.Character)
 	params["newName"] = "archive/"
-	if err := c2.call("textDocument/rename", params, nil); err == nil || !strings.Contains(err.Message, "gnotes wiki mv") {
+	if err := c2.call("textDocument/rename", params, nil); err == nil || !strings.Contains(err.Message, "gwiki mv") {
 		t.Fatalf("rename without file operations = %v", err)
 	}
 }
@@ -671,7 +671,7 @@ func TestCodeActions(t *testing.T) {
 		t.Fatalf("actions for nope.md = %+v", got)
 	}
 	apply(t, create.Edit)
-	if raw, _ := os.ReadFile(filepath.Join(c.root, ".gnotes", "wiki", "nope.md")); string(raw) != "# gone\n" {
+	if raw, _ := os.ReadFile(filepath.Join(c.root, ".gwiki", "wiki", "nope.md")); string(raw) != "# gone\n" {
 		t.Fatalf("created page = %q", raw)
 	}
 	if got := actionsAt("See"); len(got) != 0 {

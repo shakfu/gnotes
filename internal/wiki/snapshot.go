@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/shakfu/gnotes/internal/markdown"
+	"github.com/shakfu/gwiki/internal/markdown"
 )
 
 // Snapshot is the page index at one moment. It resolves links in text that is

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/shakfu/gnotes/internal/markdown"
+	"github.com/shakfu/gwiki/internal/markdown"
 )
 
 // Offer is one way to repair a broken link.

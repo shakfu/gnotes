@@ -72,7 +72,7 @@ func TestAWriteOverAChangedPageIsAConflict(t *testing.T) {
 		t.Fatalf("b = %q: the other writer's save was overwritten", got)
 	}
 
-	// Two gnotes processes: the second writes against what it read before the
+	// Two gwiki processes: the second writes against what it read before the
 	// first wrote.
 	other, err := Open(w.Project)
 	if err != nil {
@@ -294,7 +294,7 @@ func moveFixture(t *testing.T) (*Wiki, string) {
 			"- [[lexer/design-sketch]]\n" +
 			"- [[lexer/design-sketch#Tokens|the tokens]]\n" +
 			"- [md](lexer/design-sketch.md#tokens)\n" +
-			"- [rooted](</.gnotes/wiki/lexer/design-sketch.md>)\n" +
+			"- [rooted](</.gwiki/wiki/lexer/design-sketch.md>)\n" +
 			"- [by reference][d]\n\n" +
 			"[d]: lexer/design-sketch.md\n",
 		"notes/deep/other": "# Other\n\n[up](../../lexer/design-sketch.md) and [[sketch]]\n",
@@ -332,7 +332,7 @@ func TestMoveRewritesLinksInTheirOwnForm(t *testing.T) {
 			"- [[archive/old/sketch|lexer/design-sketch]]\n" + // file name sketch is ambiguous, so the path; old text kept as label
 			"- [[archive/old/sketch#Tokens|the tokens]]\n" +
 			"- [md](archive/old/sketch.md#tokens)\n" +
-			"- [rooted](</.gnotes/wiki/archive/old/sketch.md>)\n" +
+			"- [rooted](</.gwiki/wiki/archive/old/sketch.md>)\n" +
 			"- [by reference][d]\n\n" +
 			"[d]: archive/old/sketch.md\n",
 		"lexer/grammar":    "# Grammar\n\n## Rules\n\nSee [[archive/old/sketch|design-sketch]].\n",
@@ -406,7 +406,7 @@ func TestOffersAndFixes(t *testing.T) {
 			"- [line](../../src/lexer.go#L9)\n" +
 			"- [gone](notes/moved.md)\n",
 	})
-	// notes/moved is renamed outside gnotes.
+	// notes/moved is renamed outside gwiki.
 	raw := source(t, root, "notes/moved")
 	if err := os.Remove(pageFile(root, "notes/moved")); err != nil {
 		t.Fatal(err)

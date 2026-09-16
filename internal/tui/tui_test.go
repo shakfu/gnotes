@@ -11,11 +11,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/shakfu/gnotes/internal/editor"
-	"github.com/shakfu/gnotes/internal/session"
-	"github.com/shakfu/gnotes/internal/state"
-	"github.com/shakfu/gnotes/internal/store"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/editor"
+	"github.com/shakfu/gwiki/internal/session"
+	"github.com/shakfu/gwiki/internal/state"
+	"github.com/shakfu/gwiki/internal/store"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 var clock = func() time.Time { return time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC) }

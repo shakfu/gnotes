@@ -7,9 +7,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/shakfu/gnotes/internal/display"
-	"github.com/shakfu/gnotes/internal/state"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/display"
+	"github.com/shakfu/gwiki/internal/state"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // The palette uses the terminal's own ANSI colours rather than fixed RGB, so
@@ -414,7 +414,7 @@ func (m *Model) detailMeta(n *state.Node) string {
 // viewHelp is the key reference, shown by '?'.
 func (m *Model) viewHelp() string {
 	var b strings.Builder
-	b.WriteString(styleBold.Render("gnotes"))
+	b.WriteString(styleBold.Render("gwiki"))
 	b.WriteString("\n\n")
 
 	section := func(title string, rows [][2]string) {

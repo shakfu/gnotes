@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/event"
+	"github.com/shakfu/gwiki/internal/event"
 )
 
 // filled is a richer fixture: two notebooks with a mix of notes and tasks in

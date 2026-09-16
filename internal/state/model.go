@@ -1,5 +1,5 @@
 // Package state holds the tree of notebooks, notes and tasks that the rest of
-// gnotes reads, and the rules for changing it.
+// gwiki reads, and the rules for changing it.
 //
 // Build assembles a tree from stored rows. Apply changes it by one operation,
 // checked against the rules, and TakeChanged reports what to write. Nothing

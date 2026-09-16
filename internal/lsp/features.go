@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/shakfu/gnotes/internal/markdown"
-	"github.com/shakfu/gnotes/internal/wiki"
+	"github.com/shakfu/gwiki/internal/markdown"
+	"github.com/shakfu/gwiki/internal/wiki"
 )
 
 // maxItems caps completion and symbol lists; the editor asks again as the user
@@ -540,7 +540,7 @@ func (s *Server) rename(raw json.RawMessage) (any, error) {
 		return nil, errors.New("only a wiki page, or a link to one, can be renamed")
 	}
 	if !s.documentChanges || !s.renameFiles {
-		return nil, errors.New("this editor cannot rename files through LSP; use 'gnotes wiki mv'")
+		return nil, errors.New("this editor cannot rename files through LSP; use 'gwiki mv'")
 	}
 	to := strings.TrimSpace(p.NewName)
 	if strings.HasSuffix(to, "/") {

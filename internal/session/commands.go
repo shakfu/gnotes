@@ -7,18 +7,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/display"
-	"github.com/shakfu/gnotes/internal/event"
-	"github.com/shakfu/gnotes/internal/rank"
-	"github.com/shakfu/gnotes/internal/state"
-	"github.com/shakfu/gnotes/internal/store"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/display"
+	"github.com/shakfu/gwiki/internal/event"
+	"github.com/shakfu/gwiki/internal/rank"
+	"github.com/shakfu/gwiki/internal/state"
+	"github.com/shakfu/gwiki/internal/store"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // NewNotebook creates a notebook in the workspace.
 func (s *Session) NewNotebook(name string) (*state.Node, error) {
 	if s.State.Workspace == "" {
-		return nil, errors.New("this project has no workspace; run 'gnotes init'")
+		return nil, errors.New("this project has no workspace; run 'gwiki notes init'")
 	}
 	if err := s.ensureContributor(); err != nil {
 		return nil, err

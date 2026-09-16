@@ -33,7 +33,7 @@ go.work.sum
 # .vscode/
 
 # Build output
-/gnotes
+/gwiki
 
 # agents
 .claude

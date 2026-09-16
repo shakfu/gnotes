@@ -7,19 +7,19 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // User identity lives outside any project, in the user's configuration
 // directory, because it is a property of the person rather than of the notes.
 // One id follows them across every project, so their history stays theirs.
 const (
-	userConfigDir    = "gnotes"
+	userConfigDir    = "gwiki"
 	userConfigFile   = "user.json"
 	globalConfigFile = "global.json"
 )
 
-// UserConfigPath returns the path of the global identity file. The GNOTES_HOME
+// UserConfigPath returns the path of the global identity file. The GWIKI_HOME
 // environment variable overrides it, which is what lets the tests run without
 // touching the real one.
 func UserConfigPath() (string, error) {
@@ -32,7 +32,7 @@ func UserConfigPath() (string, error) {
 
 // configDir returns the directory holding the per-user files.
 func configDir() (string, error) {
-	if home := os.Getenv("GNOTES_HOME"); home != "" {
+	if home := os.Getenv("GWIKI_HOME"); home != "" {
 		return home, nil
 	}
 	dir, err := os.UserConfigDir()

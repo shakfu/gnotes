@@ -1,14 +1,14 @@
-# gnotes
+# gwiki
 
-BIN     := gnotes
-CMD     := ./cmd/gnotes
+BIN     := gwiki
+CMD     := ./cmd/gwiki
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 .DEFAULT_GOAL := build
 
 .PHONY: build
-build: ## compile the binary into ./gnotes
+build: ## compile the binary into ./gwiki
 	@go build -ldflags "$(LDFLAGS)" -o $(BIN) $(CMD)
 
 .PHONY: install

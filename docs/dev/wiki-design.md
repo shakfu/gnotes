@@ -3,6 +3,11 @@
 Status: proposal, 2026-09-15. Supersedes the storage model in
 [sqldb-variant.md](sqldb-variant.md) section 12.
 
+**Renamed, 2026-09-16.** The project is now gwiki. This document predates the
+rename: read `gnotes wiki <command>` as `gwiki <command>`, `.gnotes/` as
+`.gwiki/`, and the notes commands as `gwiki notes <command>`. See "Cutover"
+in section 17.
+
 Decided:
 
 - **Markdown files in the repository are the source of truth.** SQLite is a
@@ -598,8 +603,8 @@ recorded here.
    results below.
 4. **Terminal interface:** tree, reader, link panel, search, quick open.
    Done; results below.
-5. **Language server** (`gnotes wiki lsp`), before the editor of section 11,
-   which is then built only if still needed. Done; results below.
+5. **Language server** (`gwiki lsp`), then the editor of section 11. Both
+   done; results below.
 6. **Migration** from `gnotes.db` and JSONL.
 7. **Browser view.**
 
@@ -971,6 +976,89 @@ Changes from the design, found while building it:
   the repository, such as `README.md`, gets no diagnostics or completion.
 - **Whole-document sync.** The server asks for the full text on each change;
   pages are small, and a page of 5 KB checks in under a millisecond.
+
+### Cutover and overview (2026-09-16)
+
+Done before the editor, so the editor is built into the final interface once.
+
+- **Rename.** Binary `gwiki`, module `github.com/shakfu/gwiki`, directory
+  `.gwiki/`, variables `GWIKI_*`. Finding only `.gnotes/`, `gwiki` names it
+  and asks for the directory to be renamed.
+- **Command layout.** The wiki commands are top-level and a bare `gwiki`
+  opens the wiki interface. The notes database stays, as `.gwiki/notes.db`,
+  with its commands, interface, browser view and MCP server under
+  `gwiki notes`, including `-g`. Both have `ls`, `edit`, `done` and others, so
+  one had to move under a group. The two share `.gwiki/.gitignore`, and each
+  adds its lines when missing.
+- **Overview.** The wiki interface opens on an overview of recent changes,
+  tasks, health and structure (README, "The interface"). Recent changes take
+  the last commit to each page from one `git log` over the pages directory,
+  bounded to 500 commits, and uncommitted pages from `git status`; outside a
+  repository they use file times alone.
+
+Loading the overview on the 5,000 pages of phase 1 takes 165 ms, most of it
+counting orphans, dead ends and hubs over 80,000 link rows and listing 15,000
+open tasks; it loads when the overview opens and when pages change. Drawing
+it takes 0.14 ms.
+
+Not done: importing notes into pages, and removing the notes model. Both wait
+for a decision after the editor.
+
+### Phase 5 results: editor (2026-09-16)
+
+`internal/vim` is a modal editor engine over a buffer of lines. It draws
+nothing and touches no files: a host feeds it keys, reads the buffer and the
+cursor, and supplies hooks for saving, quitting, following a link, completing
+text and reporting changes. `e` in the wiki interface opens the page in it;
+`E` still hands the page to `$EDITOR`.
+
+**What it has**, of section 11's list: modes, counts, registers, the operators
+with motions and text objects, `.`, undo and redo, search with Go regular
+expressions, and the ex commands. `il` and `al` are the wiki addition: the
+destination of the link at the cursor, or the whole link.
+
+**What it does not have**, as planned: macros, marks, blockwise visual, `:g`,
+folds, splits and mappings. The key reference lists them as missing.
+
+**Host side.** `:w` writes through the phase 2 path, against the hash the
+buffer was read from; a page saved elsewhere refuses the write and names `:w!`
+and `:e!`. The one-second poll reloads a clean buffer whose page changed on
+disk and warns about a modified one. The buffer autosaves to `.gwiki/drafts/`,
+written by that poll rather than by each keystroke, and a draft is offered
+when the page is opened again. `ctrl-n` completes pages after `[[`, headings
+after `#` and paths after `](`; `ctrl-]` follows the link under the cursor;
+`:preview` draws the page as the reader does.
+
+**Exit criterion: the editor edits pages, saves them and survives conflicts.**
+About 90 key-sequence tests cover the engine, each a buffer, keys, and the
+text and cursor they produce. Interface tests cover opening, typing, list
+continuation, `:w`, `:q` with unsaved changes, a page changed under the
+buffer, `:w!`, drafts, completion, following a link, broken-link marking,
+`:preview`, and a paste arriving as one key message. A run in a pseudo-
+terminal typed a line into a page, wrote it and left.
+
+**Timings.** A 3,000-line page, 45 rows drawn, including the frame:
+
+| action | median |
+|---|---|
+| open the page and draw it | 9.9 ms |
+| a keystroke in insert mode | 0.65 ms |
+| `j` | 0.68 ms |
+| marking broken links, 1,000 links | 7.2 ms |
+| `:w` | 27 ms |
+
+Drawing a character at a time cost 1.2 ms a keystroke; runs of one style are
+now drawn together.
+
+Changes from the design, found while building it:
+
+- **Tab inserts two spaces.** goldmark loses the source position of text under
+  a tab, which link rewriting needs.
+- **A search is a Go regular expression**, so `\<` and `\v` are not
+  available, and `:s` takes `\1` and `&` in the replacement.
+- **Following a link needs a saved buffer**, since the target is resolved from
+  the page on disk.
+- **`:check`** reports the broken links in the buffer, unsaved.
 
 ## 18. Open questions
 

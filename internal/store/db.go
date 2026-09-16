@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/state"
+	"github.com/shakfu/gwiki/internal/state"
 
 	_ "modernc.org/sqlite"
 )
@@ -31,13 +31,11 @@ func open(root, path string, create bool) (*Project, error) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("create %s: %w", dir, err)
 		}
+		// The wiki shares the directory and its .gitignore, so lines are added
+		// where missing rather than the file written only when absent.
 		for name, body := range map[string]string{".gitignore": gitignore, ".gitattributes": gitattributes} {
-			path := filepath.Join(dir, name)
-			if isFile(path) {
-				continue
-			}
-			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-				return nil, fmt.Errorf("write %s: %w", path, err)
+			if err := addLines(filepath.Join(dir, name), body); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -63,7 +61,7 @@ func open(root, path string, create bool) (*Project, error) {
 }
 
 // migrate creates the schema in a new database and refuses one written by a
-// newer gnotes.
+// newer gwiki.
 func (p *Project) migrate() error {
 	tx, err := p.db.Begin()
 	if err != nil {
@@ -79,7 +77,7 @@ func (p *Project) migrate() error {
 	case version == schemaVersion:
 		return nil
 	case version > schemaVersion:
-		return fmt.Errorf("%s was written by a newer gnotes (schema %d, this build reads %d)", p.Path, version, schemaVersion)
+		return fmt.Errorf("%s was written by a newer gwiki (schema %d, this build reads %d)", p.Path, version, schemaVersion)
 	}
 	if _, err := tx.Exec(schema()); err != nil {
 		return fmt.Errorf("create the schema in %s: %w", p.Path, err)
@@ -305,7 +303,7 @@ func Snap(p *Project) Snapshot {
 // everything up to head.
 func Write(p *Project, actor Actor, at time.Time, nodes []*state.Node, contributors []*state.Contributor) (prev, head Snapshot, err error) {
 	if !actor.Valid() {
-		return 0, 0, errors.New("cannot write: the current user is not configured; run 'gnotes init'")
+		return 0, 0, errors.New("cannot write: the current user is not configured; run 'gwiki notes init'")
 	}
 	tx, err := p.db.Begin()
 	if err != nil {
@@ -584,4 +582,38 @@ func Search(p *Project, match string) ([]Hit, error) {
 		}
 	}
 	return out, rows.Err()
+}
+
+// addLines appends each line of body that file does not already hold,
+// creating the file when it is missing.
+func addLines(file, body string) error {
+	raw, err := os.ReadFile(file)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", file, err)
+	}
+	have := map[string]bool{}
+	for _, l := range strings.Split(string(raw), "\n") {
+		have[l] = true
+	}
+	var missing string
+	for _, l := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+		if !have[l] {
+			missing += l + "\n"
+		}
+	}
+	if missing == "" {
+		return nil
+	}
+	if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+		missing = "\n" + missing
+	}
+	f, err := os.OpenFile(file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("write %s: %w", file, err)
+	}
+	if _, err := f.WriteString(missing); err != nil {
+		f.Close()
+		return fmt.Errorf("write %s: %w", file, err)
+	}
+	return f.Close()
 }

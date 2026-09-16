@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/rank"
-	"github.com/shakfu/gnotes/internal/search"
-	"github.com/shakfu/gnotes/internal/state"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/rank"
+	"github.com/shakfu/gwiki/internal/search"
+	"github.com/shakfu/gwiki/internal/state"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // refLen matches the handle length the command line prints, so a handle read
@@ -96,7 +96,7 @@ var registry = []registered{
 
 	{
 		tool: tool{
-			Name:  "gnotes_list",
+			Name:  "gwiki_list",
 			Title: "List notes and tasks",
 			Description: `List the project's notes and tasks, or its notebooks.
 
@@ -106,7 +106,7 @@ what is outstanding. Filters combine, so asking for open high-priority tasks
 tagged "bug" returns only entries matching all three.
 
 Returns each entry's handle, kind, title and set fields. Bodies are omitted;
-use gnotes_get for one entry in full.`,
+use gwiki_get for one entry in full.`,
 			Annotations: &annotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: ptr(false)},
 			InputSchema: props(nil, object{
 				"kind":     enum("Restrict to one kind. Omit to list notes and tasks together; pass \"notebook\" to list notebooks instead.", "note", "task", "notebook"),
@@ -115,7 +115,7 @@ use gnotes_get for one entry in full.`,
 				"priority": enum("Restrict to tasks with this priority.", "none", "low", "normal", "high"),
 				"tags":     strList("Restrict to entries carrying every one of these tags."),
 				"overdue":  boolean("Restrict to unfinished tasks whose due date has passed."),
-				"text":     str("Restrict to entries whose title contains this text. To search bodies as well, use gnotes_search."),
+				"text":     str("Restrict to entries whose title contains this text. To search bodies as well, use gwiki_search."),
 				"sort":     enum("Ordering. Defaults to the arrangement the user chose.", "rank", "created", "updated", "title", "due", "priority"),
 				"limit":    object{"type": "integer", "description": "Maximum entries to return. Defaults to 50."},
 			}),
@@ -125,13 +125,13 @@ use gnotes_get for one entry in full.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_search",
+			Name:  "gwiki_search",
 			Title: "Search note and task text",
 			Description: `Search the full text of every note and task, including bodies.
 
 Call this when looking for something by what it says rather than by where it
 lives — a topic, a phrase, a name mentioned in passing. Prefer it over
-gnotes_list whenever the notebook is unknown, which is the usual case.
+gwiki_list whenever the notebook is unknown, which is the usual case.
 
 All words must match, and results are ranked with title matches above body
 matches. Each result includes the fragment of the body that matched.`,
@@ -146,12 +146,12 @@ matches. Each result includes the fragment of the body that matched.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_get",
+			Name:  "gwiki_get",
 			Title: "Read one entry in full",
 			Description: `Read one note or task in full: its body, every field, the entries it
 references, the entries referencing it, and the events that produced it.
 
-Call this after gnotes_list or gnotes_search has narrowed things to one entry,
+Call this after gwiki_list or gwiki_search has narrowed things to one entry,
 or whenever the user names a specific note. This is the only tool that returns
 body text.`,
 			Annotations: &annotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: ptr(false)},
@@ -167,7 +167,7 @@ body text.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_create",
+			Name:  "gwiki_create",
 			Title: "Create a note, task or notebook",
 			Description: `Create a note, a task, or a notebook.
 
@@ -193,13 +193,13 @@ project has none. Returns the new entry's handle.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_update",
+			Name:  "gwiki_update",
 			Title: "Change an entry",
 			Description: `Change an existing note or task: its title, body, task fields, tags,
 notebook, or the entries it references.
 
 Only the fields you pass are changed; everything omitted is left alone. Setting
-"body" replaces the whole body, so read the entry with gnotes_get first when
+"body" replaces the whole body, so read the entry with gwiki_get first when
 appending rather than rewriting.
 
 Marking a task done is the common case and needs only "ref" and "status".`,
@@ -223,12 +223,12 @@ Marking a task done is the common case and needs only "ref" and "status".`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_delete",
+			Name:  "gwiki_delete",
 			Title: "Delete an entry",
 			Description: `Delete a note, task or notebook.
 
 Deleting a notebook deletes everything in it. The entry is marked deleted
-rather than removed, so gnotes_restore undoes it — but it disappears from every
+rather than removed, so gwiki_restore undoes it — but it disappears from every
 listing immediately, so confirm with the user before deleting anything they did not
 explicitly ask you to remove.`,
 			Annotations: &annotations{DestructiveHint: ptr(true), OpenWorldHint: ptr(false)},
@@ -241,12 +241,12 @@ explicitly ask you to remove.`,
 
 	{
 		tool: tool{
-			Name:  "gnotes_restore",
+			Name:  "gwiki_restore",
 			Title: "Undo a deletion",
 			Description: `Restore a previously deleted entry, bringing back its contents and, for a
 notebook, everything that was in it.
 
-Call this to undo a gnotes_delete. The handle is unchanged by deletion, so pass
+Call this to undo a gwiki_delete. The handle is unchanged by deletion, so pass
 the same one.`,
 			Annotations: &annotations{DestructiveHint: ptr(false), IdempotentHint: true, OpenWorldHint: ptr(false)},
 			InputSchema: props([]string{"ref"}, object{
@@ -898,7 +898,7 @@ func (s *Server) deleteEntry(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	return fmt.Sprintf("Deleted %s %q. Restore it with gnotes_restore and the same handle.",
+	return fmt.Sprintf("Deleted %s %q. Restore it with gwiki_restore and the same handle.",
 		ulid.Short(n.ID, refLen), n.Title), nil
 }
 

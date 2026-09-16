@@ -1,4 +1,4 @@
-module github.com/shakfu/gnotes
+module github.com/shakfu/gwiki
 
 go 1.26.6
 

@@ -1,4 +1,4 @@
-// Package session is the write side of gnotes: it turns an intention like
+// Package session is the write side of gwiki: it turns an intention like
 // "add a task to this notebook" into changes to the stored tree.
 //
 // A command stages operations, each applied at once to the in-memory tree and
@@ -14,11 +14,11 @@ import (
 	"slices"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/event"
-	"github.com/shakfu/gnotes/internal/rank"
-	"github.com/shakfu/gnotes/internal/state"
-	"github.com/shakfu/gnotes/internal/store"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/event"
+	"github.com/shakfu/gwiki/internal/rank"
+	"github.com/shakfu/gwiki/internal/state"
+	"github.com/shakfu/gwiki/internal/store"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // Session is an open project together with the identity writing to it.
@@ -215,7 +215,7 @@ func (s *Session) Init(name string) error {
 // write to it, so their name renders for everyone who syncs the log.
 func (s *Session) ensureContributor() error {
 	if !s.Actor.Valid() {
-		return errors.New("no user configured; run 'gnotes init'")
+		return errors.New("no user configured; run 'gwiki notes init'")
 	}
 	if c, ok := s.State.Contributors[s.Actor.ID]; ok {
 		if c.Name == s.Actor.Name {

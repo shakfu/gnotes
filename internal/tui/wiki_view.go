@@ -7,8 +7,8 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/shakfu/gnotes/internal/display"
-	"github.com/shakfu/gnotes/internal/wiki"
+	"github.com/shakfu/gwiki/internal/display"
+	"github.com/shakfu/gwiki/internal/wiki"
 )
 
 // View renders the whole screen: a header, the body and a status line.
@@ -35,6 +35,12 @@ func (m *WikiModel) View() string {
 		body = m.viewTasks()
 	case screenOffers:
 		body = m.viewOffers()
+	case screenHome:
+		body = m.viewHome()
+	case screenPages:
+		body = m.viewPages()
+	case screenEdit:
+		body = m.viewEdit()
 	default:
 		body = m.viewRead()
 	}
@@ -73,6 +79,12 @@ func (m *WikiModel) viewWikiHeader() string {
 		left += fmt.Sprintf("  %s (%d)", which, len(m.tasks))
 	case screenOffers:
 		left += "  repairs for " + display.Line(m.offerFor.Written())
+	case screenHome:
+		left += "  overview"
+	case screenPages:
+		left += "  " + display.Line(m.listTitle) + fmt.Sprintf(" (%d)", len(m.listed))
+	case screenEdit:
+		left += "  " + styleDim.Render(display.Line(m.edit.page)+"  editing")
 	default:
 		if m.cur != nil {
 			left += "  " + styleDim.Render(display.Line(m.cur.info.Path))
@@ -93,6 +105,8 @@ func (m *WikiModel) viewWikiStatus() string {
 	switch {
 	case m.prompt != nil:
 		return m.input.render(m.prompt.label, m.width)
+	case m.screen == screenEdit:
+		return m.viewEditStatus()
 	case m.screen == screenSearch:
 		return m.input.render("/", m.width)
 	case m.screen == screenOpen:
@@ -111,10 +125,14 @@ func (m *WikiModel) viewWikiStatus() string {
 		hint = "space toggle  a all/open  enter open  esc back"
 	case screenOffers:
 		hint = "enter apply  esc back"
+	case screenHome:
+		hint = "j k move  h l column  enter open  / search  ^p open  n new  c broken  t tasks  r reload  ? help"
+	case screenPages:
+		hint = "enter open  esc back"
 	default:
 		switch m.focus {
 		case focusTree:
-			hint = "enter open  l reader  / search  ^p open  n new  c broken  t tasks  ? help"
+			hint = "enter open  l reader  / search  ^p open  n new  c broken  t tasks  O overview  ? help"
 		case focusPanel:
 			hint = "enter open the linking page  esc reader"
 		default:
@@ -386,7 +404,7 @@ func (m *WikiModel) viewOffers() []string {
 
 func (m *WikiModel) viewWikiHelp() string {
 	var b strings.Builder
-	b.WriteString(styleBold.Render("gnotes wiki") + "\n\n")
+	b.WriteString(styleBold.Render("gwiki") + "\n\n")
 	section := func(title string, rows [][2]string) {
 		b.WriteString(styleHeader.Render(title) + "\n")
 		for _, r := range rows {
@@ -399,6 +417,15 @@ func (m *WikiModel) viewWikiHelp() string {
 		{"enter", "open a page, fold a directory"},
 		{"l tab", "to the reader"},
 	})
+	section("editor", [][2]string{
+		{"e", "edit the page here; E opens $EDITOR instead"},
+		{"vim keys", "modes, counts, operators, text objects, registers, . and u"},
+		{":w :q :wq", "write, leave, both; :q! discards, :e! reloads"},
+		{"[[ then ^n", "complete a page, a heading after #, a path after ]("},
+		{"ctrl-]", "follow the link under the cursor; ctrl-o goes back"},
+		{"ctrl-space", "tick the checklist item on this line"},
+		{":preview", "the page as the reader draws it"},
+	})
 	section("reader", [][2]string{
 		{"j k", "scroll"},
 		{"space ctrl-d", "half a page down"},
@@ -407,7 +434,7 @@ func (m *WikiModel) viewWikiHelp() string {
 		{"enter", "follow the link; a file opens in $EDITOR"},
 		{"backspace", "back"},
 		{"b", "backlinks"},
-		{"e", "edit the page in $EDITOR"},
+		{"e", "edit the page"},
 		{"r", "move the page, rewriting links"},
 		{"f", "repairs for the selected broken link"},
 		{"h", "to the tree"},
@@ -418,6 +445,7 @@ func (m *WikiModel) viewWikiHelp() string {
 		{"n", "new page"},
 		{"c", "broken links"},
 		{"t", "tasks; space toggles one"},
+		{"O", "the overview"},
 		{"esc", "back to the reader"},
 		{"q ctrl-c", "quit"},
 	})

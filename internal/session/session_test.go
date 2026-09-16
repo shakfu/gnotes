@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/rank"
-	"github.com/shakfu/gnotes/internal/state"
-	"github.com/shakfu/gnotes/internal/store"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/rank"
+	"github.com/shakfu/gwiki/internal/state"
+	"github.com/shakfu/gwiki/internal/store"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 var testClock = func() time.Time { return time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC) }
@@ -37,7 +37,7 @@ func newSession(t *testing.T) *Session {
 }
 
 // execSQL runs a statement as another SQLite client would: its own connection,
-// default settings, no gnotes.
+// default settings, no gwiki.
 func execSQL(t *testing.T, p *store.Project, query string, args ...any) {
 	t.Helper()
 	db, err := sql.Open("sqlite", p.Path)

@@ -11,7 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/shakfu/gnotes/internal/state"
+	"github.com/shakfu/gwiki/internal/state"
 )
 
 // Query turns typed text into an FTS5 MATCH expression, or "" when the text has

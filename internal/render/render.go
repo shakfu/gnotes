@@ -17,8 +17,8 @@ import (
 	"github.com/yuin/goldmark/ast"
 	extast "github.com/yuin/goldmark/extension/ast"
 
-	"github.com/shakfu/gnotes/internal/display"
-	"github.com/shakfu/gnotes/internal/markdown"
+	"github.com/shakfu/gwiki/internal/display"
+	"github.com/shakfu/gwiki/internal/markdown"
 )
 
 // Styles are the looks of each element.

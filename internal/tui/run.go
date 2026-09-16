@@ -5,7 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/shakfu/gnotes/internal/session"
+	"github.com/shakfu/gwiki/internal/session"
 )
 
 // Run opens the interactive interface and returns when the user leaves.

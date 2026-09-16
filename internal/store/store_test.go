@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/event"
-	"github.com/shakfu/gnotes/internal/rank"
-	"github.com/shakfu/gnotes/internal/state"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/event"
+	"github.com/shakfu/gwiki/internal/rank"
+	"github.com/shakfu/gwiki/internal/state"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 var clock = time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
@@ -192,7 +192,7 @@ func TestDiscoverFindsTheNearestProject(t *testing.T) {
 	}
 }
 
-// An empty .gnotes left by a partial checkout must not shadow a real project
+// An empty .gwiki left by a partial checkout must not shadow a real project
 // further up.
 func TestDiscoverSkipsADirectoryWithoutADatabase(t *testing.T) {
 	root := t.TempDir()
@@ -212,7 +212,7 @@ func TestOpenRefusesANewerSchema(t *testing.T) {
 	if _, err := p.db.Exec(`PRAGMA user_version = 99`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenAt(root); err == nil || !strings.Contains(err.Error(), "newer gnotes") {
+	if _, err := OpenAt(root); err == nil || !strings.Contains(err.Error(), "newer gwiki") {
 		t.Fatalf("OpenAt = %v, want a newer-schema refusal", err)
 	}
 }
@@ -627,7 +627,7 @@ func TestParseLogName(t *testing.T) {
 }
 
 func TestGlobalLocationRoundTrip(t *testing.T) {
-	t.Setenv("GNOTES_HOME", t.TempDir())
+	t.Setenv("GWIKI_HOME", t.TempDir())
 
 	if dir, err := LoadGlobal(); err != nil || dir != "" {
 		t.Fatalf("LoadGlobal before setup = %q, %v; want empty", dir, err)

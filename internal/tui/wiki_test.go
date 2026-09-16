@@ -6,11 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/shakfu/gnotes/internal/wiki"
+	"github.com/shakfu/gwiki/internal/wiki"
 )
 
 type wikiFixture struct {
@@ -57,12 +58,15 @@ func newWikiFixture(t *testing.T) *wikiFixture {
 		return func() tea.Msg { return done(cmd.Run()) }
 	}
 	f.m.width, f.m.height = 100, 30
+	f.m.now = func() time.Time { return time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC) }
+	// Most tests start in the reader; TestWikiOverview starts on the overview.
+	f.m.screen, f.m.base = screenRead, screenRead
 	return f
 }
 
 func (f *wikiFixture) write(page, body string) {
 	f.t.Helper()
-	file := filepath.Join(f.root, ".gnotes", "wiki", filepath.FromSlash(page)+".md")
+	file := filepath.Join(f.root, ".gwiki", "wiki", filepath.FromSlash(page)+".md")
 	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		f.t.Fatal(err)
 	}
@@ -73,7 +77,7 @@ func (f *wikiFixture) write(page, body string) {
 
 func (f *wikiFixture) source(page string) string {
 	f.t.Helper()
-	raw, err := os.ReadFile(filepath.Join(f.root, ".gnotes", "wiki", filepath.FromSlash(page)+".md"))
+	raw, err := os.ReadFile(filepath.Join(f.root, ".gwiki", "wiki", filepath.FromSlash(page)+".md"))
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -103,6 +107,12 @@ func (f *wikiFixture) press(keys ...string) tea.Cmd {
 			msgs = []tea.KeyMsg{{Type: tea.KeyCtrlP}}
 		case "ctrl+u":
 			msgs = []tea.KeyMsg{{Type: tea.KeyCtrlU}}
+		case "ctrl+n":
+			msgs = []tea.KeyMsg{{Type: tea.KeyCtrlN}}
+		case "ctrl+]":
+			msgs = []tea.KeyMsg{{Type: tea.KeyCtrlCloseBracket}}
+		case "ctrl+@":
+			msgs = []tea.KeyMsg{{Type: tea.KeyCtrlAt}}
 		case "down":
 			msgs = []tea.KeyMsg{{Type: tea.KeyDown}}
 		default:
@@ -313,7 +323,7 @@ func TestWikiNewPageAndMove(t *testing.T) {
 	if f.page() != "archive/design-sketch" || !strings.Contains(f.m.status, "moved to archive/design-sketch") {
 		t.Fatalf("after the move: %q, %q", f.page(), f.m.status)
 	}
-	if _, err := os.Stat(filepath.Join(f.root, ".gnotes", "wiki", "archive", "design-sketch.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(f.root, ".gwiki", "wiki", "archive", "design-sketch.md")); err != nil {
 		t.Fatal(err)
 	}
 	// The back stack follows the move.
@@ -345,7 +355,7 @@ func TestWikiPollPicksUpOutsideEdits(t *testing.T) {
 		t.Fatalf("after the poll:\n%s", v)
 	}
 
-	if err := os.Remove(filepath.Join(f.root, ".gnotes", "wiki", "index.md")); err != nil {
+	if err := os.Remove(filepath.Join(f.root, ".gwiki", "wiki", "index.md")); err != nil {
 		t.Fatal(err)
 	}
 	f.m.Update(pollMsg{})
@@ -355,7 +365,7 @@ func TestWikiPollPicksUpOutsideEdits(t *testing.T) {
 	f.view()
 }
 
-func TestWikiEditWritesAndKeepsAConflictingEdit(t *testing.T) {
+func TestWikiExternalEditorWritesAndKeepsAConflictingEdit(t *testing.T) {
 	f := newWikiFixture(t)
 	f.m.focus = focusReader
 	script := filepath.Join(t.TempDir(), "ed.sh")
@@ -370,13 +380,13 @@ func TestWikiEditWritesAndKeepsAConflictingEdit(t *testing.T) {
 	}
 
 	original := f.source("index")
-	f.m.Update(f.press("e")())
+	f.m.Update(f.press("E")())
 	if f.source("index") != original+"Added.\n" || !strings.Contains(f.view(), "Added.") {
 		t.Fatalf("after the edit: %q", f.source("index"))
 	}
 
 	// Someone saves while the editor is open.
-	run := f.press("e")
+	run := f.press("E")
 	f.write("index", "# Home\n\nTheirs, saved first.\n")
 	f.m.Update(run())
 	if f.source("index") != "# Home\n\nTheirs, saved first.\n" {
@@ -402,6 +412,8 @@ func TestWikiViewFitsTheTerminal(t *testing.T) {
 		func() { f.press("esc", "c") },
 		func() { f.press("esc", "t") },
 		func() { f.press("esc", "?") },
+		func() { f.press("esc", "O") },
+		func() { f.m.screen, f.m.listed, f.m.listTitle = screenPages, f.m.pages, "all" },
 	}
 	for _, size := range [][2]int{{100, 30}, {60, 10}, {30, 5}, {12, 3}, {1, 1}} {
 		f.m.width, f.m.height = size[0], size[1]
@@ -442,7 +454,292 @@ func TestWikiEmptyWiki(t *testing.T) {
 	for _, k := range []tea.KeyMsg{{Type: tea.KeyTab}, {Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune("l")}, {Type: tea.KeyRunes, Runes: []rune("e")}, {Type: tea.KeyRunes, Runes: []rune("r")}, {Type: tea.KeyRunes, Runes: []rune("b")}, {Type: tea.KeyBackspace}} {
 		m.Update(k)
 	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if v := stripANSI(m.View()); m.screen != screenHome || !strings.Contains(v, "no pages yet; n creates one") {
+		t.Fatalf("empty wiki overview:\n%s", v)
+	}
+	m.screen, m.base = screenRead, screenRead
+	for _, k := range []tea.KeyMsg{{Type: tea.KeyTab}, {Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune("e")}, {Type: tea.KeyBackspace}} {
+		m.Update(k)
+	}
 	if v := stripANSI(m.View()); !strings.Contains(v, "no pages; n creates one") {
-		t.Fatalf("empty wiki:\n%s", v)
+		t.Fatalf("empty wiki reader:\n%s", v)
+	}
+}
+
+func TestWikiOverview(t *testing.T) {
+	f := newWikiFixture(t)
+	f.write("tasks/ship", "---\ntitle: Ship it\ntype: task\ndue: 2026-09-01\ntags: [release]\n---\n")
+	f.write("later", "# Later\n\n- [ ] tidy up due:2026-09-20\n\n[[Design sketch]]\n")
+	f.m.Update(pollMsg{})
+	f.m.width = 120
+	f.press("O")
+	v := f.view()
+	for _, want := range []string{
+		"overview", "Recent changes", "Tasks  3 open, 1 overdue, 1 due within a week",
+		"Ship it  tasks/ship  overdue 2026-09-01", "tidy up due:2026-09-20  later:3  due 2026-09-20",
+		"Health", "broken links   1", "orphan pages", "dead ends", "Structure  7 pages", "lexer/  2", "#release  1",
+		"most linked", "Design sketch  <- 2",
+	} {
+		if !strings.Contains(v, want) {
+			t.Errorf("overview lacks %q", want)
+		}
+	}
+	if t.Failed() {
+		t.Fatalf("overview:\n%s", v)
+	}
+
+	// The first recent change opens its page.
+	f.press("enter")
+	if f.m.screen != screenRead || f.page() == "" {
+		t.Fatalf("enter on a recent change: screen %d, page %q", f.m.screen, f.page())
+	}
+
+	// The health column: broken links, then orphans as a page list.
+	f.press("O", "l", "enter")
+	if f.m.screen != screenBroken || len(f.m.broken) != 1 {
+		t.Fatalf("broken from the overview: screen %d", f.m.screen)
+	}
+	f.press("esc")
+	if f.m.screen != screenHome {
+		t.Fatalf("esc from a list opened on the overview went to %d", f.m.screen)
+	}
+	f.press("j", "enter")
+	if f.m.screen != screenPages || !strings.Contains(f.view(), "orphan pages") {
+		t.Fatalf("orphans:\n%s", f.view())
+	}
+	f.press("esc")
+
+	// A tag lists its pages.
+	for i := 0; i < 20 && !strings.Contains(stripANSI(f.m.homeColumns()[1][selectable(f.m.homeColumns()[1])[f.m.homeRow[1]]].text), "#release"); i++ {
+		f.press("j")
+	}
+	f.press("enter")
+	if f.m.screen != screenPages || len(f.m.listed) != 1 || f.m.listed[0].Path != "tasks/ship" {
+		t.Fatalf("tag list = %+v", f.m.listed)
+	}
+	f.press("enter")
+	if f.page() != "tasks/ship" {
+		t.Fatalf("opened %q", f.page())
+	}
+
+	// Narrow: one column holding every section.
+	f.press("O")
+	f.m.width = 60
+	if v := f.view(); !strings.Contains(v, "Recent changes") || !strings.Contains(v, "Health") {
+		t.Fatalf("narrow overview:\n%s", v)
+	}
+}
+
+func TestAgo(t *testing.T) {
+	now := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	for d, want := range map[time.Duration]string{
+		10 * time.Second: "just now", 5 * time.Minute: "5m ago", 3 * time.Hour: "3h ago",
+		50 * time.Hour: "2d ago", 40 * 24 * time.Hour: "2026-08-07",
+	} {
+		if got := ago(now, now.Add(-d)); got != want {
+			t.Errorf("ago(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
+
+// typing sends each rune of a string as its own key.
+func (f *wikiFixture) typing(text string) {
+	f.t.Helper()
+	for _, r := range text {
+		f.press(string(r))
+	}
+}
+
+func TestWikiEditorEditsAndSaves(t *testing.T) {
+	f := newWikiFixture(t)
+	f.m.focus = focusReader
+	f.press("e")
+	if f.m.screen != screenEdit || f.m.edit.page != "index" {
+		t.Fatalf("e opened screen %d", f.m.screen)
+	}
+	v := f.view()
+	if !strings.Contains(v, "NORMAL  index") || !strings.Contains(v, "   1 # Home") {
+		t.Fatalf("editor:\n%s", v)
+	}
+
+	// vim keys edit the buffer.
+	f.press("G", "o")
+	f.typing("A new line.")
+	f.press("esc")
+	// o on a checklist item continues the list.
+	if got := f.m.edit.ed.Text(); !strings.HasSuffix(got, "\n- [ ] A new line.\n") {
+		t.Fatalf("after typing:\n%s", got)
+	}
+	if !f.m.edit.ed.Dirty || !strings.Contains(f.view(), "[+]") {
+		t.Fatal("the editor does not show unsaved changes")
+	}
+
+	// :q refuses, :w writes, :q leaves.
+	f.press(":")
+	f.typing("q")
+	f.press("enter")
+	if f.m.screen != screenEdit || !strings.Contains(f.view(), "unsaved changes") {
+		t.Fatalf(":q with changes:\n%s", f.view())
+	}
+	f.press(":")
+	f.typing("w")
+	f.press("enter")
+	if !strings.HasSuffix(f.source("index"), "\n- [ ] A new line.\n") || f.m.edit.ed.Dirty {
+		t.Fatalf("after :w:\n%s", f.source("index"))
+	}
+	f.press(":")
+	f.typing("q")
+	f.press("enter")
+	if f.m.screen != screenRead || f.m.edit != nil {
+		t.Fatalf(":q left screen %d", f.m.screen)
+	}
+	if !strings.Contains(f.view(), "A new line.") {
+		t.Fatalf("the reader does not show the edit:\n%s", f.view())
+	}
+}
+
+func TestWikiEditorDraftsAndConflicts(t *testing.T) {
+	f := newWikiFixture(t)
+	f.m.focus = focusReader
+
+	// A page saved elsewhere while the buffer is clean reloads.
+	f.press("e")
+	f.write("index", "# Home\n\nRewritten elsewhere.\n")
+	f.m.Update(pollMsg{})
+	if !strings.Contains(f.m.edit.ed.Text(), "Rewritten elsewhere") {
+		t.Fatalf("a clean buffer did not reload:\n%s", f.m.edit.ed.Text())
+	}
+
+	// With unsaved changes it warns, and :w refuses until forced.
+	f.press("x")
+	f.write("index", "# Home\n\nAnd again.\n")
+	f.m.Update(pollMsg{})
+	if !f.m.edit.outside || !strings.Contains(f.view(), "changed on disk") {
+		t.Fatalf("no warning:\n%s", f.view())
+	}
+	f.press(":")
+	f.typing("w")
+	f.press("enter")
+	if f.source("index") != "# Home\n\nAnd again.\n" {
+		t.Fatalf(":w overwrote the other save:\n%s", f.source("index"))
+	}
+	if !strings.Contains(f.view(), ":w! overwrites") {
+		t.Fatalf("conflict message:\n%s", f.view())
+	}
+	f.press(":")
+	f.typing("w!")
+	f.press("enter")
+	if got := f.source("index"); got != f.m.edit.ed.Text() || strings.Contains(got, "And again") {
+		t.Fatalf("after :w!:\n%s", got)
+	}
+
+	// A draft is written as the buffer changes, and offered on reopening.
+	f.press("o")
+	f.typing("draft text")
+	f.press("esc")
+	f.m.Update(pollMsg{})
+	drafts, err := os.ReadDir(filepath.Join(f.root, ".gwiki", "drafts"))
+	if err != nil || len(drafts) != 1 {
+		t.Fatalf("drafts = %v, %v", drafts, err)
+	}
+	f.m.edit = nil
+	f.m.screen = screenRead
+	f.press("e")
+	if f.m.prompt == nil || !strings.Contains(f.view(), "restore it? y/n") {
+		t.Fatalf("no draft offer:\n%s", f.view())
+	}
+	f.typing("y")
+	f.press("enter")
+	if !strings.Contains(f.m.edit.ed.Text(), "draft text") {
+		t.Fatalf("draft not restored:\n%s", f.m.edit.ed.Text())
+	}
+	f.press(":")
+	f.typing("w")
+	f.press("enter")
+	if _, err := os.Stat(filepath.Join(f.root, ".gwiki", "drafts", draftName("index"))); !os.IsNotExist(err) {
+		t.Fatal("the draft outlived the save")
+	}
+}
+
+func TestWikiEditorLinksAndCompletion(t *testing.T) {
+	f := newWikiFixture(t)
+	f.m.focus = focusReader
+	f.press("e")
+
+	// Completion after [[ replaces what was typed.
+	f.press("G", "o")
+	f.typing("see [[desi")
+	f.press("ctrl+n")
+	if !strings.Contains(f.m.edit.ed.Text(), "see [[Design sketch") {
+		t.Fatalf("completion:\n%s", f.m.edit.ed.Text())
+	}
+	f.typing("]]")
+	f.press("esc")
+
+	// ctrl-] follows the link under the cursor, after saving.
+	f.press(":")
+	f.typing("w")
+	f.press("enter")
+	f.press("0", "f", "D", "ctrl+]")
+	if f.m.screen != screenRead || f.page() != "lexer/design-sketch" {
+		t.Fatalf("ctrl-] reached %q on screen %d: %s", f.page(), f.m.screen, f.m.status)
+	}
+
+	// A broken link is underlined and named by :check.
+	f.press("e")
+	f.press("G", "o")
+	f.typing("[[Nowhere at all]]")
+	f.press("esc")
+	f.m.checkLinks()
+	if !f.m.edit.broken["[[Nowhere at all]]"] {
+		t.Fatalf("broken = %v", f.m.edit.broken)
+	}
+	f.press(":")
+	f.typing("check")
+	f.press("enter")
+	if !strings.Contains(f.view(), "1 broken link in this page") {
+		t.Fatalf(":check:\n%s", f.view())
+	}
+}
+
+func TestWikiEditorPreviewAndDisplay(t *testing.T) {
+	f := newWikiFixture(t)
+	f.m.focus = focusReader
+	f.press("e")
+	f.press(":")
+	f.typing("preview")
+	f.press("enter")
+	v := f.view()
+	if !strings.Contains(v, "PREVIEW") || strings.Contains(v, "   1 ") {
+		t.Fatalf("preview:\n%s", v)
+	}
+	f.press("esc")
+	if f.m.edit.preview {
+		t.Fatal("esc did not leave the preview")
+	}
+
+	// Every screen size draws without overflowing.
+	for _, size := range [][2]int{{100, 30}, {40, 8}, {12, 3}} {
+		f.m.width, f.m.height = size[0], size[1]
+		out := f.m.View()
+		for _, l := range strings.Split(out, "\n") {
+			if w := ansi.StringWidth(l); w > size[0] {
+				t.Errorf("%dx%d: line %q is %d wide", size[0], size[1], stripANSI(l), w)
+			}
+		}
+	}
+}
+
+// A burst of typing arrives as one message holding several runes.
+func TestWikiEditorTakesAPaste(t *testing.T) {
+	f := newWikiFixture(t)
+	f.m.focus = focusReader
+	f.press("e")
+	f.press("G", "o")
+	f.m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("pasted text")})
+	f.press("esc")
+	if !strings.HasSuffix(f.m.edit.ed.Text(), "pasted text\n") {
+		t.Fatalf("after the paste:\n%s", f.m.edit.ed.Text())
 	}
 }

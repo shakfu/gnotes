@@ -32,7 +32,7 @@ func TestTimeRoundTrip(t *testing.T) {
 }
 
 // The generator must stay strictly ascending even when every call lands in the
-// same millisecond, because gnotes writes several events per user operation.
+// same millisecond, because gwiki writes several events per user operation.
 func TestMonotonicWithinOneMillisecond(t *testing.T) {
 	frozen := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	g := NewGeneratorAt(func() time.Time { return frozen })

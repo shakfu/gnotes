@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/event"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/event"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // State is the tree produced by replaying a log.

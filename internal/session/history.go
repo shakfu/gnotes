@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/search"
-	"github.com/shakfu/gnotes/internal/state"
-	"github.com/shakfu/gnotes/internal/store"
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/search"
+	"github.com/shakfu/gwiki/internal/state"
+	"github.com/shakfu/gwiki/internal/store"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 // Entry is one line of history: what one write did to one node.

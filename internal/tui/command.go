@@ -8,8 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/shakfu/gnotes/internal/rank"
-	"github.com/shakfu/gnotes/internal/state"
+	"github.com/shakfu/gwiki/internal/rank"
+	"github.com/shakfu/gwiki/internal/state"
 )
 
 // tuiCommand is one ':' command.
@@ -186,7 +186,7 @@ var tuiCommands = []*tuiCommand{
 	},
 	{
 		name: "quit", aliases: []string{"q"}, args: "",
-		summary: "leave gnotes",
+		summary: "leave gwiki",
 		run:     func(m *Model, args []string) error { return errQuit },
 	},
 }

@@ -1,9 +1,10 @@
-// Package cli implements the gnotes command line.
+// Package cli implements the gwiki command line: the wiki at the top level,
+// and the notes database under "gwiki notes".
 //
-// Every command is a thin shell over the session package: parse arguments,
-// call one method, print the result. Nothing here decides domain rules, so the
-// command line and the interactive interface cannot disagree about what an
-// operation means.
+// Every command is a thin shell over the wiki or session package: parse
+// arguments, call one method, print the result. Nothing here decides domain
+// rules, so the command line and the interactive interfaces cannot disagree
+// about what an operation means.
 package cli
 
 import (
@@ -14,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/session"
-	"github.com/shakfu/gnotes/internal/store"
+	"github.com/shakfu/gwiki/internal/session"
+	"github.com/shakfu/gwiki/internal/store"
 )
 
 // App holds everything a command needs from its environment. Passing it in
@@ -79,7 +80,7 @@ type command struct {
 	args    string
 	summary string
 
-	// help is the long description, printed by "gnotes help <name>".
+	// help is the long description, printed by "gwiki help <name>" or "gwiki notes help <name>".
 	help string
 
 	run func(*App, []string) error
@@ -90,27 +91,53 @@ type command struct {
 	runNamed func(*App, string, []string) error
 }
 
-// commands is the dispatch table, in the order help prints them.
-var commands []*command
+// A commandTable is one level of commands: the wiki at the top, or the notes under
+// "gwiki notes".
+type commandTable struct {
+	// prefix is what precedes a command name in usage lines.
+	prefix string
+	list   []*command
+	byName map[string]*command
+}
 
-// byName indexes commands and their aliases.
-var byName = map[string]*command{}
+func newTable(prefix string, list []*command) *commandTable {
+	t := &commandTable{prefix: prefix, list: list, byName: map[string]*command{}}
+	for _, c := range list {
+		t.byName[c.name] = c
+		for _, a := range c.aliases {
+			t.byName[a] = c
+		}
+	}
+	return t
+}
+
+// wikiTable and notesTable are filled in init, since their help commands refer
+// back to them.
+var wikiTable, notesTable *commandTable
 
 func init() {
-	commands = []*command{
+	wikiTable = newTable("gwiki", []*command{
+		cmdWikiInit, cmdWikiList, cmdWikiShow, cmdWikiSearch, cmdWikiLinks, cmdWikiBacklinks,
+		cmdWikiCheck, cmdWikiOrphans, cmdWikiTasks,
+		cmdWikiNew, cmdWikiEdit, cmdWikiMove, cmdWikiRemove, cmdWikiTag, cmdWikiUntag,
+		cmdWikiDone, cmdWikiDoing, cmdWikiReopen, cmdWikiPromote,
+		cmdWikiUI, cmdWikiMCP, cmdWikiLSP, cmdWikiCache, cmdNotes, helpCommand(wikiHelp, &wikiTable),
+	})
+	notesTable = newTable("gwiki notes", []*command{
 		cmdInit, cmdNotebook, cmdNote, cmdTask,
 		cmdList, cmdShow, cmdSearch, cmdTags,
 		cmdEdit, cmdStatus, cmdDue, cmdPriority,
 		cmdTag, cmdUntag, cmdAssign, cmdUnassign,
 		cmdLink, cmdUnlink, cmdMove, cmdRemove, cmdRestore,
-		cmdLog, cmdInfo, cmdWho, cmdUI, cmdServe, cmdMCP, cmdWiki, cmdHelp,
-	}
-	for _, c := range commands {
-		byName[c.name] = c
-		for _, a := range c.aliases {
-			byName[a] = c
-		}
-	}
+		cmdLog, cmdInfo, cmdWho, cmdUI, cmdServe, cmdMCP, helpCommand(notesHelp, &notesTable),
+	})
+}
+
+// cmdNotes stands in the wiki table for help; Run dispatches "notes" itself.
+var cmdNotes = &command{
+	name:    "notes",
+	args:    "[-g] <command> [arguments]",
+	summary: "the notes and tasks database, .gwiki/notes.db; 'gwiki notes help' lists its commands",
 }
 
 // Run dispatches one invocation and returns the process exit status.
@@ -118,13 +145,24 @@ func (a *App) Run(args []string) int {
 	if a.Env == nil {
 		a.Env = os.Getenv
 	}
-	// Only before the command: after it, -g would be a word in a title.
-	if len(args) > 0 && args[0] == "-g" {
-		a.Global, args = true, args[1:]
+	if len(args) > 0 && args[0] == "notes" {
+		args = args[1:]
+		// Only before the command: after it, -g would be a word in a title.
+		if len(args) > 0 && args[0] == "-g" {
+			a.Global, args = true, args[1:]
+		}
+		return a.dispatch(notesTable, args)
 	}
+	if len(args) > 0 && args[0] == "-g" {
+		fmt.Fprintln(a.Stderr, "gwiki: -g selects the global notes: gwiki notes -g <command>")
+		return 2
+	}
+	return a.dispatch(wikiTable, args)
+}
+
+func (a *App) dispatch(t *commandTable, args []string) int {
 	if len(args) == 0 {
-		// A bare invocation opens the interactive interface, which is the
-		// usual way to reach for a notes tool.
+		// A bare invocation opens the interactive interface.
 		args = []string{"ui"}
 	}
 
@@ -137,13 +175,13 @@ func (a *App) Run(args []string) int {
 		return 0
 	}
 
-	c, ok := byName[name]
+	c, ok := t.byName[name]
 	if !ok {
-		fmt.Fprintf(a.Stderr, "gnotes: unknown command %q\n", name)
-		if suggestion := closest(name); suggestion != "" {
+		fmt.Fprintf(a.Stderr, "gwiki: unknown command %q\n", name)
+		if suggestion := t.closest(name); suggestion != "" {
 			fmt.Fprintf(a.Stderr, "did you mean %q?\n", suggestion)
 		}
-		fmt.Fprintln(a.Stderr, "run 'gnotes help' for the list")
+		fmt.Fprintf(a.Stderr, "run '%s help' for the list\n", t.prefix)
 		return 2
 	}
 
@@ -155,7 +193,7 @@ func (a *App) Run(args []string) int {
 			break
 		}
 		if arg == "-h" || arg == "--help" {
-			return a.Run([]string{"help", c.name})
+			return a.dispatch(t, []string{"help", c.name})
 		}
 	}
 
@@ -169,12 +207,12 @@ func (a *App) Run(args []string) int {
 			// A detail beyond the bare usage error, such as the flag package's
 			// "flag provided but not defined", is shown first.
 			if detail := strings.TrimPrefix(err.Error(), errUsage.Error()+": "); err != errUsage && detail != "" {
-				fmt.Fprintf(a.Stderr, "gnotes: %s\n", detail)
+				fmt.Fprintf(a.Stderr, "gwiki: %s\n", detail)
 			}
-			fmt.Fprintf(a.Stderr, "usage: gnotes %s %s\n", c.name, c.args)
+			fmt.Fprintf(a.Stderr, "usage: %s %s %s\n", t.prefix, c.name, c.args)
 			return 2
 		}
-		fmt.Fprintf(a.Stderr, "gnotes: %v\n", err)
+		fmt.Fprintf(a.Stderr, "gwiki: %v\n", err)
 		return 1
 	}
 	return 0
@@ -189,10 +227,10 @@ var errUsage = errors.New("usage")
 
 // closest suggests a command for a near miss, using edit distance bounded by a
 // third of the typed length so that unrelated words are not "corrected".
-func closest(typed string) string {
+func (t *commandTable) closest(typed string) string {
 	best, bestDist := "", len(typed)/3+1
 
-	for name := range byName {
+	for name := range t.byName {
 		d := distance(typed, name)
 		if d > bestDist {
 			continue
@@ -252,9 +290,9 @@ func (a *App) open() (*session.Session, error) {
 		case err != nil:
 			return nil, err
 		case dir == "":
-			return nil, errors.New("no global notes; run 'gnotes -g init [dir]'")
+			return nil, errors.New("no global notes; run 'gwiki notes -g init [dir]'")
 		case p == nil:
-			return nil, fmt.Errorf("no global notes project at %s; run 'gnotes -g init'", dir)
+			return nil, fmt.Errorf("no global notes project at %s; run 'gwiki notes -g init'", dir)
 		}
 		s, err = session.OpenProject(p, actor)
 		if err != nil {

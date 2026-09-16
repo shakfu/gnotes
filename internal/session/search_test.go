@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/state"
+	"github.com/shakfu/gwiki/internal/state"
 )
 
 // corpus commits four notes to search.
@@ -198,7 +198,7 @@ func TestHistoryDescribesEachWrite(t *testing.T) {
 	}
 }
 
-// A row edited with another SQLite client is a real edit: gnotes loads it,
+// A row edited with another SQLite client is a real edit: gwiki loads it,
 // records it in history with no author, and indexes it.
 func TestAnEditMadeWithSQLIsLoadedRecordedAndIndexed(t *testing.T) {
 	s := corpus(t)

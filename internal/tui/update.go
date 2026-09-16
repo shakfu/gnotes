@@ -7,9 +7,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/shakfu/gnotes/internal/editor"
-	"github.com/shakfu/gnotes/internal/rank"
-	"github.com/shakfu/gnotes/internal/state"
+	"github.com/shakfu/gwiki/internal/editor"
+	"github.com/shakfu/gwiki/internal/rank"
+	"github.com/shakfu/gwiki/internal/state"
 )
 
 // Update handles one message.
@@ -525,7 +525,7 @@ func (m *Model) promptDelete() {
 
 // undoDelete restores the newest deletion made in this interface that is
 // still deleted. Deletions by anyone else, or from before the interface
-// opened, are left to 'gnotes restore'.
+// opened, are left to 'gwiki notes restore'.
 func (m *Model) undoDelete() {
 	for len(m.deleted) > 0 {
 		id := m.deleted[len(m.deleted)-1]

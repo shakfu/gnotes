@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/shakfu/gnotes/internal/markdown"
+	"github.com/shakfu/gwiki/internal/markdown"
 	"gopkg.in/yaml.v3"
 )
 

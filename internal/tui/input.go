@@ -5,7 +5,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/shakfu/gnotes/internal/display"
+	"github.com/shakfu/gwiki/internal/display"
 )
 
 // input is a single-line text field with a cursor.

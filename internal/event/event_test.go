@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shakfu/gnotes/internal/ulid"
+	"github.com/shakfu/gwiki/internal/ulid"
 )
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
@@ -94,7 +94,7 @@ func TestEncodeRebalanceCarriesRanks(t *testing.T) {
 	}
 }
 
-// A newer gnotes may write actions this build has never heard of. Replay must
+// A newer gwiki may write actions this build has never heard of. Replay must
 // step over them, not refuse the whole log.
 func TestDecodeReportsUnknownActionDistinctly(t *testing.T) {
 	g := ulid.NewGenerator()

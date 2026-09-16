@@ -1,4 +1,4 @@
-// Package mcp serves a gnotes project over the Model Context Protocol, so an
+// Package mcp serves a gwiki project over the Model Context Protocol, so an
 // agent can read and write notes and tasks the same way a person does.
 //
 // It is a fourth front end over the same session package as the command line,
@@ -15,8 +15,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/shakfu/gnotes/internal/session"
-	"github.com/shakfu/gnotes/internal/wiki"
+	"github.com/shakfu/gwiki/internal/session"
+	"github.com/shakfu/gwiki/internal/wiki"
 )
 
 // Protocol versions this server implements, newest first.
@@ -170,7 +170,7 @@ func readLine(r *bufio.Reader) ([]byte, error) {
 func (s *Server) handle(msg message) {
 	// A response from the client answers nothing this server sent.
 	if msg.Method == "" && (len(msg.Result) > 0 || len(msg.Error) > 0) {
-		fmt.Fprintf(s.logw, "gnotes mcp: ignored a response frame\n")
+		fmt.Fprintf(s.logw, "gwiki mcp: ignored a response frame\n")
 		return
 	}
 
@@ -179,11 +179,11 @@ func (s *Server) handle(msg message) {
 	// one would change the project with nobody told the outcome.
 	if len(msg.ID) == 0 {
 		if msg.JSONRPC != "2.0" || !strings.HasPrefix(msg.Method, "notifications/") {
-			fmt.Fprintf(s.logw, "gnotes mcp: ignored %q sent without an id\n", msg.Method)
+			fmt.Fprintf(s.logw, "gwiki mcp: ignored %q sent without an id\n", msg.Method)
 			return
 		}
 		if _, err := s.dispatch(msg.Method, msg.Params); err != nil {
-			fmt.Fprintf(s.logw, "gnotes mcp: %s: %v\n", msg.Method, err)
+			fmt.Fprintf(s.logw, "gwiki mcp: %s: %v\n", msg.Method, err)
 		}
 		return
 	}
@@ -324,7 +324,7 @@ func (s *Server) instructions() string {
 // instructions tell the model what this server is for. It is the one piece of
 // prose the client puts in front of the model unprompted, so it says what the
 // project is and how entries are addressed rather than restating the tool list.
-const instructions = `This project's notes and tasks are stored in gnotes, a SQLite database kept
+const instructions = `This project's notes and tasks are stored in gwiki, a SQLite database kept
 in the repository. Notes hold markdown prose; tasks additionally have a status,
 priority, due date and assignees. Both live in notebooks.
 
@@ -343,7 +343,7 @@ func (s *Server) send(r response) {
 		// Encoding our own reply cannot normally fail. If it does, an error
 		// frame is still better than silence, which would hang the client on a
 		// request that never gets an answer.
-		fmt.Fprintf(s.logw, "gnotes mcp: encode reply: %v\n", err)
+		fmt.Fprintf(s.logw, "gwiki mcp: encode reply: %v\n", err)
 		raw, _ = json.Marshal(response{JSONRPC: "2.0", ID: r.ID, Error: &rpcError{
 			Code: codeInternal, Message: "could not encode the result",
 		}})
@@ -355,7 +355,7 @@ func (s *Server) send(r response) {
 	// Flushed per frame: the client is blocked waiting for this reply, so
 	// holding it in a buffer would deadlock rather than batch.
 	if err := s.out.Flush(); err != nil {
-		fmt.Fprintf(s.logw, "gnotes mcp: write: %v\n", err)
+		fmt.Fprintf(s.logw, "gwiki mcp: write: %v\n", err)
 	}
 }
 

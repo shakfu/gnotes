@@ -1,4 +1,4 @@
-// Package web serves an optional browser view of a gnotes project.
+// Package web serves an optional browser view of a gwiki project.
 //
 // It is a third front end over the same session package the command line and
 // the interactive interface use, so all three agree on what an operation means
@@ -23,7 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/shakfu/gnotes/internal/session"
+	"github.com/shakfu/gwiki/internal/session"
 )
 
 // assets holds the page, its stylesheet and its script.
@@ -191,7 +191,7 @@ func loopbackHost(hostport string) bool {
 func (s *Server) guard(h http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.authorised(r) {
-			http.Error(w, "unauthorised: open the URL gnotes printed, token included", http.StatusUnauthorized)
+			http.Error(w, "unauthorised: open the URL gwiki printed, token included", http.StatusUnauthorized)
 			return
 		}
 		// A browser sends Origin on any cross-site request. Rejecting a
