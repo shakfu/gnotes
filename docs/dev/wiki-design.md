@@ -605,7 +605,8 @@ recorded here.
    Done; results below.
 5. **Language server** (`gwiki lsp`), then the editor of section 11. Both
    done; results below.
-6. **Migration** from `gnotes.db` and JSONL.
+6. **Migration** from the notes database. Done; results below. Removing the
+   notes model is deferred: both are kept for now.
 7. **Browser view.** Done; results below.
 
 The work belongs on a branch until phase 4: the two storage models cannot share
@@ -1098,6 +1099,36 @@ Changes from the design, found while building it:
   than doing nothing.
 - **The page keeps no model**, as the notes view does not: every view is a
   fetch and a redraw.
+
+### Phase 6 results: migration (2026-09-16)
+
+`gwiki migrate` copies the notes database into pages, by the table of section
+14: a notebook becomes a directory, a note a page, a task a task page with its
+status, priority, due date and assignees, tags go to the front matter, and a
+reference becomes a `[[wiki]]` link by title under a "Links" heading.
+
+Nothing is removed. The database is left as it is, and `gwiki notes` still
+reads it. A page already where an entry would go is left alone and counted, so
+the command can be run again after writing more notes. `--dry-run` lists what
+it would write, `--in` puts the notebooks under a directory, and `--global`
+migrates the global notes.
+
+A JSONL project needs no separate path: opening it imports it into the
+database first, as it has since the storage change.
+
+**Deleted entries** are skipped, or written with `--include-deleted` under
+`.gwiki/wiki/.deleted/`. The wiki does not index a hidden directory, so they
+are kept in the repository without appearing in the wiki, which also means
+they are written as files rather than through the write path.
+
+**Exit criterion: a project converts and reads back.** Tests migrate a project
+with a notebook, a note, a task with every field, a reference and a deleted
+entry; check the pages' exact text; confirm the reference resolves; confirm
+the database still lists its entries; and confirm a second run writes nothing.
+
+**Timings.** A project of 5,020 entries: 0.07 s for `--dry-run`, 3.9 s to
+write, which is one commit and one index of 5,020 pages. `gwiki ls` then lists
+5,020 pages with no broken links.
 
 ## 18. Open questions
 

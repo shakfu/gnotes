@@ -23,6 +23,13 @@ type NewPage struct {
 	Task  bool
 	Tags  []string
 	Body  string
+
+	// Status, Priority, Due and Assignees are written to the front matter of
+	// a task page. They are what a migration carries over.
+	Status    string
+	Priority  string
+	Due       string
+	Assignees []string
 }
 
 // Create writes a new page and returns it. Its file name is the title's slug;
@@ -38,9 +45,36 @@ func (w *Wiki) Create(n NewPage) (PageInfo, error) {
 	return w.info(id)
 }
 
+// CreateAll writes several pages in one commit, which a migration needs: one
+// commit each would re-index the wiki once per page. Pages are written in the
+// order given, and a title whose file name is taken gets a numeric suffix.
+func (w *Wiki) CreateAll(pages []NewPage) ([]string, error) {
+	taken := map[string]bool{}
+	var writes []fileWrite
+	var ids []string
+	for _, n := range pages {
+		id, src, err := w.newSourceAvoiding(n, taken)
+		if err != nil {
+			return nil, err
+		}
+		taken[id] = true
+		ids = append(ids, id)
+		writes = append(writes, fileWrite{Page: id, Data: src})
+	}
+	if err := w.commit(writes); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // newSource chooses a new page's path and writes its source. front, when set,
 // adds to the front matter.
 func (w *Wiki) newSource(n NewPage, front func(*yaml.Node)) (string, []byte, error) {
+	return w.newSourceAvoiding(n, nil, front)
+}
+
+// newSourceAvoiding is newSource, also avoiding names this batch has taken.
+func (w *Wiki) newSourceAvoiding(n NewPage, taken map[string]bool, front ...func(*yaml.Node)) (string, []byte, error) {
 	title := strings.TrimSpace(n.Title)
 	if title == "" || strings.ContainsAny(title, "\r\n") {
 		return "", nil, errors.New("a page needs a one-line title")
@@ -58,7 +92,7 @@ func (w *Wiki) newSource(n NewPage, front func(*yaml.Node)) (string, []byte, err
 		return "", nil, err
 	}
 	for i := 2; ; i++ {
-		if _, err := os.Stat(w.file(id)); os.IsNotExist(err) {
+		if _, err := os.Stat(w.file(id)); os.IsNotExist(err) && !taken[id] {
 			break
 		}
 		id = base + "-" + strconv.Itoa(i)
@@ -68,7 +102,24 @@ func (w *Wiki) newSource(n NewPage, front func(*yaml.Node)) (string, []byte, err
 	m := &yaml.Node{Kind: yaml.MappingNode}
 	if n.Task {
 		setScalar(m, "type", "task")
-		setScalar(m, "status", "open")
+		status := n.Status
+		if status == "" {
+			status = "open"
+		}
+		setScalar(m, "status", status)
+		if n.Priority != "" && n.Priority != "none" {
+			setScalar(m, "priority", n.Priority)
+		}
+		if n.Due != "" {
+			setScalar(m, "due", n.Due)
+		}
+		if len(n.Assignees) > 0 {
+			seq := &yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
+			for _, who := range n.Assignees {
+				seq.Content = append(seq.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: who})
+			}
+			m.Content = append(m.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "assignees"}, seq)
+		}
 	}
 	if len(n.Tags) > 0 {
 		seq := &yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle}
@@ -77,8 +128,10 @@ func (w *Wiki) newSource(n NewPage, front func(*yaml.Node)) (string, []byte, err
 		}
 		m.Content = append(m.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "tags"}, seq)
 	}
-	if front != nil {
-		front(m)
+	for _, add := range front {
+		if add != nil {
+			add(m)
+		}
 	}
 	if len(m.Content) > 0 {
 		if src, err = editFront(src, func(fm *yaml.Node) error {

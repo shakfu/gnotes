@@ -185,6 +185,15 @@ gwiki mcp                                   # the agent server, started by a cli
 
 Read commands take `--json`. [The design](docs/dev/wiki-design.md) covers the cache, link resolution and writes in detail.
 
+## Migration
+
+```sh
+gwiki migrate --dry-run     # what it would write
+gwiki migrate               # notebooks become directories, entries become pages
+```
+
+Copies the notes database into pages: a notebook becomes a directory, a note a page, a task a task page with its status, priority, due date and assignees, tags go to the front matter, and a reference becomes a `[[wiki]]` link by title. Nothing is deleted: the database stays, and `gwiki notes` still reads it. Running it again writes only entries that have no page yet. Deleted entries are skipped unless `--include-deleted` is given, which writes them under `.gwiki/wiki/.deleted/`, where the wiki does not index them.
+
 ## Notes
 
 `gwiki notes` is the older part of gwiki: notes and tasks in a SQLite database, `.gwiki/notes.db`, committed with the project. It shares `.gwiki` with the wiki and is independent of it. Its commands are under `gwiki notes`: `gwiki notes help` lists them, `gwiki notes -g` selects the global notes, and `gwiki notes` alone opens its interface.
