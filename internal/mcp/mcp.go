@@ -1,10 +1,10 @@
-// Package mcp serves a gwiki project over the Model Context Protocol, so an
-// agent can read and write notes and tasks the same way a person does.
+// Package mcp serves a gwiki wiki over the Model Context Protocol, so an agent
+// can read and write pages the same way a person does.
 //
-// It is a fourth front end over the same session package as the command line,
-// the interactive interface and the browser view. Every rule about what an
+// It is a front end over the same wiki package as the command line, the
+// interactive interface and the browser view. Every rule about what an
 // operation means lives there, which is what keeps an agent from being able to
-// do something the other three cannot.
+// do something the others cannot.
 package mcp
 
 import (
@@ -15,7 +15,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/shakfu/gwiki/internal/session"
 	"github.com/shakfu/gwiki/internal/wiki"
 )
 
@@ -70,8 +69,6 @@ func (e *rpcError) Error() string { return e.Message }
 
 // Server speaks MCP over a byte stream.
 type Server struct {
-	// Exactly one of sess and wiki is set; it decides the tools served.
-	sess *session.Session
 	wiki *wiki.Wiki
 
 	// out receives protocol frames and nothing else.
@@ -87,13 +84,8 @@ type Server struct {
 	name, version string
 }
 
-// New builds a server over an open session.
-func New(s *session.Session, name, version string) *Server {
-	return &Server{sess: s, name: name, version: version}
-}
-
-// NewWiki builds a server over an open wiki.
-func NewWiki(w *wiki.Wiki, name, version string) *Server {
+// New builds a server over an open wiki.
+func New(w *wiki.Wiki, name, version string) *Server {
 	return &Server{wiki: w, name: name, version: version}
 }
 
@@ -102,7 +94,7 @@ func NewWiki(w *wiki.Wiki, name, version string) *Server {
 //
 // Frames are handled one at a time. The protocol permits a client to pipeline
 // and accept replies out of order, but every operation here is either an
-// in-memory query or a small append, and serialising them means the session
+// cache query or a small file write, and serialising them means the server
 // needs no lock and an agent cannot race itself into a half-applied command.
 func (s *Server) Serve(in io.Reader, out io.Writer, logw io.Writer) error {
 	s.out = bufio.NewWriter(out)
@@ -147,7 +139,7 @@ func (s *Server) Serve(in io.Reader, out io.Writer, logw io.Writer) error {
 // readLine reads one newline-delimited frame.
 //
 // bufio.Scanner would be simpler but caps a token at its buffer size, and a
-// tools/call carrying a long note body legitimately exceeds any fixed cap. A
+// tools/call carrying a long page body legitimately exceeds any fixed cap. A
 // Reader grows to whatever arrives.
 func readLine(r *bufio.Reader) ([]byte, error) {
 	var full []byte
@@ -310,31 +302,9 @@ func (s *Server) initialize(raw json.RawMessage) (any, error) {
 			"name":    s.name,
 			"version": s.version,
 		},
-		"instructions": s.instructions(),
+		"instructions": wikiInstructions,
 	}, nil
 }
-
-func (s *Server) instructions() string {
-	if s.wiki != nil {
-		return wikiInstructions
-	}
-	return instructions
-}
-
-// instructions tell the model what this server is for. It is the one piece of
-// prose the client puts in front of the model unprompted, so it says what the
-// project is and how entries are addressed rather than restating the tool list.
-const instructions = `This project's notes and tasks are stored in gwiki, a SQLite database kept
-in the repository. Notes hold markdown prose; tasks additionally have a status,
-priority, due date and assignees. Both live in notebooks.
-
-Every entry has a six-character handle, shown as its "ref". Pass that handle to
-any tool that takes one. A title or a distinctive fragment of one also works,
-and an ambiguous reference reports the candidates rather than guessing.
-
-Reading is free of side effects. Writing is durable immediately and recorded
-in the project's history. Deletion marks an entry deleted rather than removing
-it, so it can be restored.`
 
 // send writes one frame, terminated by the newline the transport frames on.
 func (s *Server) send(r response) {
@@ -357,18 +327,4 @@ func (s *Server) send(r response) {
 	if err := s.out.Flush(); err != nil {
 		fmt.Fprintf(s.logw, "gwiki mcp: write: %v\n", err)
 	}
-}
-
-// refresh reloads the project when another process has written to it.
-//
-// It runs before every tool call rather than on a timer. The check is a handful
-// of stat calls, and an agent that reads a stale tree acts on notes that no
-// longer say what it thinks they say.
-func (s *Server) refresh() error {
-	if s.wiki != nil {
-		_, err := s.wiki.Refresh()
-		return err
-	}
-	_, err := s.sess.Refresh()
-	return err
 }

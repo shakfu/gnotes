@@ -2,58 +2,40 @@ package mcp
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
-	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/shakfu/gwiki/internal/session"
-	"github.com/shakfu/gwiki/internal/state"
-	"github.com/shakfu/gwiki/internal/store"
-	"github.com/shakfu/gwiki/internal/ulid"
 	"github.com/shakfu/gwiki/internal/wiki"
 )
-
-var clock = func() time.Time { return time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC) }
 
 // fixture drives a server over in-memory streams, exactly as the transport
 // does, so the tests exercise framing and dispatch rather than the handlers
 // alone.
 type fixture struct {
 	t    *testing.T
-	sess *session.Session
-	work string
-
-	// wiki, when set, is served instead of sess.
 	wiki *wiki.Wiki
 }
 
+// newFixture serves an empty wiki in a new repository.
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-
-	p, err := store.Init(t.TempDir(), "demo", clock())
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p, err := wiki.Init(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := session.OpenProject(p, store.Actor{ID: ulid.NewGenerator().New(), Name: "sa"})
+	w, err := wiki.Open(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess.SetClock(clock)
-	if err := sess.Init("demo"); err != nil {
-		t.Fatal(err)
-	}
-	nb, err := sess.NewNotebook("work")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sess.Commit(); err != nil {
-		t.Fatal(err)
-	}
-
-	return &fixture{t: t, sess: sess, work: nb.ID}
+	t.Cleanup(func() { w.Close() })
+	return &fixture{t: t, wiki: w}
 }
 
 // exchange feeds frames through a server and returns the replies, in order.
@@ -61,10 +43,7 @@ func (f *fixture) exchange(frames ...string) []map[string]any {
 	f.t.Helper()
 
 	var out, logw bytes.Buffer
-	srv := New(f.sess, "gwiki", "test")
-	if f.wiki != nil {
-		srv = NewWiki(f.wiki, "gwiki", "test")
-	}
+	srv := New(f.wiki, "gwiki", "test")
 
 	if err := srv.Serve(strings.NewReader(strings.Join(frames, "\n")+"\n"), &out, &logw); err != nil {
 		f.t.Fatalf("Serve: %v\nstderr: %s", err, logw.String())
@@ -160,8 +139,8 @@ func TestInitializeHandshake(t *testing.T) {
 	if info["name"] != "gwiki" || info["version"] != "test" {
 		t.Errorf("serverInfo = %v", info)
 	}
-	if s, _ := result["instructions"].(string); !strings.Contains(s, "handle") {
-		t.Errorf("instructions do not explain handles: %q", s)
+	if s, _ := result["instructions"].(string); !strings.Contains(s, ".gwiki/wiki") {
+		t.Errorf("instructions do not say where pages are: %q", s)
 	}
 }
 
@@ -245,40 +224,15 @@ func TestMalformedFrameIsReportedWithANullID(t *testing.T) {
 // embedded one would split a reply into two unparseable halves.
 func TestRepliesAreOneLineEach(t *testing.T) {
 	f := newFixture(t)
-	n, err := f.sess.NewNote(f.work, "multi", "a\nbody\nwith\nnewlines")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.sess.Commit(); err != nil {
-		t.Fatal(err)
-	}
-	// The session refuses a multi-line title, but another SQLite client can
-	// write one.
-	db, err := sql.Open("sqlite", f.sess.Project.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if _, err := db.Exec(`UPDATE nodes SET title = ? WHERE id = ?`, "multi\nline\nbody test", n.ID); err != nil {
-		t.Fatal(err)
-	}
+	f.page("multi", "# multi\nline\nbody test\n")
 
-	var out, logw bytes.Buffer
-	srv := New(f.sess, "gwiki", "test")
-	frame := f.frame(1, "tools/call", map[string]any{
-		"name": "gwiki_get", "arguments": map[string]any{"ref": "multi"},
-	})
-	if err := srv.Serve(strings.NewReader(frame+"\n"), &out, &logw); err != nil {
-		t.Fatal(err)
-	}
-
-	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("one reply produced %d lines; a body newline leaked into the framing", len(lines))
-	}
-	var reply map[string]any
-	if err := json.Unmarshal([]byte(lines[0]), &reply); err != nil {
-		t.Fatalf("reply is not parseable: %v", err)
+	// exchange parses each output line as one reply, so a leaked newline shows
+	// up as an extra reply or a parse failure.
+	replies := f.exchange(f.frame(1, "tools/call", map[string]any{
+		"name": "gwiki_read", "arguments": map[string]any{"page": "multi"},
+	}))
+	if len(replies) != 1 {
+		t.Fatalf("one request produced %d replies; a body newline leaked into the framing", len(replies))
 	}
 }
 
@@ -287,14 +241,9 @@ func TestLargeFrameIsRead(t *testing.T) {
 	f := newFixture(t)
 
 	body := strings.Repeat("lorem ipsum dolor sit amet ", 8000) // ~200 KB
-	text := f.mustCall("gwiki_create", map[string]any{
-		"kind": "note", "title": "large", "body": body, "notebook": f.work,
-	})
-	if !strings.Contains(text, "Created note") {
-		t.Fatalf("create failed: %s", text)
-	}
+	f.mustCall("gwiki_create", map[string]any{"title": "large", "body": body})
 
-	got := f.mustCall("gwiki_get", map[string]any{"ref": "large"})
+	got := f.mustCall("gwiki_read", map[string]any{"page": "large"})
 	if !strings.Contains(got, "lorem ipsum") {
 		t.Fatal("the large body did not round-trip")
 	}
@@ -306,7 +255,7 @@ func TestDiagnosticsGoToTheLogStreamOnly(t *testing.T) {
 	f := newFixture(t)
 
 	var out, logw bytes.Buffer
-	srv := New(f.sess, "gwiki", "test")
+	srv := New(f.wiki, "gwiki", "test")
 
 	// A notification that fails: its error has nowhere to go but the log.
 	frames := strings.Join([]string{
@@ -332,17 +281,12 @@ func TestDiagnosticsGoToTheLogStreamOnly(t *testing.T) {
 // ---------------------------------------------------------------- tools/list
 
 func TestToolsListIsWellFormed(t *testing.T) {
-	checkToolsList(t, newFixture(t), registry)
-	checkToolsList(t, newWikiFixture(t), wikiRegistry)
-}
-
-func checkToolsList(t *testing.T, f *fixture, registry []registered) {
-	t.Helper()
+	f := newFixture(t)
 	replies := f.exchange(f.frame(1, "tools/list", nil))
 	tools := replies[0]["result"].(map[string]any)["tools"].([]any)
 
-	if len(tools) != len(registry) {
-		t.Fatalf("listed %d tools, registry has %d", len(tools), len(registry))
+	if len(tools) != len(wikiRegistry) {
+		t.Fatalf("listed %d tools, registry has %d", len(tools), len(wikiRegistry))
 	}
 
 	seen := map[string]bool{}
@@ -386,201 +330,17 @@ func checkToolsList(t *testing.T, f *fixture, registry []registered) {
 	}
 }
 
-// Annotations tell a client what to confirm with the user, so they must match
-// what the tool actually does.
-func TestAnnotationsMatchBehaviour(t *testing.T) {
-	readOnly := map[string]bool{"gwiki_list": true, "gwiki_search": true, "gwiki_get": true}
-
-	for _, entry := range registry {
-		if entry.Annotations == nil {
-			t.Errorf("%s has no annotations", entry.Name)
-			continue
-		}
-		if got := entry.Annotations.ReadOnlyHint; got != readOnly[entry.Name] {
-			t.Errorf("%s readOnlyHint = %v, want %v", entry.Name, got, readOnly[entry.Name])
-		}
-		if entry.Name == "gwiki_delete" {
-			if entry.Annotations.DestructiveHint == nil || !*entry.Annotations.DestructiveHint {
-				t.Error("gwiki_delete is not marked destructive")
-			}
-		}
-	}
-}
-
 // ---------------------------------------------------------------- tools/call
 
-func TestCreateAndRead(t *testing.T) {
-	f := newFixture(t)
-
-	created := f.mustCall("gwiki_create", map[string]any{
-		"kind": "task", "title": "fix the lexer", "notebook": "work",
-		"tags": []string{"bug"}, "priority": "high", "due": "2026-09-01",
-	})
-	if !strings.Contains(created, "Created task") {
-		t.Fatalf("create said: %s", created)
-	}
-
-	got := f.mustCall("gwiki_get", map[string]any{"ref": "fix the lexer"})
-	for _, want := range []string{"kind: task", "status: open", "priority: high", "due: 2026-09-01", "tags: bug"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("get output is missing %q:\n%s", want, got)
-		}
-	}
-}
-
-func TestListFilters(t *testing.T) {
-	f := newFixture(t)
-	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "design sketch", "notebook": "work", "tags": []string{"design"}})
-	f.mustCall("gwiki_create", map[string]any{"kind": "task", "title": "fix the lexer", "notebook": "work", "tags": []string{"bug"}})
-
-	cases := map[string]struct {
-		args    map[string]any
-		want    string
-		notWant string
-	}{
-		"everything":  {map[string]any{}, "design sketch", ""},
-		"by kind":     {map[string]any{"kind": "task"}, "fix the lexer", "design sketch"},
-		"by tag":      {map[string]any{"tags": []string{"bug"}}, "fix the lexer", "design sketch"},
-		"by status":   {map[string]any{"status": "open"}, "fix the lexer", "design sketch"},
-		"by text":     {map[string]any{"text": "sketch"}, "design sketch", "fix the lexer"},
-		"by notebook": {map[string]any{"notebook": "work"}, "fix the lexer", ""},
-		"notebooks":   {map[string]any{"kind": "notebook"}, "work", "fix the lexer"},
-	}
-
-	for name, c := range cases {
-		t.Run(name, func(t *testing.T) {
-			got := f.mustCall("gwiki_list", c.args)
-			if !strings.Contains(got, c.want) {
-				t.Errorf("missing %q:\n%s", c.want, got)
-			}
-			if c.notWant != "" && strings.Contains(got, c.notWant) {
-				t.Errorf("unexpectedly present %q:\n%s", c.notWant, got)
-			}
-		})
-	}
-}
-
-func TestListRespectsTheLimitAndSaysSo(t *testing.T) {
-	f := newFixture(t)
-	for i := 0; i < 5; i++ {
-		f.mustCall("gwiki_create", map[string]any{
-			"kind": "note", "title": fmt.Sprintf("note %d", i), "notebook": "work",
-		})
-	}
-
-	got := f.mustCall("gwiki_list", map[string]any{"limit": 2})
-	if strings.Count(got, "note ") < 2 {
-		t.Fatalf("fewer than the limit returned:\n%s", got)
-	}
-	if !strings.Contains(got, "more not shown") {
-		t.Fatalf("truncation was silent; the model cannot tell it saw a partial list:\n%s", got)
-	}
-}
-
-func TestSearchFindsBodyText(t *testing.T) {
-	f := newFixture(t)
-	f.mustCall("gwiki_create", map[string]any{
-		"kind": "note", "title": "design sketch", "notebook": "work",
-		"body": "The lexer tokenizes input before the parser runs.",
-	})
-
-	got := f.mustCall("gwiki_search", map[string]any{"query": "tokenizes"})
-	if !strings.Contains(got, "design sketch") {
-		t.Fatalf("search missed a body match:\n%s", got)
-	}
-	if !strings.Contains(got, "tokenizes") {
-		t.Fatalf("no snippet explaining the match:\n%s", got)
-	}
-
-	if got := f.mustCall("gwiki_search", map[string]any{"query": "nothinglikethis"}); !strings.Contains(got, "Nothing matches") {
-		t.Fatalf("a fruitless search said: %s", got)
-	}
-}
-
-func TestUpdateChangesOnlyWhatIsGiven(t *testing.T) {
-	f := newFixture(t)
-	f.mustCall("gwiki_create", map[string]any{"kind": "task", "title": "ship it", "notebook": "work", "body": "keep me"})
-
-	f.mustCall("gwiki_update", map[string]any{"ref": "ship it", "status": "done"})
-	got := f.mustCall("gwiki_get", map[string]any{"ref": "ship it"})
-
-	if !strings.Contains(got, "status: done") {
-		t.Errorf("status did not change:\n%s", got)
-	}
-	if !strings.Contains(got, "keep me") {
-		t.Errorf("the body was lost by an unrelated update:\n%s", got)
-	}
-}
-
-func TestUpdateWithNoFieldsSaysSo(t *testing.T) {
-	f := newFixture(t)
-	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "untouched", "notebook": "work"})
-
-	got := f.mustCall("gwiki_update", map[string]any{"ref": "untouched"})
-	if !strings.Contains(got, "Nothing to change") {
-		t.Fatalf("a no-op update said: %s", got)
-	}
-}
-
-func TestUpdateTagsAndLinks(t *testing.T) {
-	f := newFixture(t)
-	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "design sketch", "notebook": "work"})
-	f.mustCall("gwiki_create", map[string]any{"kind": "task", "title": "implement it", "notebook": "work"})
-
-	f.mustCall("gwiki_update", map[string]any{"ref": "implement it", "addTags": []string{"Bug", "parser"}, "link": "design sketch"})
-
-	got := f.mustCall("gwiki_get", map[string]any{"ref": "implement it"})
-	if !strings.Contains(got, "tags: bug, parser") {
-		t.Errorf("tags = %s", got)
-	}
-	if !strings.Contains(got, "references:") || !strings.Contains(got, "design sketch") {
-		t.Errorf("the link is not shown:\n%s", got)
-	}
-
-	// And the other direction.
-	back := f.mustCall("gwiki_get", map[string]any{"ref": "design sketch"})
-	if !strings.Contains(back, "referenced by:") {
-		t.Errorf("no backlink:\n%s", back)
-	}
-
-	f.mustCall("gwiki_update", map[string]any{"ref": "implement it", "removeTags": []string{"bug"}})
-	if got := f.mustCall("gwiki_get", map[string]any{"ref": "implement it"}); strings.Contains(got, "bug") {
-		t.Errorf("the tag survived removal:\n%s", got)
-	}
-}
-
-// The kind distinction is enforced in the session, and an agent is subject to
-// it exactly as a person is.
-func TestTaskFieldsAreRefusedOnNotes(t *testing.T) {
-	f := newFixture(t)
-	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "just a note", "notebook": "work"})
-
-	for _, args := range []map[string]any{
-		{"ref": "just a note", "status": "done"},
-		{"ref": "just a note", "priority": "high"},
-		{"ref": "just a note", "due": "2026-09-01"},
-	} {
-		text, isError := f.call("gwiki_update", args)
-		if !isError {
-			t.Errorf("%v was accepted on a note", args)
-		}
-		if !strings.Contains(text, "not a task") {
-			t.Errorf("%v: unhelpful message %q", args, text)
-		}
-	}
-}
-
-// A failed operation is a readable result, not a protocol fault: the model has
-// to be able to see what went wrong and try something else.
 func TestOperationFailuresAreToolErrorsNotProtocolErrors(t *testing.T) {
 	f := newFixture(t)
 
 	for name, args := range map[string]map[string]any{
-		"unknown entry":   {"ref": "nothing like this exists"},
-		"empty reference": {"ref": ""},
+		"unknown page":    {"page": "nothing like this exists"},
+		"empty page name": {"page": ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			text, isError := f.call("gwiki_get", args)
+			text, isError := f.call("gwiki_read", args)
 			if !isError {
 				t.Fatal("the failure was not reported")
 			}
@@ -591,17 +351,17 @@ func TestOperationFailuresAreToolErrorsNotProtocolErrors(t *testing.T) {
 	}
 }
 
-// An ambiguous reference must list the candidates so the model can pick one.
-func TestAmbiguousReferenceListsCandidates(t *testing.T) {
+// An ambiguous page name must list the candidates so the model can pick one.
+func TestAmbiguousPageNameListsCandidates(t *testing.T) {
 	f := newFixture(t)
-	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "parser one", "notebook": "work"})
-	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "parser two", "notebook": "work"})
+	f.page("parser-one", "# parser one\n")
+	f.page("parser-two", "# parser two\n")
 
-	text, isError := f.call("gwiki_get", map[string]any{"ref": "parser"})
+	text, isError := f.call("gwiki_read", map[string]any{"page": "parser"})
 	if !isError {
-		t.Fatal("an ambiguous reference was resolved")
+		t.Fatal("an ambiguous page name was resolved")
 	}
-	for _, want := range []string{"parser one", "parser two"} {
+	for _, want := range []string{"parser-one", "parser-two"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the message does not list %q: %s", want, text)
 		}
@@ -628,101 +388,24 @@ func TestUnknownToolIsAProtocolError(t *testing.T) {
 func TestUnknownArgumentIsRejected(t *testing.T) {
 	f := newFixture(t)
 
-	text, isError := f.call("gwiki_list", map[string]any{"kynd": "task"})
+	text, isError := f.call("gwiki_list", map[string]any{"tga": "design"})
 	if !isError {
 		t.Fatalf("a mistyped argument was ignored: %s", text)
 	}
-	if !strings.Contains(text, "kynd") {
+	if !strings.Contains(text, "tga") {
 		t.Errorf("the message does not name the bad field: %s", text)
 	}
 }
 
-func TestDeleteAndRestore(t *testing.T) {
-	f := newFixture(t)
-	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "temporary", "notebook": "work"})
-
-	deleted := f.mustCall("gwiki_delete", map[string]any{"ref": "temporary"})
-	if !strings.Contains(deleted, "gwiki_restore") {
-		t.Errorf("the delete message does not say how to undo it: %s", deleted)
-	}
-	if got := f.mustCall("gwiki_list", nil); strings.Contains(got, "temporary") {
-		t.Errorf("the deleted note is still listed:\n%s", got)
-	}
-
-	f.mustCall("gwiki_restore", map[string]any{"ref": "temporary"})
-	if got := f.mustCall("gwiki_list", nil); !strings.Contains(got, "temporary") {
-		t.Errorf("restore did not bring it back:\n%s", got)
-	}
-}
-
-func TestCreateWithoutANotebookUsesTheDefault(t *testing.T) {
-	t.Helper()
-
-	p, err := store.Init(t.TempDir(), "empty", clock())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess, err := session.OpenProject(p, store.Actor{ID: ulid.NewGenerator().New(), Name: "sa"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess.SetClock(clock)
-	if err := sess.Init("empty"); err != nil {
-		t.Fatal(err)
-	}
-
-	f := &fixture{t: t, sess: sess}
-	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "straight in"})
-
-	if got := f.mustCall("gwiki_list", map[string]any{"kind": "notebook"}); !strings.Contains(got, "inbox") {
-		t.Fatalf("no default notebook was created:\n%s", got)
-	}
-}
-
-// Writes must reach disk when the tool returns, not when the process exits: a
-// client may stop the server at any point.
-func TestWritesAreCommittedImmediately(t *testing.T) {
-	f := newFixture(t)
-	f.mustCall("gwiki_create", map[string]any{"kind": "note", "title": "persisted", "notebook": "work"})
-
-	if f.sess.Pending() != 0 {
-		t.Fatalf("%d events left uncommitted", f.sess.Pending())
-	}
-	other, err := session.OpenProject(f.sess.Project, f.sess.Actor)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := other.State.List(state.Filter{Text: "persisted"}, state.OrderRank); len(got) != 1 {
-		t.Fatal("the entry did not reach disk")
-	}
-}
-
-// The command line or another machine may write while the server is running.
+// The command line or an editor may write while the server is running.
 func TestOutsideWritesAreNoticed(t *testing.T) {
 	f := newFixture(t)
-	srv := New(f.sess, "gwiki", "test")
+	f.mustCall("gwiki_list", nil)
+	f.page("elsewhere", "# from elsewhere\n")
 
-	other, err := session.OpenProject(f.sess.Project, store.Actor{ID: ulid.NewGenerator().New(), Name: "bob"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	other.SetClock(clock)
-	if _, err := other.NewNote(f.work, "from elsewhere", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := other.Commit(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Going through the server, which refreshes before each call.
-	var out, logw bytes.Buffer
-	frame := f.frame(1, "tools/call", map[string]any{"name": "gwiki_list", "arguments": map[string]any{}})
-	if err := srv.Serve(strings.NewReader(frame+"\n"), &out, &logw); err != nil {
-		t.Fatal(err)
-	}
-
-	if !strings.Contains(out.String(), "from elsewhere") {
-		t.Fatalf("the outside write was not picked up:\n%s", out.String())
+	// The server refreshes before each call.
+	if out := f.mustCall("gwiki_list", nil); !strings.Contains(out, "from elsewhere") {
+		t.Fatalf("the outside write was not picked up:\n%s", out)
 	}
 }
 
@@ -735,7 +418,7 @@ func TestSequentialRequestsOnOneConnection(t *testing.T) {
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
 		f.frame(2, "tools/list", nil),
 		f.frame(3, "tools/call", map[string]any{
-			"name": "gwiki_create", "arguments": map[string]any{"kind": "note", "title": "one", "notebook": "work"},
+			"name": "gwiki_create", "arguments": map[string]any{"title": "one"},
 		}),
 		f.frame(4, "tools/call", map[string]any{
 			"name": "gwiki_list", "arguments": map[string]any{},
@@ -753,69 +436,7 @@ func TestSequentialRequestsOnOneConnection(t *testing.T) {
 
 	last := replies[3]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
 	if !strings.Contains(last["text"].(string), "one") {
-		t.Fatalf("the entry created earlier in the session is not listed: %v", last)
-	}
-}
-
-func TestAFailedToolDoesNotLeakIntoTheNextCall(t *testing.T) {
-	f := newFixture(t)
-
-	// The task is staged before the priority is parsed, so this fails with an
-	// event already in the session.
-	text, isError := f.call("gwiki_create", map[string]any{
-		"kind": "task", "title": "leaked", "notebook": f.work, "priority": "screaming",
-	})
-	if !isError {
-		t.Fatalf("an unknown priority was accepted: %s", text)
-	}
-
-	f.mustCall("gwiki_create", map[string]any{
-		"kind": "note", "title": "kept", "notebook": f.work,
-	})
-
-	fresh, err := session.OpenProject(f.sess.Project, f.sess.Actor)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	var leaked, kept bool
-	for _, n := range fresh.State.Nodes {
-		switch n.Title {
-		case "leaked":
-			leaked = true
-		case "kept":
-			kept = true
-		}
-	}
-	if leaked {
-		t.Fatal("the failed tool's node was written by the next tool's commit")
-	}
-	if !kept {
-		t.Fatal("the later note was not written")
-	}
-}
-
-// A link to a deleted entry is listed by gwiki_get, so gwiki_update must be
-// able to remove it by the handle shown.
-func TestUnlinkADeletedTarget(t *testing.T) {
-	f := newFixture(t)
-	src, _ := f.sess.NewNote(f.work, "source", "")
-	dst, _ := f.sess.NewNote(f.work, "destination", "")
-	if err := f.sess.Link(src, dst); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.sess.Delete(dst); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.sess.Commit(); err != nil {
-		t.Fatal(err)
-	}
-
-	text, isError := f.call("gwiki_update", map[string]any{"ref": "source", "unlink": dst.ID[len(dst.ID)-6:]})
-	if isError {
-		t.Fatalf("unlink failed: %s", text)
-	}
-	if links := f.sess.State.Get(src.ID).Links; len(links) != 0 {
-		t.Fatalf("links = %v, want none", links)
+		t.Fatalf("the page created earlier on the connection is not listed: %v", last)
 	}
 }
 
@@ -855,8 +476,8 @@ func TestFramesWithoutARequestAreNotAnsweredOrRun(t *testing.T) {
 	if len(replies) != 0 {
 		t.Fatalf("got replies %v, want none", replies)
 	}
-	if got := f.sess.State.List(state.Filter{Text: "ghost"}, state.OrderRank); len(got) != 0 {
-		t.Fatal("a tools/call without an id created an entry")
+	if _, err := os.Stat(filepath.Join(f.wiki.PagesPath(), "ghost.md")); err == nil {
+		t.Fatal("a tools/call without an id created a page")
 	}
 }
 
@@ -868,40 +489,5 @@ func TestEveryReplyCarriesAResultOrAnError(t *testing.T) {
 	}
 	if _, ok := replies[0]["result"]; !ok {
 		t.Fatalf("reply = %v, want a result", replies[0])
-	}
-}
-
-// An update reports what it changed, not every field it was given.
-func TestUpdateReportsOnlyRealChanges(t *testing.T) {
-	f := newFixture(t)
-	f.mustCall("gwiki_create", map[string]any{"kind": "task", "title": "steady"})
-
-	text := f.mustCall("gwiki_update", map[string]any{"ref": "steady", "status": "open"})
-	if !strings.HasPrefix(text, "No change") {
-		t.Fatalf("setting the current status reported %q", text)
-	}
-	text = f.mustCall("gwiki_update", map[string]any{"ref": "steady", "status": "done", "priority": ""})
-	if !strings.Contains(text, "(status)") {
-		t.Fatalf("reply = %q, want status reported", text)
-	}
-}
-
-func TestNotebooksRefuseEntryFields(t *testing.T) {
-	f := newFixture(t)
-	if text, isError := f.call("gwiki_create", map[string]any{"kind": "notebook", "title": "nb", "tags": []string{"x"}}); !isError {
-		t.Fatalf("a notebook with tags was created: %s", text)
-	}
-	if text, isError := f.call("gwiki_update", map[string]any{"ref": "work", "notebook": "work"}); !isError {
-		t.Fatalf("a notebook was moved into a notebook: %s", text)
-	}
-}
-
-func TestAMissingRefIsNamed(t *testing.T) {
-	f := newFixture(t)
-	for _, tool := range []string{"gwiki_get", "gwiki_update", "gwiki_delete", "gwiki_restore"} {
-		text, isError := f.call(tool, map[string]any{})
-		if !isError || !strings.Contains(text, `"ref" is required`) {
-			t.Errorf("%s without ref = %q", tool, text)
-		}
 	}
 }

@@ -2,7 +2,7 @@
 //
 // Pages live under .gwiki/wiki and are committed with the repository; a
 // derived cache, .gwiki/cache.db, indexes their links, headings, tags and
-// tasks. The older notes and tasks database is under "gwiki notes".
+// tasks.
 package main
 
 import (

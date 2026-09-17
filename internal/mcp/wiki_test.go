@@ -10,25 +10,6 @@ import (
 	"github.com/shakfu/gwiki/internal/wiki"
 )
 
-// newWikiFixture serves an empty wiki in a new repository.
-func newWikiFixture(t *testing.T) *fixture {
-	t.Helper()
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	p, err := wiki.Init(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w, err := wiki.Open(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { w.Close() })
-	return &fixture{t: t, wiki: w}
-}
-
 // page writes a page directly, as an editor outside gwiki would.
 func (f *fixture) page(id, src string) {
 	f.t.Helper()
@@ -80,7 +61,7 @@ func TestWikiAnnotationsMatchBehaviour(t *testing.T) {
 }
 
 func TestWikiInstructions(t *testing.T) {
-	f := newWikiFixture(t)
+	f := newFixture(t)
 	replies := f.exchange(f.frame(1, "initialize", map[string]any{"protocolVersion": "2025-06-18"}))
 	result := replies[0]["result"].(map[string]any)
 	if got := result["instructions"].(string); !strings.Contains(got, ".gwiki/wiki") {
@@ -92,7 +73,7 @@ func TestWikiInstructions(t *testing.T) {
 }
 
 func TestWikiCreateReadEditAndWrite(t *testing.T) {
-	f := newWikiFixture(t)
+	f := newFixture(t)
 
 	out := f.mustCall("gwiki_create", map[string]any{"title": "Parser notes", "dir": "lexer", "tags": []string{"parser"}, "body": "One.\n\nTwo."})
 	if !strings.HasPrefix(out, "created lexer/parser-notes\n") {
@@ -145,7 +126,7 @@ func TestWikiCreateReadEditAndWrite(t *testing.T) {
 }
 
 func TestWikiSearchListAndRead(t *testing.T) {
-	f := newWikiFixture(t)
+	f := newFixture(t)
 	f.page("index", "# Index\n\nSee [[Lexer]] and [code](../../main.go#L1) and [[Nowhere]].\n")
 	f.page("lexer", "---\ntags: [code]\n---\n\n# Lexer\n\n## Tokens\n\nThe lexer tokenizes input.\n")
 	if err := os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(f.wiki.PagesPath())), "main.go"), []byte("package main\n"), 0o644); err != nil {
@@ -178,7 +159,7 @@ func TestWikiSearchListAndRead(t *testing.T) {
 }
 
 func TestWikiRenameCheckAndFix(t *testing.T) {
-	f := newWikiFixture(t)
+	f := newFixture(t)
 	f.page("index", "# Index\n\n- [[lexer/design-sketch]]\n- [sketch](lexer/design-sketch.md)\n- [[Missing pages]]\n")
 	f.page("lexer/design-sketch", "# Design sketch\n")
 	f.page("missing-page", "# Missing page\n")
@@ -226,7 +207,7 @@ func TestWikiRenameCheckAndFix(t *testing.T) {
 }
 
 func TestWikiTasksAndSetTask(t *testing.T) {
-	f := newWikiFixture(t)
+	f := newFixture(t)
 	f.page("plan", "# Plan\n\n- [ ] first due:2026-10-01\n- [x] second\n")
 	f.page("tasks/ship", "---\ntitle: Ship\ntype: task\npriority: high\n---\n")
 

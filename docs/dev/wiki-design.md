@@ -1130,10 +1130,17 @@ the database still lists its entries; and confirm a second run writes nothing.
 write, which is one commit and one index of 5,020 pages. `gwiki ls` then lists
 5,020 pages with no broken links.
 
+### Notes removed (2026-09-17)
+
+The notes model is deleted: `gwiki notes`, global notes, `gwiki migrate`, and
+the `event`, `state`, `store`, `session`, `rank`, `ulid` and `web` packages.
+Non-test Go fell from 26,323 to 17,093 lines; the binary from 21.1 MB to
+20.3 MB, since the cache keeps SQLite. Migration stays available in 0.1.1.
+
 ## 18. Open questions
 
-1. **Global notes.** Do they keep `-g`, with the same layout under `~/notes`,
-   or become a wiki with no repository to link into?
+1. **Global notes.** Decided: dropped with the notes model (section 17,
+   "Notes removed"). There is no global wiki.
 2. **Checklist items in other files.** Should `tasks` also collect `- [ ]`
    items from markdown outside `.gnotes/wiki`, such as `TODO.md`?
 3. **Assignees without accounts.** With the developer and agents as writers,

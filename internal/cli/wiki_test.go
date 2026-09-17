@@ -14,7 +14,6 @@ import (
 // wikiFixture is a directory with a wiki of five pages, driven through App.
 func wikiFixture(t *testing.T) *fixture {
 	t.Helper()
-	t.Setenv("GWIKI_HOME", t.TempDir())
 	f := &fixture{t: t, dir: t.TempDir(), now: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)}
 	if err := os.Mkdir(filepath.Join(f.dir, ".git"), 0o755); err != nil {
 		t.Fatal(err)
@@ -164,11 +163,8 @@ func TestWikiErrors(t *testing.T) {
 	if _, _, code := f.run("nosuch"); code != 2 {
 		t.Errorf("unknown subcommand: exit %d, want 2", code)
 	}
-	if out := f.mustRun("help"); !strings.Contains(out, "backlinks") || !strings.Contains(out, "notes") {
-		t.Errorf("help does not list the wiki commands and notes:\n%s", out)
-	}
-	if _, stderr, code := f.run("-g", "ls"); code == 0 || !strings.Contains(stderr, "gwiki notes -g") {
-		t.Errorf("-g ls: exit %d, %s", code, stderr)
+	if out := f.mustRun("help"); !strings.Contains(out, "backlinks") {
+		t.Errorf("help does not list the wiki commands:\n%s", out)
 	}
 	if _, stderr, code := f.run("show", "sketch", "grammar"); code == 0 || !strings.Contains(stderr, "no page matches") {
 		t.Errorf("show of nothing: exit %d, %s", code, stderr)
@@ -393,31 +389,6 @@ func TestWikiLSP(t *testing.T) {
 	}
 }
 
-// The wiki and the notes database share .gwiki.
-func TestWikiAndNotesShareTheDirectory(t *testing.T) {
-	t.Setenv("GWIKI_HOME", t.TempDir())
-	f := &fixture{t: t, dir: t.TempDir(), now: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)}
-	f.mustRun("init")
-	f.mustRun("notes", "init", "demo", "--user", "sa")
-	f.mustRun("new", "A page")
-	f.mustRun("notes", "note", "a note")
-	if out := f.mustRun("ls"); !strings.Contains(out, "A page") {
-		t.Fatalf("ls: %s", out)
-	}
-	if out := f.mustRun("notes", "ls"); !strings.Contains(out, "a note") {
-		t.Fatalf("notes ls: %s", out)
-	}
-	raw, err := os.ReadFile(filepath.Join(f.dir, ".gwiki", ".gitignore"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"cache.db*\n", "drafts/\n", "notes.db-journal\n"} {
-		if !strings.Contains(string(raw), want) {
-			t.Errorf(".gitignore lacks %q:\n%s", want, raw)
-		}
-	}
-}
-
 func TestADirectoryFromBeforeTheRenameIsNamed(t *testing.T) {
 	f := &fixture{t: t, dir: t.TempDir(), now: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)}
 	if err := os.MkdirAll(filepath.Join(f.dir, ".gnotes", "wiki"), 0o755); err != nil {
@@ -431,7 +402,7 @@ func TestADirectoryFromBeforeTheRenameIsNamed(t *testing.T) {
 func TestWikiServeFlags(t *testing.T) {
 	f := wikiFixture(t)
 	out := f.mustRun("help", "serve")
-	for _, want := range []string{"--no-open", "access token", "overview"} {
+	for _, want := range []string{"--no-open", "access token", "overview", "SSH"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help serve lacks %q:\n%s", want, out)
 		}
@@ -442,84 +413,5 @@ func TestWikiServeFlags(t *testing.T) {
 	}
 	if _, stderr, code := f.run("serve", "--token", "short"); code == 0 || !strings.Contains(stderr, "16 characters") {
 		t.Fatalf("a short token: exit %d, %s", code, stderr)
-	}
-}
-
-// migrateFixture is a notes project with notebooks, notes and tasks, in a
-// directory that has no wiki yet.
-func migrateFixture(t *testing.T) *fixture {
-	t.Helper()
-	t.Setenv("GWIKI_HOME", t.TempDir())
-	f := &fixture{t: t, dir: t.TempDir(), now: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC), prefix: []string{"notes"}}
-	f.mustRun("init", "demo", "--user", "sa")
-	f.mustRun("notebook", "work")
-	f.mustRun("note", "design sketch", "-b", "work", "-t", "design", "-m", "The lexer tokenizes input.")
-	f.mustRun("task", "fix the lexer", "-b", "work", "-t", "bug", "-d", "2026-09-01", "-p", "high", "-a", "me")
-	f.mustRun("link", "fix the lexer", "design sketch")
-	f.mustRun("note", "gone", "-b", "work", "-m", "Deleted before the migration.")
-	f.mustRun("rm", "gone")
-	return f
-}
-
-func TestMigrateWritesPages(t *testing.T) {
-	f := migrateFixture(t)
-	wiki := &fixture{t: t, dir: f.dir, now: f.now}
-
-	out := wiki.mustRun("migrate", "--dry-run")
-	if !strings.Contains(out, "work/design-sketch  design sketch") || !strings.Contains(out, "2 pages would be written") {
-		t.Fatalf("dry run:\n%s", out)
-	}
-	if _, err := os.Stat(filepath.Join(f.dir, ".gwiki", "wiki", "work")); !os.IsNotExist(err) {
-		t.Fatal("the dry run wrote pages")
-	}
-
-	if out := wiki.mustRun("migrate"); !strings.Contains(out, "2 pages written") {
-		t.Fatalf("migrate:\n%s", out)
-	}
-	note := readPage(t, wiki, "work/design-sketch")
-	// The title is the heading, as it is for a page created by hand.
-	if note != "---\ntags: [design]\n---\n\n# design sketch\n\nThe lexer tokenizes input.\n" {
-		t.Fatalf("the note page:\n%s", note)
-	}
-	task := readPage(t, wiki, "work/fix-the-lexer")
-	for _, want := range []string{"type: task", "status: open", "priority: high", "due: \"2026-09-01\"", "assignees: [sa]", "tags: [bug]", "## Links", "- [[design sketch]]"} {
-		if !strings.Contains(task, want) {
-			t.Errorf("the task page lacks %q:\n%s", want, task)
-		}
-	}
-	// The reference reaches the other page.
-	if out := wiki.mustRun("links", "work/fix-the-lexer"); !strings.Contains(out, "work/design-sketch") || strings.Contains(out, "missing") {
-		t.Fatalf("links: %s", out)
-	}
-	// The database is untouched.
-	if out := f.mustRun("ls"); !strings.Contains(out, "design sketch") {
-		t.Fatalf("notes after the migration: %s", out)
-	}
-
-	// A second run adds nothing.
-	out = wiki.mustRun("migrate")
-	if !strings.Contains(out, "0 pages written") || !strings.Contains(out, "2 entries already had a page") {
-		t.Fatalf("second run:\n%s", out)
-	}
-}
-
-func TestMigrateDeletedEntries(t *testing.T) {
-	f := migrateFixture(t)
-	wiki := &fixture{t: t, dir: f.dir, now: f.now}
-	out := wiki.mustRun("migrate", "--include-deleted")
-	if !strings.Contains(out, "1 deleted entry written under .deleted/") {
-		t.Fatalf("migrate:\n%s", out)
-	}
-	entries, err := os.ReadDir(filepath.Join(f.dir, ".gwiki", "wiki", ".deleted"))
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("deleted entries = %v, %v", entries, err)
-	}
-	raw, err := os.ReadFile(filepath.Join(f.dir, ".gwiki", "wiki", ".deleted", entries[0].Name()))
-	if err != nil || !strings.Contains(string(raw), "deleted: true") {
-		t.Fatalf("deleted page = %q, %v", raw, err)
-	}
-	// A hidden directory is not indexed, so the wiki still lists two pages.
-	if out := wiki.mustRun("ls"); strings.Contains(out, "gone") {
-		t.Fatalf("a deleted entry reached the wiki:\n%s", out)
 	}
 }

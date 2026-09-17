@@ -15,8 +15,7 @@ import (
 	"github.com/shakfu/gwiki/internal/wiki"
 )
 
-// The wiki commands, at the top level. The notes database has its own under
-// "gwiki notes"; see app.go.
+// The wiki commands.
 
 func wikiHelp(a *App) {
 	a.printf("gwiki keeps a wiki of markdown pages in your project, under .gwiki/wiki.\n\n")
@@ -107,7 +106,7 @@ func wikiMCP(a *App, args []string) error {
 	}
 	// Standard output carries only protocol frames from here on.
 	return a.withWiki(func(w *wiki.Wiki) error {
-		return mcp.NewWiki(w, "gwiki", Version).Serve(a.Stdin, a.Stdout, a.Stderr)
+		return mcp.New(w, "gwiki", Version).Serve(a.Stdin, a.Stdout, a.Stderr)
 	})
 }
 

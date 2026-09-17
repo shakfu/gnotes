@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Fro
 
 ## [Unreleased]
 
+### Removed
+
+**The notes database and its commands.** `gwiki notes`, global notes (`gwiki notes -g`), `gwiki migrate`, the notes browser view and the notes MCP server are gone, with `.gwiki/notes.db` support, the identity file and `GWIKI_HOME`. The wiki replaced the notes model in 0.1.0, and keeping both meant two `ls`, `edit` and `done` commands, two browser views and two agent servers. About 9,200 lines of non-test Go went with it. To convert a notes database, run `gwiki migrate` from 0.1.1 first; this release ignores `notes.db`.
+
 ## [0.1.1]
 
 ### Fixed

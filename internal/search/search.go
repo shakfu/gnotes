@@ -1,17 +1,12 @@
-// Package search turns typed text into full-text queries and shows why a
-// result matched.
+// Package search turns typed text into full-text queries.
 //
-// The index itself is an FTS5 table in the project database; see package
-// store. This package keeps the tokenizer, so a query and a snippet split
-// words the same way.
+// The index itself is an FTS5 table in the wiki cache; see package wiki.
 package search
 
 import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/shakfu/gwiki/internal/state"
 )
 
 // Query turns typed text into an FTS5 MATCH expression, or "" when the text has
@@ -100,71 +95,4 @@ func tokenize(text string, fn func(string)) {
 		}
 	}
 	flush(len(text))
-}
-
-// Snippet returns a fragment of a node's body around the first query term
-// found in it, for showing why a result matched.
-//
-// It returns the empty string when nothing in the body matches, which is the
-// case whenever a node matched on its title or tags alone; the caller already
-// shows those, so repeating them as a snippet would say nothing.
-func Snippet(n *state.Node, query string, width int) string {
-	if n.Body == "" || width <= 0 {
-		return ""
-	}
-	body := n.Body
-	lower := strings.ToLower(body)
-
-	at := -1
-	for _, term := range Tokenize(query) {
-		if i := strings.Index(lower, term); i >= 0 && (at < 0 || i < at) {
-			at = i
-		}
-	}
-	if at < 0 {
-		return ""
-	}
-
-	// Centre the window on the hit, then pull back to word boundaries so the
-	// fragment does not begin or end mid-word.
-	start := at - width/3
-	if start < 0 {
-		start = 0
-	}
-	end := start + width
-	if end > len(body) {
-		end = len(body)
-		start = max(0, end-width)
-	}
-	// The offsets were found in the lowercased body, whose byte length can
-	// differ from the original's, so they are moved to character boundaries
-	// before slicing rather than trusted to be on one.
-	start = min(start, len(body))
-	for start > 0 && !utf8.RuneStart(body[start]) {
-		start--
-	}
-	for end < len(body) && !utf8.RuneStart(body[end]) {
-		end++
-	}
-
-	frag := body[start:end]
-	if start > 0 {
-		if i := strings.IndexAny(frag, " \n\t"); i >= 0 && i < width/4 {
-			frag = frag[i+1:]
-		}
-	}
-	if end < len(body) {
-		if i := strings.LastIndexAny(frag, " \n\t"); i > len(frag)-width/4 {
-			frag = frag[:i]
-		}
-	}
-
-	frag = strings.Join(strings.Fields(frag), " ")
-	if start > 0 {
-		frag = "..." + frag
-	}
-	if end < len(body) {
-		frag += "..."
-	}
-	return frag
 }

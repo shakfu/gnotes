@@ -4,7 +4,6 @@ package cli
 
 import (
 	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -63,34 +62,10 @@ func TestHasDesktopNeedsADisplayOnUnix(t *testing.T) {
 // The environment lookup defaults to the real one, so a caller that builds an
 // App by hand does not get a nil dereference.
 func TestEnvDefaultsWhenUnset(t *testing.T) {
-	f := newFixture(t)
+	f := wikiFixture(t)
 
 	// The fixture builds an App without Env; Run must fill it in.
-	if _, _, code := f.run("info"); code != 0 {
+	if _, _, code := f.run("ls"); code != 0 {
 		t.Fatal("a command failed with no Env configured")
-	}
-}
-
-func TestServeHelpDescribesTheDefault(t *testing.T) {
-	f := newFixture(t)
-
-	out := f.mustRun("help", "serve")
-	for _, want := range []string{"--no-open", "opens the page in your browser", "SSH"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("help does not mention %q:\n%s", want, out)
-		}
-	}
-}
-
-// The flags must at least parse; actually serving would block the test.
-func TestServeRejectsUnknownFlags(t *testing.T) {
-	f := newFixture(t)
-
-	_, stderr, code := f.run("serve", "--nonsense")
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2", code)
-	}
-	if !strings.Contains(stderr, "usage:") {
-		t.Fatalf("no usage line: %s", stderr)
 	}
 }

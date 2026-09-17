@@ -1,10 +1,17 @@
 //go:build !noweb
 
+// The browser view roughly doubles the binary, almost all of it net/http and
+// its transitive crypto. Building with -tags noweb drops this file, the webwiki
+// package and that weight, leaving the command line and the interactive
+// interface untouched.
+
 package cli
 
 import (
 	"errors"
 	"net"
+	"os/exec"
+	"runtime"
 
 	"github.com/shakfu/gwiki/internal/webwiki"
 	"github.com/shakfu/gwiki/internal/wiki"
@@ -27,6 +34,10 @@ The address carries an access token. That token, not the loopback binding, is
 what protects the wiki: any page open in your browser can make requests to
 127.0.0.1, so without a secret one of them could read and rewrite your pages.
 Open the printed address rather than typing the bare host and port.
+
+No browser is opened when there is evidently no desktop to open it on: over
+SSH, under a continuous integration runner, or on a Unix session with no
+display. The address is printed either way, and --open forces the attempt.
 
     gwiki serve
     gwiki serve --no-open
@@ -76,4 +87,60 @@ Open the printed address rather than typing the bare host and port.
 			return srv.Run(ln)
 		})
 	},
+}
+
+// hasDesktop reports whether there is evidently a desktop session to open a
+// browser on.
+//
+// Getting this wrong is worse than not trying. A "gwiki serve" run over SSH
+// would otherwise launch a browser on the far machine, where nobody can see
+// it, and on a headless box the opener can hang holding the terminal.
+func hasDesktop(env func(string) string) bool {
+	// An SSH session means the terminal is here and the machine is elsewhere.
+	for _, name := range []string{"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"} {
+		if env(name) != "" {
+			return false
+		}
+	}
+	// Most runners set CI; none of them want a browser.
+	if env("CI") != "" {
+		return false
+	}
+
+	switch runtime.GOOS {
+	case "darwin", "windows":
+		// A session on these is a desktop session, and "open" is always there.
+		return true
+	default:
+		// Unix without a display server has nothing to open onto.
+		return env("DISPLAY") != "" || env("WAYLAND_DISPLAY") != ""
+	}
+}
+
+// openBrowser asks the desktop to open a URL.
+//
+// Each platform has one canonical opener, so this is a lookup rather than a
+// search. A failure is reported to the caller and never fatal: the address is
+// already on screen and can be opened by hand.
+func openBrowser(url string) error {
+	var cmd string
+	var args []string
+
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = "open"
+	case "windows":
+		cmd, args = "rundll32", []string{"url.dll,FileProtocolHandler"}
+	default:
+		cmd = "xdg-open"
+	}
+
+	c := exec.Command(cmd, append(args, url)...)
+	if err := c.Start(); err != nil {
+		return err
+	}
+	// Reaped in the background, or the opener would stay a zombie for as long
+	// as the server runs.
+	go c.Wait()
+	return nil
 }

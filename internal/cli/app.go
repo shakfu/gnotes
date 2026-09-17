@@ -1,7 +1,6 @@
-// Package cli implements the gwiki command line: the wiki at the top level,
-// and the notes database under "gwiki notes".
+// Package cli implements the gwiki command line.
 //
-// Every command is a thin shell over the wiki or session package: parse
+// Every command is a thin shell over the wiki package: parse
 // arguments, call one method, print the result. Nothing here decides domain
 // rules, so the command line and the interactive interfaces cannot disagree
 // about what an operation means.
@@ -14,9 +13,6 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"github.com/shakfu/gwiki/internal/session"
-	"github.com/shakfu/gwiki/internal/store"
 )
 
 // App holds everything a command needs from its environment. Passing it in
@@ -29,10 +25,6 @@ type App struct {
 
 	// Dir is the working directory the project is discovered from.
 	Dir string
-
-	// Global selects the global notes project instead of discovering one. It
-	// is set by a leading -g.
-	Global bool
 
 	// Now is the clock, so relative dates are reproducible under test.
 	Now func() time.Time
@@ -80,7 +72,7 @@ type command struct {
 	args    string
 	summary string
 
-	// help is the long description, printed by "gwiki help <name>" or "gwiki notes help <name>".
+	// help is the long description, printed by "gwiki help <name>".
 	help string
 
 	run func(*App, []string) error
@@ -91,8 +83,7 @@ type command struct {
 	runNamed func(*App, string, []string) error
 }
 
-// A commandTable is one level of commands: the wiki at the top, or the notes under
-// "gwiki notes".
+// A commandTable is a set of commands and the prefix of their usage lines.
 type commandTable struct {
 	// prefix is what precedes a command name in usage lines.
 	prefix string
@@ -111,9 +102,8 @@ func newTable(prefix string, list []*command) *commandTable {
 	return t
 }
 
-// wikiTable and notesTable are filled in init, since their help commands refer
-// back to them.
-var wikiTable, notesTable *commandTable
+// wikiTable is filled in init, since its help command refers back to it.
+var wikiTable *commandTable
 
 func init() {
 	wikiTable = newTable("gwiki", []*command{
@@ -122,23 +112,8 @@ func init() {
 		cmdWikiNew, cmdWikiEdit, cmdWikiMove, cmdWikiRemove, cmdWikiTag, cmdWikiUntag,
 		cmdWikiDone, cmdWikiDoing, cmdWikiReopen, cmdWikiPromote,
 		cmdWikiUI, cmdWikiServe, cmdWikiMCP, cmdWikiLSP, cmdWikiCache,
-		cmdMigrate, cmdNotes, helpCommand(wikiHelp, &wikiTable),
+		helpCommand(wikiHelp, &wikiTable),
 	})
-	notesTable = newTable("gwiki notes", []*command{
-		cmdInit, cmdNotebook, cmdNote, cmdTask,
-		cmdList, cmdShow, cmdSearch, cmdTags,
-		cmdEdit, cmdStatus, cmdDue, cmdPriority,
-		cmdTag, cmdUntag, cmdAssign, cmdUnassign,
-		cmdLink, cmdUnlink, cmdMove, cmdRemove, cmdRestore,
-		cmdLog, cmdInfo, cmdWho, cmdServe, cmdMCP, helpCommand(notesHelp, &notesTable),
-	})
-}
-
-// cmdNotes stands in the wiki table for help; Run dispatches "notes" itself.
-var cmdNotes = &command{
-	name:    "notes",
-	args:    "[-g] <command> [arguments]",
-	summary: "the notes and tasks database, .gwiki/notes.db; 'gwiki notes help' lists its commands",
 }
 
 // Run dispatches one invocation and returns the process exit status.
@@ -146,28 +121,13 @@ func (a *App) Run(args []string) int {
 	if a.Env == nil {
 		a.Env = os.Getenv
 	}
-	if len(args) > 0 && args[0] == "notes" {
-		args = args[1:]
-		// Only before the command: after it, -g would be a word in a title.
-		if len(args) > 0 && args[0] == "-g" {
-			a.Global, args = true, args[1:]
-		}
-		return a.dispatch(notesTable, args)
-	}
-	if len(args) > 0 && args[0] == "-g" {
-		fmt.Fprintln(a.Stderr, "gwiki: -g selects the global notes: gwiki notes -g <command>")
-		return 2
-	}
 	return a.dispatch(wikiTable, args)
 }
 
 func (a *App) dispatch(t *commandTable, args []string) int {
 	if len(args) == 0 {
-		// A bare gwiki opens the interface; bare notes commands list themselves.
-		args = []string{"help"}
-		if t == wikiTable {
-			args = []string{"ui"}
-		}
+		// A bare gwiki opens the interface.
+		args = []string{"ui"}
 	}
 
 	name := args[0]
@@ -279,82 +239,7 @@ func distance(a, b string) int {
 	return prev[len(b)]
 }
 
-// open loads the project containing the working directory, along with the
-// configured identity.
-func (a *App) open() (*session.Session, error) {
-	actor, err := store.LoadUser()
-	if err != nil {
-		return nil, err
-	}
-
-	var s *session.Session
-	if a.Global {
-		dir, p, err := loadGlobal()
-		switch {
-		case err != nil:
-			return nil, err
-		case dir == "":
-			return nil, errors.New("no global notes; run 'gwiki notes -g init [dir]'")
-		case p == nil:
-			return nil, fmt.Errorf("no global notes project at %s; run 'gwiki notes -g init'", dir)
-		}
-		s, err = session.OpenProject(p, actor)
-		if err != nil {
-			return nil, err
-		}
-	} else if s, err = session.Open(a.Dir, actor); err != nil {
-		return nil, err
-	}
-	s.SetClock(a.Now)
-
-	if imp := s.Project.Imported; imp != nil {
-		fmt.Fprintf(a.Stderr, "note: imported %d events from %s into %s; the JSONL logs are no longer read\n",
-			imp.Events, imp.From, s.Project.Path)
-		if imp.Unapplied+imp.Unknown > 0 {
-			fmt.Fprintf(a.Stderr, "warning: %d events could not be applied and %d name actions this version does not know; neither was imported\n",
-				imp.Unapplied, imp.Unknown)
-		}
-		// A log whose last record was cut short lost the command being written
-		// when the process died.
-		if len(imp.Torn) > 0 {
-			fmt.Fprintf(a.Stderr, "warning: %s ended in an incomplete record, which was not imported\n",
-				strings.Join(imp.Torn, ", "))
-		}
-	}
-	return s, nil
-}
-
-// loadGlobal returns the recorded global notes location and the project there.
-// dir is empty when none is recorded; p is nil when no project is at dir.
-func loadGlobal() (dir string, p *store.Project, err error) {
-	if dir, err = store.LoadGlobal(); err != nil || dir == "" {
-		return dir, nil, err
-	}
-	p, err = store.OpenAt(dir)
-	if errors.Is(err, store.ErrNotFound) {
-		return dir, nil, nil
-	}
-	return dir, p, err
-}
-
-// commit writes the events staged by a command.
-func (a *App) commit(s *session.Session) error { return s.Commit() }
-
 // printf writes to standard output.
 func (a *App) printf(format string, args ...any) {
 	fmt.Fprintf(a.Stdout, format, args...)
-}
-
-// warnProblems reports events that could not be applied. They are not fatal,
-// but silently dropping them would leave the user wondering where their note
-// went.
-func (a *App) warnProblems(s *session.Session) {
-	const show = 3
-	for i, p := range s.Problems {
-		if i == show {
-			fmt.Fprintf(a.Stderr, "note: and %d more unapplied events\n", len(s.Problems)-show)
-			break
-		}
-		fmt.Fprintf(a.Stderr, "note: %s\n", p)
-	}
 }
