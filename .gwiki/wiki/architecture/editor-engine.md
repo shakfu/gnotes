@@ -21,4 +21,4 @@ Modes, counts, operators with motions and text objects, `.`, undo and redo, regi
 - blockwise visual
 - clearing the modified flag when undo returns to the saved text; the interface does that itself
 
-The keys it accepts are in [the design](/docs/dev/wiki-design.md#L367). Back to [[Architecture]].
+The keys it accepts are in [the design](/docs/dev/wiki-design.md#L368). Back to [[Architecture]].

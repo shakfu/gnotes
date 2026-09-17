@@ -121,7 +121,7 @@ Macros, marks, blockwise visual, `:g`, folds and mappings are not there; `:help`
 
 ## Editors
 
-`gwiki lsp` is a language server in the same executable. An editor starts it and gets, in wiki pages: `[[` and `](` completion of pages, headings and paths; warnings on broken links; go to definition to follow a link; references for backlinks; hover; heading outlines; rename of a page with its links rewritten; and quick fixes for broken links. Open buffers are checked as typed, before saving.
+`gwiki lsp` is a language server in the same executable. An editor starts it and gets, in wiki pages: `[[` and `](` completion of pages, headings and paths; warnings on broken links, and notes on line anchors whose code moved; go to definition to follow a link; references for backlinks; hover; heading outlines; rename of a page with its links rewritten; and quick fixes for broken links. Open buffers are checked as typed, before saving.
 
 Neovim 0.11 or later:
 
@@ -174,7 +174,7 @@ Editing is a text box saved against the hash the page was read at, so a page sav
 claude mcp add gwiki -- gwiki mcp
 ```
 
-The agent gets tools to list, search and read pages, create them, edit exact text or write whole pages against the hash it read, rename pages, list and repair broken links, and change task status. A write against a stale hash is refused and returns the current page to retry against. There is no delete tool.
+The agent gets tools to list, search and read pages, create them, edit exact text or write whole pages against the hash it read, rename pages, list and repair broken links and line anchors whose code moved, and change task status. A write against a stale hash is refused and returns the current page to retry against. There is no delete tool.
 
 ## Commands
 
@@ -185,6 +185,7 @@ gwiki search tokeniz                        # ranked; the last word matches as a
 gwiki links index    gwiki backlinks grammar
 gwiki check                                 # broken links; exit status 1 while any remain
 gwiki check --fix                           # choose a repair for each
+gwiki check --strict                        # also exit 1 when line anchors drifted
 gwiki orphans
 gwiki new "Parser notes" --in lexer -t parser -m "First line."
 gwiki new "Ship it" --task

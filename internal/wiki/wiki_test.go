@@ -459,7 +459,7 @@ func TestSnapshotMatchesTheCache(t *testing.T) {
 		t.Fatalf("a buffer's heading leaked into the index: %+v", again[0])
 	}
 
-	offers, err := s.Offers(links[2], buf)
+	offers, err := s.Offers(links[2], buf, nil)
 	if err != nil || len(offers) == 0 || offers[0].New != "Orphan" {
 		t.Fatalf("offers for [[Orphn]] = %+v, %v", offers, err)
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -198,9 +199,10 @@ func mustJSON(v any) string {
 }
 
 type diagnostic struct {
-	Range   Range  `json:"range"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Range    Range  `json:"range"`
+	Severity int    `json:"severity"`
+	Code     string `json:"code"`
+	Message  string `json:"message"`
 }
 
 // diagnostics waits for the next diagnostics published for a URI.
@@ -349,6 +351,82 @@ func TestPollNoticesOutsideChanges(t *testing.T) {
 	writeFile(t, filepath.Join(c.root, ".gwiki", "wiki", "orphn.md"), "# Orphn\n")
 	if d := c.diagnostics(uri); len(d) != 1 {
 		t.Fatalf("after the poll = %+v", d)
+	}
+}
+
+// A committed line link whose lines moved gets an information diagnostic and a
+// quick fix once the server polls; editing the buffer's anchor clears it.
+func TestDriftDiagnostics(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	root := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root, "-c", "user.name=Ada", "-c", "user.email=ada@example.com"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	if _, err := wiki.Init(root); err != nil {
+		t.Fatal(err)
+	}
+	body := "# P\n\nSee [lex](/src/lexer.go#L3).\n"
+	writeFile(t, filepath.Join(root, ".gwiki", "wiki", "p.md"), body)
+	writeFile(t, filepath.Join(root, "src", "lexer.go"), "package lexer\n\nfunc Lex() {}\n")
+	git("add", ".")
+	git("commit", "-q", "-m", "one")
+
+	c := startPolling(t, root, 20*time.Millisecond)
+	c.initialize(fullCapabilities)
+	uri := c.pageURI("p")
+	c.open(uri, body)
+	if d := c.diagnostics(uri); len(d) != 0 {
+		t.Fatalf("diagnostics before the code moves = %+v", d)
+	}
+
+	writeFile(t, filepath.Join(root, "src", "lexer.go"), "package lexer\n\n// Lex lexes.\nfunc Lex() {}\n")
+	d := c.diagnostics(uri)
+	if len(d) != 1 || d[0].Code != "line-moved" || d[0].Severity != 3 || !strings.HasPrefix(d[0].Message, "the lines at L3 moved to L4 since the link was committed in ") {
+		t.Fatalf("diagnostics after the code moves = %+v", d)
+	}
+	if d[0].Range != (Range{Position{2, 10}, Position{2, 26}}) {
+		t.Fatalf("range = %+v", d[0].Range)
+	}
+
+	var actions []struct {
+		Title string         `json:"title"`
+		Edit  map[string]any `json:"edit"`
+	}
+	c.mustCall("textDocument/codeAction", map[string]any{"textDocument": map[string]any{"uri": uri}, "range": d[0].Range, "context": map[string]any{"diagnostics": []any{}}}, &actions)
+	if len(actions) != 1 || actions[0].Title != "Link to /src/lexer.go#L4 (the lines moved to L4)" {
+		t.Fatalf("actions = %+v", actions)
+	}
+	edits := actions[0].Edit["changes"].(map[string]any)[uri].([]any)
+	if edits[0].(map[string]any)["newText"] != "/src/lexer.go#L4" {
+		t.Fatalf("edit = %v", edits)
+	}
+
+	c.change(uri, "# P\n\nSee [lex](/src/lexer.go#L4).\n", 2)
+	if d := c.diagnostics(uri); len(d) != 0 {
+		t.Fatalf("diagnostics after the anchor is edited = %+v", d)
+	}
+
+	// The file shrinks below the committed anchor; its line is found higher up.
+	c.change(uri, body, 3)
+	c.diagnostics(uri)
+	writeFile(t, filepath.Join(root, "src", "lexer.go"), "func Lex() {}\n")
+	d = c.diagnostics(uri)
+	if len(d) != 1 || d[0].Code != "line-out-of-range" {
+		t.Fatalf("diagnostics after the file shrinks = %+v", d)
+	}
+	actions = nil
+	c.mustCall("textDocument/codeAction", map[string]any{"textDocument": map[string]any{"uri": uri}, "range": d[0].Range, "context": map[string]any{"diagnostics": []any{}}}, &actions)
+	if len(actions) != 1 || actions[0].Title != "Link to /src/lexer.go#L1 (the lines moved to L1)" {
+		t.Fatalf("actions out of range = %+v", actions)
 	}
 }
 

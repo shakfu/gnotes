@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Fro
 
 ## [Unreleased]
 
+## [0.2.0]
+
+### Added
+
+**`gwiki check` reports line anchors whose lines moved or changed.** Each line link is compared with the commit that last added it to its page. `line-moved` carries the new anchor as a repair, which `--fix` offers; `line-changed` has none. Both are warnings unless `--strict` is given. The MCP `gwiki_check` lists them and `gwiki_fix_link` applies the repair. `gwiki lsp` shows them as information diagnostics with a quick fix, rechecked when a commit or a linked file changes. Links not yet committed, and every link in a shallow clone, are skipped. The baseline is the link's commit, not the page's, because a later edit to the page would otherwise hide the drift; see `docs/dev/anchor-drift.md`.
+
+**A `line-out-of-range` link whose lines are still in the file is offered their new range** instead of dropping the anchor, in `check --fix`, MCP and the language server.
+
+### Changed
+
+**`gwiki check --json` also lists drifted line anchors**, in the same array as broken links, with `status` `line-moved` or `line-changed`, `since` and `offer`. A script treating every entry as broken must filter on `status`.
+
 ### Removed
 
 **The notes database and its commands.** `gwiki notes`, global notes (`gwiki notes -g`), `gwiki migrate`, the notes browser view and the notes MCP server are gone, with `.gwiki/notes.db` support, the identity file and `GWIKI_HOME`. The wiki replaced the notes model in 0.1.0, and keeping both meant two `ls`, `edit` and `done` commands, two browser views and two agent servers. About 9,200 lines of non-test Go went with it. To convert a notes database, run `gwiki migrate` from 0.1.1 first; this release ignores `notes.db`.

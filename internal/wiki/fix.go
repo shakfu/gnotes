@@ -1,6 +1,7 @@
 package wiki
 
 import (
+	"errors"
 	"os"
 	"path"
 	"path/filepath"
@@ -37,8 +38,15 @@ func (w *Wiki) Offers(l Link) ([]Offer, error) {
 func (w *Wiki) OffersFor(links []Link) ([][]Offer, error) {
 	var ix *index
 	var renames [][2]string
+	var moved map[[2]string]Offer
 	out := make([][]Offer, len(links))
 	for i, l := range links {
+		if moved == nil && l.Status == StatusLineOutOfRange {
+			var err error
+			if moved, err = w.MovedRanges(); err != nil {
+				return nil, err
+			}
+		}
 		if ix == nil && (l.Status == StatusMissingPage || l.Status == StatusAmbiguous) {
 			var err error
 			if ix, err = w.readIndex(); err != nil {
@@ -56,7 +64,7 @@ func (w *Wiki) OffersFor(links []Link) ([][]Offer, error) {
 		if err != nil {
 			return nil, err
 		}
-		offers, err := w.offers(l, src, ix, renames)
+		offers, err := w.offers(l, src, ix, renames, moved)
 		if err != nil {
 			return nil, err
 		}
@@ -65,9 +73,26 @@ func (w *Wiki) OffersFor(links []Link) ([][]Offer, error) {
 	return out, nil
 }
 
-// offers is Offers for a link in src, with the index and renames loaded; ix is
-// needed only for a missing or ambiguous page.
-func (w *Wiki) offers(l Link, src []byte, ix *index, renames [][2]string) ([]Offer, error) {
+// MovedRanges returns, by page and written destination, the moved anchor of
+// each line-out-of-range link whose lines moved. It is empty without history.
+func (w *Wiki) MovedRanges() (map[[2]string]Offer, error) {
+	ds, err := w.DriftAll()
+	if err != nil && !errors.Is(err, ErrNoHistory) {
+		return nil, err
+	}
+	out := map[[2]string]Offer{}
+	for _, d := range ds {
+		if d.Status == StatusLineOutOfRange {
+			out[[2]string{d.Page, d.Written()}] = *d.Offer
+		}
+	}
+	return out, nil
+}
+
+// offers is Offers for a link in src, with the index, renames and moved ranges
+// loaded; ix is needed only for a missing or ambiguous page, moved only for a
+// line out of range.
+func (w *Wiki) offers(l Link, src []byte, ix *index, renames [][2]string, moved map[[2]string]Offer) ([]Offer, error) {
 	out := []Offer{}
 	if l.DestStart < 0 {
 		return out, nil
@@ -154,7 +179,12 @@ func (w *Wiki) offers(l Link, src []byte, ix *index, renames [][2]string) ([]Off
 
 	case StatusMissingFile, StatusLineOutOfRange:
 		if l.Status == StatusLineOutOfRange {
-			out = append(out, Offer{Label: "drop the line anchor", New: l.Target})
+			// Lines found again make dropping the anchor the worse repair.
+			if o, ok := moved[[2]string{l.Page, l.Written()}]; ok {
+				out = append(out, o)
+			} else {
+				out = append(out, Offer{Label: "drop the line anchor", New: l.Target})
+			}
 			break
 		}
 		for _, found := range w.findFiles(path.Base(l.Resolved)) {

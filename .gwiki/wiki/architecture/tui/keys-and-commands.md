@@ -11,7 +11,7 @@ Each context has a keymap: a list of bindings with the keys, the help text, the 
 
 ### The page's buffer
 
-The page is an `internal/vim` editor ([[Editor engine]]). [keyContent](/internal/tui/wiki_edit.go#L349) takes a few keys first in NORMAL mode, with no command half typed: `tab`, `ctrl-p`, `<` `>`, `[` `]` and `enter`. Every other key goes to the editor.
+The page is an `internal/vim` editor ([[Editor engine]]). [keyContent](/internal/tui/wiki_edit.go#L352) takes a few keys first in NORMAL mode, with no command half typed: `tab`, `ctrl-p`, `<` `>`, `[` `]` and `enter`. Every other key goes to the editor.
 
 ### Commands
 

@@ -37,10 +37,16 @@ missing or stale.`}
 	cmdWikiSearch    = &command{name: "search", args: "<query> [-n N] [--json]", summary: "ranked full-text search; the last word matches as a prefix", run: wikiSearch}
 	cmdWikiLinks     = &command{name: "links", args: "<page> [--json]", summary: "a page's outgoing links and their status", run: wikiLinks}
 	cmdWikiBacklinks = &command{name: "backlinks", args: "<page> [--json]", summary: "the links that reach a page", run: wikiBacklinks}
-	cmdWikiCheck     = &command{name: "check", args: "[--fix[=first]] [--json]", summary: "broken links; exit status 1 while any remain", run: wikiCheck,
+	cmdWikiCheck     = &command{name: "check", args: "[--fix[=first]] [--strict] [--json]", summary: "broken links; exit status 1 while any remain", run: wikiCheck,
 		help: `Re-examines every link, file and line links included, and lists those whose
 target is missing, ambiguous or out of range. --fix offers repairs for each
-one to choose from; --fix=first applies a repair when it is the only one.`}
+one to choose from; --fix=first applies a repair when it is the only one.
+
+It also compares each line link's lines with the commit that added the link,
+and lists those whose lines moved (line-moved, with the new anchor as a repair)
+or changed (line-changed). These are warnings; --strict makes them fail the
+check too. A shallow clone has no history to compare against, so they are
+skipped with a note.`}
 	cmdWikiOrphans = &command{name: "orphans", args: "[--json]", summary: "pages no other page links to", run: wikiOrphans}
 	cmdWikiTasks   = &command{name: "tasks", args: "[-s status] [--json]", summary: "checklist items and task pages", run: wikiTasks}
 	cmdWikiNew     = &command{name: "new", args: "<title> [--in dir] [--task] [-t tag]... [-m body | --stdin]", summary: "create a page, or a task page", run: wikiNew}
@@ -381,6 +387,7 @@ func (f *fixFlag) Set(v string) error {
 func wikiCheck(a *App, args []string) error {
 	fs := a.flags("check")
 	asJSON := fs.Bool("json", false, "machine-readable output")
+	strict := fs.Bool("strict", false, "exit 1 when line anchors drifted, too")
 	var fix fixFlag
 	fs.Var(&fix, "fix", "offer repairs for each broken link; =first applies an only offer")
 	if err := parse(fs, args); err != nil {
@@ -399,8 +406,21 @@ func wikiCheck(a *App, args []string) error {
 		if err != nil {
 			return err
 		}
+		drifted, err := w.Drift()
+		if errors.Is(err, wiki.ErrNoHistory) {
+			fmt.Fprintf(a.Stderr, "note: line anchors not compared with history: %v\n", err)
+		} else if err != nil {
+			return err
+		}
 		if *asJSON {
-			if err := a.writeJSON(broken); err != nil {
+			all := make([]any, 0, len(broken)+len(drifted))
+			for _, l := range broken {
+				all = append(all, l)
+			}
+			for _, d := range drifted {
+				all = append(all, d)
+			}
+			if err := a.writeJSON(all); err != nil {
 				return err
 			}
 		} else {
@@ -410,11 +430,23 @@ func wikiCheck(a *App, args []string) error {
 				t.addStyled([]string{where, l.Status, l.Written()},
 					[]string{a.style(ansiDim, where), a.style(ansiRed, l.Status), l.Written()})
 			}
+			for _, d := range drifted {
+				where := fmt.Sprintf("%s:%d:%d", d.Page, d.Line, d.Col)
+				written := d.Written()
+				if d.Offer != nil {
+					written += " -> " + d.Offer.New
+				}
+				t.addStyled([]string{where, d.Status, written},
+					[]string{a.style(ansiDim, where), a.style(ansiYellow, d.Status), written})
+			}
 			t.write(a.Stdout)
 		}
+		// An error, so the exit status is 1 for scripts and CI.
 		if len(broken) > 0 {
-			// An error, so the exit status is 1 for scripts and CI.
 			return errors.New(plural(len(broken), "broken link"))
+		}
+		if len(drifted) > 0 && *strict {
+			return errors.New(plural(len(drifted), "drifted line anchor"))
 		}
 		if !*asJSON {
 			a.printf("no broken links\n")
@@ -423,7 +455,8 @@ func wikiCheck(a *App, args []string) error {
 	})
 }
 
-// fixLinks walks the broken links, one at a time, offering repairs. It reads
+// fixLinks walks the broken links, then the moved line anchors, one at a time,
+// offering repairs. It reads
 // the list again after each fix, since a fix moves the offsets of later links
 // in the same page. With first set it applies an only offer and asks nothing.
 func (a *App) fixLinks(w *wiki.Wiki, first bool) error {
@@ -442,14 +475,28 @@ func (a *App) fixLinks(w *wiki.Wiki, first bool) error {
 				break
 			}
 		}
+		var offers []wiki.Offer
+		if l != nil {
+			if offers, err = w.Offers(*l); err != nil {
+				return err
+			}
+		} else {
+			// Drifted anchors come after broken links; only a moved one has a repair.
+			drifted, err := w.Drift()
+			if err != nil && !errors.Is(err, wiki.ErrNoHistory) {
+				return err
+			}
+			for i := range drifted {
+				if !passed[linkKey(drifted[i].Link)] && drifted[i].Offer != nil {
+					l, offers = &drifted[i].Link, []wiki.Offer{*drifted[i].Offer}
+					break
+				}
+			}
+		}
 		if l == nil {
 			break
 		}
 		passed[linkKey(*l)] = true
-		offers, err := w.Offers(*l)
-		if err != nil {
-			return err
-		}
 		if len(offers) == 0 || (first && len(offers) != 1) {
 			continue
 		}

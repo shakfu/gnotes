@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -328,6 +329,75 @@ func TestWikiCheckFix(t *testing.T) {
 	}
 	if page := readPage(t, f, "lexer/design-sketch"); !strings.Contains(page, "|Missing page]]") {
 		t.Fatalf("fixed link:\n%s", page)
+	}
+}
+
+// Line anchors whose lines moved are warnings, errors under --strict, and
+// repaired by --fix=first. Without history, check says it skipped them.
+func TestWikiCheckDrift(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	nogit := wikiFixture(t)
+	if _, stderr, _ := nogit.run("check"); strings.Contains(stderr, "note:") {
+		t.Errorf("a note with no line links to check: %q", stderr)
+	}
+	nogit.mustRun("new", "Lines", "-m", "[x](/main.go#L1)")
+	if _, stderr, _ := nogit.run("check"); !strings.Contains(stderr, "note: line anchors not compared with history") {
+		t.Errorf("no note without history: %q", stderr)
+	}
+
+	f := &fixture{t: t, dir: t.TempDir(), now: time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", f.dir, "-c", "user.name=Ada", "-c", "user.email=ada@example.com"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	f.mustRun("init")
+	if err := os.WriteFile(filepath.Join(f.dir, "a.go"), []byte("one\ntwo\nthree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.mustRun("new", "Notes", "-m", "See [two](/a.go#L2).")
+	git("add", ".")
+	git("commit", "-q", "-m", "one")
+	if err := os.WriteFile(filepath.Join(f.dir, "a.go"), []byte("zero\none\ntwo\nthree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, stderr, code := f.run("check")
+	if code != 0 || !strings.Contains(out, "line-moved  /a.go#L2 -> /a.go#L3") || !strings.Contains(out, "no broken links") || stderr != "" {
+		t.Fatalf("check: exit %d\n%s%s", code, out, stderr)
+	}
+	if _, stderr, code := f.run("check", "--strict"); code != 1 || !strings.Contains(stderr, "1 drifted line anchor") {
+		t.Fatalf("check --strict: exit %d, %s", code, stderr)
+	}
+	if out := f.mustRun("check", "--json"); !strings.Contains(out, `"status": "line-moved"`) || !strings.Contains(out, `"new": "/a.go#L3"`) {
+		t.Fatalf("check --json:\n%s", out)
+	}
+	if out := f.mustRun("check", "--fix=first"); !strings.Contains(out, "fixed  /a.go#L2 -> /a.go#L3") {
+		t.Fatalf("check --fix=first:\n%s", out)
+	}
+	if page := readPage(t, f, "notes"); !strings.Contains(page, "[two](/a.go#L3)") {
+		t.Fatalf("page after the fix:\n%s", page)
+	}
+	if out := f.mustRun("check", "--strict"); strings.Contains(out, "line-") {
+		t.Fatalf("drift after the fix:\n%s", out)
+	}
+
+	// Once committed, the file shrinks below the anchor, and the line is found
+	// higher up.
+	git("commit", "-q", "-am", "fix")
+	if err := os.WriteFile(filepath.Join(f.dir, "a.go"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out := f.mustRun("check", "--fix=first"); !strings.Contains(out, "fixed  /a.go#L3 -> /a.go#L1") {
+		t.Fatalf("check --fix=first out of range:\n%s", out)
 	}
 }
 

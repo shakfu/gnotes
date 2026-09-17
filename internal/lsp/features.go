@@ -181,7 +181,7 @@ func (s *Server) hover(raw json.RawMessage) (any, error) {
 	switch {
 	case l.Status != wiki.StatusOK:
 		fmt.Fprintf(&b, "**%s**: %s", l.Status, problem(l))
-		if offers, err := s.snap.Offers(l, d.text.src); err == nil && len(offers) > 0 {
+		if offers, err := s.snap.Offers(l, d.text.src, s.moved); err == nil && len(offers) > 0 {
 			fmt.Fprintf(&b, "\n\n%d repairs as code actions", len(offers))
 		}
 	case l.Kind == wiki.KindExternal:
@@ -676,11 +676,15 @@ func (s *Server) codeAction(raw json.RawMessage) (any, error) {
 	start, end := d.text.offset(p.Range.Start), d.text.offset(p.Range.End)
 	actions := []map[string]any{}
 	for _, l := range s.links(d) {
-		if l.Status == wiki.StatusOK || l.DestStart < 0 || l.DestEnd < start || l.DestStart > end {
+		if l.DestStart < 0 || l.DestEnd < start || l.DestStart > end {
 			continue
 		}
-		offers, err := s.snap.Offers(l, d.text.src)
-		if err != nil {
+		var offers []wiki.Offer
+		if dr, ok := s.driftOf(d.page, l); ok && dr.Offer != nil {
+			offers = []wiki.Offer{*dr.Offer}
+		} else if l.Status == wiki.StatusOK {
+			continue
+		} else if offers, err = s.snap.Offers(l, d.text.src, s.moved); err != nil {
 			return nil, err
 		}
 		rng := d.text.rng(l.DestStart, l.DestEnd)

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -238,5 +239,67 @@ func TestWikiTasksAndSetTask(t *testing.T) {
 	}
 	if text, isError := f.call("gwiki_set_task", map[string]any{"task": "plan", "status": "done"}); !isError || !strings.Contains(text, "not a task page") {
 		t.Fatalf("set_task on a plain page = %v %s", isError, text)
+	}
+}
+
+func TestWikiCheckAndFixDrift(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	f := newFixture(t)
+	root := filepath.Dir(filepath.Dir(f.wiki.PagesPath()))
+	src := filepath.Join(root, "a.go")
+	if err := os.WriteFile(src, []byte("one\ntwo\nthree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.page("p", "# P\n\n[two](/a.go#L2) and [three](/a.go#L3)\n")
+
+	if out := f.mustCall("gwiki_check", nil); !strings.HasPrefix(out, "No broken links.\n\nNote: no git history") {
+		t.Fatalf("check without history:\n%s", out)
+	}
+
+	os.RemoveAll(filepath.Join(root, ".git"))
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root, "-c", "user.name=Ada", "-c", "user.email=ada@example.com"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "one")
+	if err := os.WriteFile(src, []byte("zero\none\ntwo\nTHREE\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	want := "No broken links.\n\n2 drifted line anchors: the code at these lines moved or changed since the link was committed.\n\n" +
+		"p:3  /a.go#L2  line-moved\n  new: /a.go#L3  (the lines moved to L3)\n\n" +
+		"p:3  /a.go#L3  line-changed\n  no repair offered; read the code and update the page"
+	if out := f.mustCall("gwiki_check", map[string]any{"page": "p"}); out != want {
+		t.Fatalf("check:\n%s\nwant:\n%s", out, want)
+	}
+
+	args := map[string]any{"page": "p", "line": 3, "link": "/a.go#L3", "new": "/a.go#L4"}
+	if text, isError := f.call("gwiki_fix_link", args); !isError || !strings.Contains(text, "whose lines changed") {
+		t.Fatalf("fix of a changed anchor = %v %s", isError, text)
+	}
+	args["link"] = "/a.go#L2"
+	if text, isError := f.call("gwiki_fix_link", args); !isError || !strings.Contains(text, "the offer is: /a.go#L3") {
+		t.Fatalf("fix with an unoffered anchor = %v %s", isError, text)
+	}
+	args["new"] = "/a.go#L3"
+	if out := f.mustCall("gwiki_fix_link", args); out != "fixed p:3  /a.go#L2 -> /a.go#L3" {
+		t.Fatalf("fix: %q", out)
+	}
+	if got := f.source("p"); got != "# P\n\n[two](/a.go#L3) and [three](/a.go#L3)\n" {
+		t.Fatalf("page after fix:\n%s", got)
+	}
+	// The fixed link's text now matches the committed [three], so neither is
+	// compared until the fix is committed.
+	if out := f.mustCall("gwiki_check", map[string]any{"page": "p"}); out != "No broken links." {
+		t.Fatalf("check after fix:\n%s", out)
 	}
 }

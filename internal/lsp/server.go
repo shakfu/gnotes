@@ -1,6 +1,7 @@
 // Package lsp serves the wiki to editors over the Language Server Protocol:
-// completion of links, diagnostics for broken ones, following a link, backlinks,
-// and renaming a page with its links rewritten.
+// completion of links, diagnostics for broken ones and for line anchors whose
+// lines moved, following a link, backlinks, and renaming a page with its links
+// rewritten.
 //
 // It runs as `gwiki lsp`, speaking LSP on standard input and output.
 // Buffers the editor has open are resolved as they are, saved or not; every
@@ -16,6 +17,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/shakfu/gwiki/internal/wiki"
@@ -39,6 +41,13 @@ type Server struct {
 
 	w    *wiki.Wiki
 	snap *wiki.Snapshot
+
+	// drift holds the drifted line anchors by page and written destination,
+	// moved the anchors for lines out of range that moved, and driftStamp the
+	// wiki.DriftStamp both were computed at.
+	drift      map[[2]string]wiki.Drifted
+	moved      map[[2]string]wiki.Offer
+	driftStamp string
 
 	docs map[string]*document // by URI
 
@@ -280,6 +289,7 @@ func (s *Server) initialize(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	s.w, s.snap, s.initialized = w, snap, true
+	s.checkDrift(true)
 
 	encoding := "utf-16"
 	for _, e := range p.Capabilities.General.PositionEncodings {
@@ -389,8 +399,8 @@ func (s *Server) didClose(raw json.RawMessage) (any, error) {
 	return nil, nil
 }
 
-// poll refreshes the cache, and on a change reloads the index and publishes
-// diagnostics for every open buffer again.
+// poll refreshes the cache and, when it or the drift stamp changed, reloads
+// the index or drift and publishes diagnostics for every open buffer again.
 func (s *Server) poll() {
 	if s.w == nil {
 		return
@@ -400,15 +410,17 @@ func (s *Server) poll() {
 		s.logf("refresh: %v", err)
 		return
 	}
-	if ch.Empty() {
+	if !ch.Empty() {
+		snap, err := s.w.Snapshot()
+		if err != nil {
+			s.logf("index: %v", err)
+			return
+		}
+		s.snap = snap
+	}
+	if !s.checkDrift(!ch.Empty()) && ch.Empty() {
 		return
 	}
-	snap, err := s.w.Snapshot()
-	if err != nil {
-		s.logf("index: %v", err)
-		return
-	}
-	s.snap = snap
 	uris := make([]string, 0, len(s.docs))
 	for uri := range s.docs {
 		uris = append(uris, uri)
@@ -417,6 +429,52 @@ func (s *Server) poll() {
 	for _, uri := range uris {
 		s.publish(s.docs[uri])
 	}
+}
+
+// checkDrift recomputes drifted line anchors when forced or when the stamp
+// changed, and reports whether it did. Drift runs git, so it is not run per
+// keystroke; a buffer's links are matched to it by their written destination.
+func (s *Server) checkDrift(force bool) bool {
+	stamp, err := s.w.DriftStamp()
+	if err != nil {
+		s.logf("drift: %v", err)
+		return false
+	}
+	if !force && stamp == s.driftStamp {
+		return false
+	}
+	s.driftStamp = stamp
+	drifted, err := s.w.DriftAll()
+	if err != nil {
+		if !errors.Is(err, wiki.ErrNoHistory) {
+			s.logf("drift: %v", err)
+		}
+		drifted = nil
+	}
+	s.drift, s.moved = map[[2]string]wiki.Drifted{}, map[[2]string]wiki.Offer{}
+	for _, d := range drifted {
+		if d.Status == wiki.StatusLineOutOfRange {
+			s.moved[[2]string{d.Page, d.Written()}] = *d.Offer
+		} else {
+			s.drift[[2]string{d.Page, d.Written()}] = d
+		}
+	}
+	return true
+}
+
+// anchorOf returns the anchor of a destination, without its '#'.
+func anchorOf(dest string) string {
+	_, anchor, _ := strings.Cut(dest, "#")
+	return anchor
+}
+
+// driftOf returns a buffer link's drift, if its destination drifted.
+func (s *Server) driftOf(page string, l wiki.Link) (wiki.Drifted, bool) {
+	if l.Status != wiki.StatusOK || l.Kind != wiki.KindLine {
+		return wiki.Drifted{}, false
+	}
+	d, ok := s.drift[[2]string{page, l.Written()}]
+	return d, ok
 }
 
 // source is a page's text: the open buffer, or the file.
@@ -487,6 +545,21 @@ func problem(l wiki.Link) string {
 func (s *Server) publish(d *document) {
 	diags := []map[string]any{}
 	for _, l := range s.links(d) {
+		if dr, ok := s.driftOf(d.page, l); ok {
+			msg := fmt.Sprintf("the lines at %s changed since the link was committed in %.7s", l.Anchor, dr.Since)
+			if dr.Offer != nil {
+				msg = fmt.Sprintf("the lines at %s moved to %s since the link was committed in %.7s", l.Anchor, anchorOf(dr.Offer.New), dr.Since)
+			}
+			// Information, not a warning: the link still resolves.
+			diags = append(diags, map[string]any{
+				"range":    linkRange(d.text, l),
+				"severity": 3,
+				"source":   "gwiki",
+				"code":     dr.Status,
+				"message":  msg,
+			})
+			continue
+		}
 		if l.Status == wiki.StatusOK {
 			continue
 		}

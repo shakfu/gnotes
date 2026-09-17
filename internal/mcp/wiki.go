@@ -89,11 +89,14 @@ gwiki_edit needs text copied exactly from the source.`,
 			Name:  "gwiki_check",
 			Title: "Find broken links",
 			Description: `List broken links: links to missing pages, headings or files, ambiguous wiki
-links, and line ranges past the end of a file. Each comes with the repairs
-gwiki can offer.
+links, and line ranges past the end of a file. Then list drifted line anchors:
+committed links such as ../src/x.go#L42 whose lines moved or changed since the
+link was committed, so the link now points at other code. Each comes with the
+repairs gwiki can offer.
 
-Call this after renaming or deleting things, or before finishing work on the
-wiki. Apply a repair with gwiki_fix_link.`,
+Call this after renaming or deleting things, after changing code that pages
+link into, or before finishing work on the wiki. Apply a repair with
+gwiki_fix_link. For a changed anchor, read the code and update the page.`,
 			Annotations: &annotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: ptr(false)},
 			InputSchema: props(nil, object{
 				"page":  str("Restrict to links on this page, by path."),
@@ -209,8 +212,8 @@ reported, not rewritten.`,
 		tool: tool{
 			Name:  "gwiki_fix_link",
 			Title: "Repair a broken link",
-			Description: `Apply one of the repairs gwiki_check offered for a broken link, rewriting
-only the link's destination.
+			Description: `Apply one of the repairs gwiki_check offered for a broken link or a moved line
+anchor, rewriting only the link's destination.
 
 Pass the page, line and link as gwiki_check listed them, and the new
 destination of the chosen repair. A wiki link that showed its target keeps
@@ -436,6 +439,10 @@ func (s *Server) wikiCheck(raw json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	drifted, driftErr := s.wiki.Drift()
+	if driftErr != nil && !errors.Is(driftErr, wiki.ErrNoHistory) {
+		return "", driftErr
+	}
 	if a.Page != "" {
 		p, err := wiki.CleanPath(a.Page)
 		if err != nil {
@@ -447,30 +454,57 @@ func (s *Server) wikiCheck(raw json.RawMessage) (string, error) {
 				on = append(on, l)
 			}
 		}
-		broken = on
-	}
-	if len(broken) == 0 {
-		return "No broken links.", nil
+		var driftedOn []wiki.Drifted
+		for _, d := range drifted {
+			if d.Page == p {
+				driftedOn = append(driftedOn, d)
+			}
+		}
+		broken, drifted = on, driftedOn
 	}
 
-	n := limited(len(broken), a.Limit, 20)
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d broken links.\n", len(broken))
-	all, err := s.wiki.OffersFor(broken[:n])
-	if err != nil {
-		return "", err
-	}
-	for i, l := range broken[:n] {
-		b.WriteString("\n" + linkLine(l) + "\n")
-		offers := all[i]
-		if len(offers) == 0 {
-			b.WriteString("  no repair offered\n")
+	if len(broken) == 0 {
+		b.WriteString("No broken links.")
+	} else {
+		var sec strings.Builder
+		n := limited(len(broken), a.Limit, 20)
+		fmt.Fprintf(&sec, "%d broken links.\n", len(broken))
+		all, err := s.wiki.OffersFor(broken[:n])
+		if err != nil {
+			return "", err
 		}
-		for _, o := range offers {
-			fmt.Fprintf(&b, "  new: %s  (%s)\n", o.New, o.Label)
+		for i, l := range broken[:n] {
+			sec.WriteString("\n" + linkLine(l) + "\n")
+			offers := all[i]
+			if len(offers) == 0 {
+				sec.WriteString("  no repair offered\n")
+			}
+			for _, o := range offers {
+				fmt.Fprintf(&sec, "  new: %s  (%s)\n", o.New, o.Label)
+			}
 		}
+		b.WriteString(strings.TrimRight(sec.String(), "\n") + more(len(broken), n, "broken links"))
 	}
-	return strings.TrimRight(b.String(), "\n") + more(len(broken), n, "broken links"), nil
+
+	if len(drifted) > 0 {
+		var sec strings.Builder
+		n := limited(len(drifted), a.Limit, 20)
+		fmt.Fprintf(&sec, "\n\n%d drifted line anchors: the code at these lines moved or changed since the link was committed.\n", len(drifted))
+		for _, d := range drifted[:n] {
+			sec.WriteString("\n" + linkLine(d.Link) + "\n")
+			if d.Offer != nil {
+				fmt.Fprintf(&sec, "  new: %s  (%s)\n", d.Offer.New, d.Offer.Label)
+			} else {
+				sec.WriteString("  no repair offered; read the code and update the page\n")
+			}
+		}
+		b.WriteString(strings.TrimRight(sec.String(), "\n") + more(len(drifted), n, "drifted line anchors"))
+	}
+	if driftErr != nil {
+		fmt.Fprintf(&b, "\n\nNote: %v.", driftErr)
+	}
+	return b.String(), nil
 }
 
 func taskLine(t wiki.Task) string {
@@ -667,8 +701,9 @@ func (s *Server) wikiFixLink(raw json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	match := func(l wiki.Link) bool { return l.Page == p && l.Line == a.Line && l.Written() == a.Link }
 	for _, l := range broken {
-		if l.Page != p || l.Line != a.Line || l.Written() != a.Link {
+		if !match(l) {
 			continue
 		}
 		offers, err := s.wiki.Offers(l)
@@ -690,7 +725,26 @@ func (s *Server) wikiFixLink(raw json.RawMessage) (string, error) {
 		}
 		return "", fmt.Errorf("%q is not an offered repair; the offers are: %s", a.New, strings.Join(news, ", "))
 	}
-	return "", fmt.Errorf("no broken link %s on line %d of %s; run gwiki_check again", a.Link, a.Line, p)
+	drifted, err := s.wiki.Drift()
+	if err != nil && !errors.Is(err, wiki.ErrNoHistory) {
+		return "", err
+	}
+	for _, d := range drifted {
+		if !match(d.Link) {
+			continue
+		}
+		if d.Offer == nil {
+			return "", fmt.Errorf("gwiki offers no repair for %s, whose lines changed; read the code and change the page with gwiki_edit", a.Link)
+		}
+		if d.Offer.New != a.New {
+			return "", fmt.Errorf("%q is not an offered repair; the offer is: %s", a.New, d.Offer.New)
+		}
+		if err := s.wiki.Fix(d.Link, *d.Offer); err != nil {
+			return "", writeErr(err)
+		}
+		return fmt.Sprintf("fixed %s:%d  %s -> %s", p, a.Line, a.Link, d.Offer.New), nil
+	}
+	return "", fmt.Errorf("no broken link or drifted line anchor %s on line %d of %s; run gwiki_check again", a.Link, a.Line, p)
 }
 
 func (s *Server) wikiSetTask(raw json.RawMessage) (string, error) {

@@ -211,7 +211,8 @@ A fix rewrites the link's byte span in its own form, through the same write
 path as any edit (section 10).
 
 A line anchor is checked for range only. A line that moved but still exists is
-not detected.
+not detected. Superseded: `check` compares line anchors with git history; see
+[anchor-drift.md](anchor-drift.md).
 
 ## 6. The cache
 

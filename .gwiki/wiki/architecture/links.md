@@ -29,9 +29,11 @@ A markdown link is a path relative to its page, or to the repository when it sta
 | `line-out-of-range` | the file is shorter than the range |
 | `outside-repo` | the path leaves the repository |
 
+`check` also compares each committed line link with the commit that added it, and reports `line-moved` or `line-changed` when the lines differ. These are warnings unless `--strict` is given.
+
 ### Repairs
 
-[Offers](/internal/wiki/fix.go#L27) suggests replacements for a broken link: pages with a similar name, a heading that exists, the link without its line anchor, or the file found elsewhere. `gwiki check --fix` and `:fix` in the page apply one.
+[Offers](/internal/wiki/fix.go#L28) suggests replacements for a broken link: pages with a similar name, a heading that exists, the link without its line anchor, the file found elsewhere, or the line anchor where its lines moved. `gwiki check --fix` and `:fix` in the page apply one.
 
 ### Moves
 

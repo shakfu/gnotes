@@ -70,9 +70,11 @@ func (s *Snapshot) Links(page string, src []byte) []Link {
 	return out
 }
 
-// Offers returns repairs for a broken link in src; see Wiki.Offers.
-func (s *Snapshot) Offers(l Link, src []byte) ([]Offer, error) {
-	return s.w.offers(l, src, s.ix, s.renames)
+// Offers returns repairs for a broken link in src; see Wiki.Offers. It runs no
+// git, so a line out of range is offered only without its anchor; moved is the
+// caller's MovedRanges, or nil.
+func (s *Snapshot) Offers(l Link, src []byte, moved map[[2]string]Offer) ([]Offer, error) {
+	return s.w.offers(l, src, s.ix, s.renames, moved)
 }
 
 // WikiTarget resolves a [[wiki]] target to a page path and a status.
