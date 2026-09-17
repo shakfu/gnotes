@@ -152,6 +152,38 @@ func TestPageIsServedWithSecurityHeaders(t *testing.T) {
 	}
 }
 
+// The theme script is a file, since the policy forbids inline scripts, and the
+// two dark rules, one for the system setting and one for the selector, agree.
+func TestThemeAssets(t *testing.T) {
+	f := newFixture(t)
+	res, err := f.http.Client().Get(f.http.URL + "/theme.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK || !strings.Contains(res.Header.Get("Content-Type"), "javascript") || !strings.Contains(string(raw), "gwiki-theme") {
+		t.Fatalf("GET /theme.js: %s %s\n%s", res.Status, res.Header.Get("Content-Type"), raw)
+	}
+
+	page, _ := assets.ReadFile("assets/index.html")
+	head, _, _ := strings.Cut(string(page), "</head>")
+	if !strings.Contains(head, `<script src="theme.js"></script>`) || !strings.Contains(string(page), `<select id="theme"`) {
+		t.Fatalf("index.html lacks the theme script in its head or the selector:\n%s", page)
+	}
+
+	css, _ := assets.ReadFile("assets/app.css")
+	block := regexp.MustCompile(`(?s)(:root:not\(\[data-theme="light"\]\)|:root\[data-theme="dark"\]) \{(.*?)\}`)
+	found := block.FindAllStringSubmatch(string(css), -1)
+	if len(found) != 2 {
+		t.Fatalf("found %d dark rules, want 2", len(found))
+	}
+	norm := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	if norm(found[0][2]) != norm(found[1][2]) {
+		t.Fatalf("the dark rules differ:\n%s\n%s", found[0][2], found[1][2])
+	}
+}
+
 func TestAuthorisation(t *testing.T) {
 	f := newFixture(t)
 
@@ -482,9 +514,10 @@ func TestScriptCallsRealRoutes(t *testing.T) {
 	}
 }
 
-// TestListContinuation runs the page's own Enter handling under node, so the
-// browser and the terminal editor continue lists the same way.
-func TestListContinuation(t *testing.T) {
+// runPageScript runs app.js under node against a stub browser, followed by
+// tail, and returns what it printed. tail must print OK when its checks pass.
+func runPageScript(t *testing.T, tail string) {
+	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node is not installed")
@@ -493,7 +526,7 @@ func TestListContinuation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The script runs against a stub browser; only the list logic is called.
+	// The script runs against a stub browser; only pure helpers are called.
 	harness := `
 globalThis.location = { search: "", hash: "#/" };
 const listeners = {};
@@ -505,12 +538,27 @@ const fakeNode = () => ({
 globalThis.document = {
   getElementById: fakeNode, querySelector: () => null, querySelectorAll: () => [],
   createElement: fakeNode, addEventListener() {}, activeElement: { tagName: "BODY" },
+  documentElement: { dataset: {} }, cookie: "",
 };
 globalThis.window = { addEventListener() {}, __lists: {} };
 globalThis.fetch = async () => ({ ok: true, text: async () => "[]", statusText: "" });
 globalThis.EventSource = function () { return { onmessage: null, onerror: null }; };
 globalThis.CSS = { escape: (s) => s };
-` + string(script) + `
+` + string(script) + tail
+	file := filepath.Join(t.TempDir(), "harness.mjs")
+	if err := os.WriteFile(file, []byte(harness), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, file).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "OK") {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}
+
+// TestListContinuation runs the page's own Enter handling under node, so the
+// browser and the terminal editor continue lists the same way.
+func TestListContinuation(t *testing.T) {
+	runPageScript(t, `
 const cases = [
   ["- one", "- one\n- "],
   ["3. one", "3. one\n4. "],
@@ -539,13 +587,24 @@ for (const [line, want] of cases) {
   }
 }
 console.log(failed === 0 ? "OK" : "FAILED " + failed);
-`
-	file := filepath.Join(t.TempDir(), "harness.mjs")
-	if err := os.WriteFile(file, []byte(harness), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	out, err := exec.Command(node, file).CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "OK") {
-		t.Fatalf("node: %v\n%s", err, out)
-	}
+`)
+}
+
+// A task's text is shown with its links as the text they display, as the
+// terminal interface shows it.
+func TestTaskTextShowsLinksAsText(t *testing.T) {
+	runPageScript(t, `
+const cases = [
+  ["write a README, as [[Writing pages#Sections]] explains", "write a README, as Writing pages#Sections explains"],
+  ["see [[lexer/grammar|the grammar]] and [code](../x.go#L2)", "see the grammar and code"],
+  ["![flow](img/flow.png) and [[a]], [[b|c]]", "flow and a, c"],
+  ["no links here", "no links here"],
+];
+let failed = 0;
+for (const [text, want] of cases) {
+  const got = inlineText(text);
+  if (got !== want) { console.log("FAIL", JSON.stringify(text), "->", JSON.stringify(got), "want", JSON.stringify(want)); failed++; }
+}
+console.log(failed === 0 ? "OK" : "FAILED " + failed);
+`)
 }

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gwiki</title>
 <link rel="stylesheet" href="app.css">
+<script src="theme.js"></script>
 </head>
 <body>
 <header>
@@ -15,6 +16,11 @@
     <a href="#/broken" data-key="c">broken</a>
     <a href="#/tasks" data-key="t">tasks</a>
     <button id="new" type="button">new page</button>
+    <select id="theme" aria-label="colour theme" title="colour theme">
+      <option value="">system</option>
+      <option value="light">light</option>
+      <option value="dark">dark</option>
+    </select>
   </nav>
   <span id="status"></span>
 </header>

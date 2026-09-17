@@ -162,7 +162,7 @@ A rename returns edits for the editor to apply, so the pages it changes are left
 gwiki serve
 ```
 
-Opens the wiki in your browser: the same overview, the page tree, pages with their links and backlinks, search, broken links, tasks, and an editor. A link into the code opens that file at its lines. The view updates by itself when the command line, the terminal interface or an agent writes.
+Opens the wiki in your browser: the same overview, the page tree, pages with their links and backlinks, search, broken links, tasks, and an editor. A link into the code opens that file at its lines. The view updates by itself when the command line, the terminal interface or an agent writes. The selector in the header chooses a light or dark theme, or follows the system's; the choice is remembered across runs.
 
 The whole page is compiled into the binary, so there is nothing to install and it works with no network. The address carries an access token, and the API answers nothing without it: any page open in your browser can reach `127.0.0.1`, so the token, not the loopback binding, is the protection. `--no-open` prints the address without opening a browser, and `--addr` chooses the port. No browser opens over SSH, under CI, or on a Unix session with no display; `--open` forces it.
 

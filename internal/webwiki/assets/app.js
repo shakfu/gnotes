@@ -78,6 +78,15 @@ function ago(iso) {
   return iso.slice(0, 10);
 }
 
+// inlineText shows links as the text they display: [[target|label]] as label,
+// [[target]] as target, and [text](dest) as text. It follows inlineText in
+// internal/tui, so both interfaces show a task alike.
+function inlineText(s) {
+  return String(s)
+    .replace(/\[\[(?:[^\]|]*\|)?([^\]]*)\]\]/g, "$1")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1");
+}
+
 // snippet turns the search markers into highlighted text, escaping the rest.
 function snippet(text) {
   const out = el("span", { class: "snippet" });
@@ -232,7 +241,7 @@ function taskRow(t, o) {
   box.addEventListener("change", () => setTask(t, box.checked ? "done" : "open"));
   return el("li", {},
     el("span", {}, t.line ? box : null, " ",
-      el("a", { href: pageHref(t.page) + (t.line ? "" : ""), text: t.text })),
+      el("a", { href: pageHref(t.page), text: inlineText(t.text) })),
     el("span", { class: "when" }, due || where));
 }
 
@@ -241,7 +250,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 async function setTask(t, status) {
   try {
     await api("/api/task", { method: "POST", body: JSON.stringify({ page: t.page, line: t.line, text: t.text, status }) });
-    say(t.text + ": " + status);
+    say(inlineText(t.text) + ": " + status);
     route();
   } catch (err) {
     say(err.message, true);
@@ -475,8 +484,23 @@ document.getElementById("search").addEventListener("keydown", (ev) => {
 });
 document.getElementById("new").addEventListener("click", newPage);
 
+// The theme is in a cookie rather than localStorage: serve picks a new port
+// each run, which is a new origin for storage, while a cookie is kept per host.
+const themeSelect = document.getElementById("theme");
+themeSelect.value = document.documentElement.dataset.theme || "";
+themeSelect.addEventListener("change", () => {
+  const theme = themeSelect.value;
+  if (theme) {
+    document.documentElement.dataset.theme = theme;
+    document.cookie = "gwiki-theme=" + theme + "; Path=/; Max-Age=31536000; SameSite=Strict";
+  } else {
+    delete document.documentElement.dataset.theme;
+    document.cookie = "gwiki-theme=; Path=/; Max-Age=0; SameSite=Strict";
+  }
+});
+
 document.addEventListener("keydown", (ev) => {
-  const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
   if (typing || ev.metaKey || ev.ctrlKey || ev.altKey) return;
   if (ev.key === "/") { ev.preventDefault(); document.getElementById("search").focus(); return; }
   const target = document.querySelector("nav a[data-key='" + ev.key + "']");

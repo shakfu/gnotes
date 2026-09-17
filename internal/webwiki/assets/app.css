@@ -1,4 +1,5 @@
 :root {
+  color-scheme: light;
   --bg: #fbfbf9;
   --fg: #22252a;
   --dim: #6b7280;
@@ -10,8 +11,11 @@
   --panel: #f3f3ee;
 }
 
+/* Dark follows the system unless the theme selector forced light, and applies
+   whenever it forced dark. The two blocks must stay equal. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --bg: #16181d;
     --fg: #e5e7eb;
     --dim: #9ca3af;
@@ -22,6 +26,19 @@
     --mark: #78350f;
     --panel: #1d2026;
   }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #16181d;
+  --fg: #e5e7eb;
+  --dim: #9ca3af;
+  --line: #2b2f36;
+  --link: #93c5fd;
+  --broken: #fca5a5;
+  --ok: #86efac;
+  --mark: #78350f;
+  --panel: #1d2026;
 }
 
 * { box-sizing: border-box; }
@@ -50,6 +67,7 @@ header {
 nav { display: flex; gap: 10px; align-items: center; }
 nav a, nav button { color: var(--dim); text-decoration: none; background: none; border: 0; font: inherit; cursor: pointer; padding: 0; }
 nav a:hover, nav button:hover { color: var(--fg); }
+#theme { font: inherit; font-size: 13px; color: var(--dim); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; cursor: pointer; }
 #status { margin-left: auto; color: var(--dim); font-size: 13px; }
 #status.error { color: var(--broken); }
 

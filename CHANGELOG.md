@@ -10,6 +10,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Fro
 
 **`gwiki export <dir>` copies the wiki for GitHub and other markdown hosts.** Each resolving `[[wiki]]` link becomes a relative markdown link to the same page, with a heading's GitHub slug, and keeps the text it displayed; GitHub shows a wiki link as text. Relative links into the code are re-pointed from `dir`, and rooted at the repository when `dir` is outside it. The pages themselves are not changed, so wiki links keep surviving a move of the linking page. Broken and ambiguous wiki links are copied as written and listed. `dir` must be empty or an earlier export: `.gwiki-export` lists what an export wrote, and the next export removes only those files it no longer writes, so files added beside it, such as a `CNAME`, are kept.
 
+**The browser view has a theme selector: system, light or dark.** It followed the system setting only. The choice is kept in a cookie, not `localStorage`, because `serve` listens on a new port each run, which is a new origin for storage, while a cookie is kept per host. A forced theme is applied from `<head>` before the page is drawn, so it does not flash the system theme first.
+
+### Fixed
+
+**The browser view showed links in a task's text as markdown**, such as `[[Writing pages#Sections]]`, on the overview and the tasks screen. They now show as the text they display, as in the terminal interface. The text sent when a task is ticked is unchanged, since the server matches it against the page.
+
 ## [0.2.0]
 
 ### Added
