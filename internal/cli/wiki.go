@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -56,6 +57,20 @@ skipped with a note.`}
 each link's own form. A path ending in / keeps the file name. --dry-run lists
 the changes without making them. The move is refused, and nothing written, if
 a page it edits changed since it was read.`}
+	cmdWikiExport = &command{name: "export", args: "<dir> [--json]", summary: "copy the wiki with [[wiki]] links as markdown links, for GitHub and other hosts", run: wikiExport,
+		help: `Copies .gwiki/wiki into dir. Each [[wiki]] link that resolves becomes a
+relative markdown link to the same page and heading, keeping the text it
+showed: [[Design sketch#Tokens]] becomes
+[Design sketch#Tokens](lexer/design-sketch.md#tokens). GitHub and other
+markdown hosts render these, where they show a wiki link as text. Relative
+links to files outside the wiki are re-pointed from dir: still relative when
+dir is inside the repository, else rooted at it, as /src/lexer.go#L42. The
+pages themselves are not changed. Broken and ambiguous wiki links are copied
+as written and listed.
+
+dir must be empty, missing, or an earlier export. The export records what it
+wrote in dir/.gwiki-export, and the next export removes those files it no
+longer writes, and no others.`}
 	cmdWikiRemove  = &command{name: "rm", args: "<page> [--force]", summary: "delete a page; refused while pages link to it", run: wikiRemove}
 	cmdWikiTag     = &command{name: "tag", args: "<page> <tag>...", summary: "add tags to a page's front matter", run: func(a *App, args []string) error { return wikiTag(a, args, true) }}
 	cmdWikiUntag   = &command{name: "untag", args: "<page> <tag>...", summary: "remove tags from a page's front matter", run: func(a *App, args []string) error { return wikiTag(a, args, false) }}
@@ -757,6 +772,41 @@ func wikiMove(a *App, args []string) error {
 				t.add(where, l.Status, l.Written())
 			}
 			t.write(a.Stdout)
+		}
+		return nil
+	})
+}
+
+func wikiExport(a *App, args []string) error {
+	fs := a.flags("export")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("%w: export takes the directory to write", errUsage)
+	}
+	return a.withWiki(func(w *wiki.Wiki) error {
+		dir := fs.Arg(0)
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(a.Dir, dir)
+		}
+		res, err := w.Export(dir)
+		if err != nil {
+			return err
+		}
+		if *asJSON {
+			return a.writeJSON(res)
+		}
+		a.printf("exported %s and %s to %s, rewriting %s\n", plural(res.Pages, "page"), plural(res.Files, "other file"), display.Line(res.Dir), plural(res.Links, "link"))
+		for _, rel := range res.Removed {
+			a.printf("%s  %s\n", a.style(ansiDim, "removed"), display.Line(rel))
+		}
+		if len(res.Skipped) > 0 {
+			a.printf("\n%s\n", a.style(ansiYellow, "wiki links copied as written:"))
+			for _, l := range res.Skipped {
+				a.printf("  %s:%d  %s  %s\n", l.Page, l.Line, display.Line(l.Written()), l.Status)
+			}
 		}
 		return nil
 	})

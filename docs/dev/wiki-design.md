@@ -1138,6 +1138,16 @@ the `event`, `state`, `store`, `session`, `rank`, `ulid` and `web` packages.
 Non-test Go fell from 26,323 to 17,093 lines; the binary from 21.1 MB to
 20.3 MB, since the cache keeps SQLite. Migration stays available in 0.1.1.
 
+### Export (2026-09-17)
+
+`[[wiki]]` links show as text on GitHub, against the goal in section 1; in
+this wiki 67 of 91 links were wiki links. `gwiki export <dir>` writes a copy
+with each resolving wiki link as a relative markdown link, keeping its text,
+and relative code links re-pointed from `dir`. Export over rewriting the pages
+in place: pages keep wiki links, which survive moving the linking page, and a
+markdown host renders the copy. The export directory holds a manifest,
+`.gwiki-export`, so a later export removes only the files it wrote.
+
 ## 18. Open questions
 
 1. **Global notes.** Decided: dropped with the notes model (section 17,

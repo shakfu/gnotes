@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Fro
 
 ## [Unreleased]
 
+### Added
+
+**`gwiki export <dir>` copies the wiki for GitHub and other markdown hosts.** Each resolving `[[wiki]]` link becomes a relative markdown link to the same page, with a heading's GitHub slug, and keeps the text it displayed; GitHub shows a wiki link as text. Relative links into the code are re-pointed from `dir`, and rooted at the repository when `dir` is outside it. The pages themselves are not changed, so wiki links keep surviving a move of the linking page. Broken and ambiguous wiki links are copied as written and listed. `dir` must be empty or an earlier export: `.gwiki-export` lists what an export wrote, and the next export removes only those files it no longer writes, so files added beside it, such as a `CNAME`, are kept.
+
 ## [0.2.0]
 
 ### Added

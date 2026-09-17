@@ -401,6 +401,34 @@ func TestWikiCheckDrift(t *testing.T) {
 	}
 }
 
+func TestWikiExport(t *testing.T) {
+	f := wikiFixture(t)
+	if _, stderr, code := f.run("export"); code != 2 || !strings.Contains(stderr, "usage: gwiki export") {
+		t.Fatalf("export without a directory: exit %d, %s", code, stderr)
+	}
+	before := readPage(t, f, "index")
+	out := filepath.Join(f.dir, "site")
+	stdout := f.mustRun("export", "site")
+	for _, want := range []string{"exported 5 pages and 0 other files to " + out + ", rewriting 2 links", "lexer/design-sketch:6  [[Missing page]]  missing-page"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("export lacks %q:\n%s", want, stdout)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(out, "index.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "Start at [Design sketch](lexer/design-sketch.md) or") || readPage(t, f, "index") != before {
+		t.Fatalf("exported index:\n%s", raw)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(out, "lexer", "grammar.md")); !strings.Contains(string(raw), "[code](../../main.go)") {
+		t.Fatalf("exported grammar:\n%s", raw)
+	}
+	if _, stderr, code := f.run("export", "."); code != 1 || !strings.Contains(stderr, "holds or is inside the pages") {
+		t.Fatalf("export over the repository: exit %d, %s", code, stderr)
+	}
+}
+
 func TestWikiMCP(t *testing.T) {
 	f := wikiFixture(t)
 	frames := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}

@@ -109,7 +109,7 @@ func init() {
 	wikiTable = newTable("gwiki", []*command{
 		cmdWikiInit, cmdWikiList, cmdWikiShow, cmdWikiSearch, cmdWikiLinks, cmdWikiBacklinks,
 		cmdWikiCheck, cmdWikiOrphans, cmdWikiTasks,
-		cmdWikiNew, cmdWikiEdit, cmdWikiMove, cmdWikiRemove, cmdWikiTag, cmdWikiUntag,
+		cmdWikiNew, cmdWikiEdit, cmdWikiMove, cmdWikiRemove, cmdWikiExport, cmdWikiTag, cmdWikiUntag,
 		cmdWikiDone, cmdWikiDoing, cmdWikiReopen, cmdWikiPromote,
 		cmdWikiUI, cmdWikiServe, cmdWikiMCP, cmdWikiLSP, cmdWikiCache,
 		helpCommand(wikiHelp, &wikiTable),

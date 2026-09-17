@@ -191,6 +191,7 @@ gwiki new "Parser notes" --in lexer -t parser -m "First line."
 gwiki new "Ship it" --task
 gwiki edit "parser notes"                   # opens $EDITOR on the page
 gwiki mv lexer/parser-notes archive/ --dry-run   # the links it would rewrite
+gwiki export site                           # a copy with [[wiki]] links as markdown links, for GitHub
 gwiki rm lexer/parser-notes                 # refused while pages link to it
 gwiki tag grammar parser    gwiki untag grammar parser
 gwiki tasks -s open

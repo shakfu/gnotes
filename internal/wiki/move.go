@@ -323,12 +323,17 @@ func wikiText(src []byte, l Link, target string) string {
 // path, from a page, keeping the link's anchor and its repository-rooted style.
 // dir ends the path with a slash, for a link to a directory.
 func (w *Wiki) markdownDest(src []byte, l Link, fromPage, target string, dir bool) string {
+	return w.markdownDestFrom(src, l, filepath.Dir(w.file(fromPage)), target, dir)
+}
+
+// markdownDestFrom is markdownDest from a directory rather than a page.
+func (w *Wiki) markdownDestFrom(src []byte, l Link, fromDir, target string, dir bool) string {
 	var dest string
 	if strings.HasPrefix(l.Target, "/") {
 		rel, _ := filepath.Rel(w.Repo, target)
 		dest = "/" + filepath.ToSlash(rel)
 	} else {
-		rel, _ := filepath.Rel(filepath.Dir(w.file(fromPage)), target)
+		rel, _ := filepath.Rel(fromDir, target)
 		dest = filepath.ToSlash(rel)
 	}
 	if dir {
