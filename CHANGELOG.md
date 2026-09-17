@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Fro
 
 ## [Unreleased]
 
+## [0.3.0]
+
 ### Added
 
 **`gwiki export <dir>` copies the wiki for GitHub and other markdown hosts.** Each resolving `[[wiki]]` link becomes a relative markdown link to the same page, with a heading's GitHub slug, and keeps the text it displayed; GitHub shows a wiki link as text. Relative links into the code are re-pointed from `dir`, and rooted at the repository when `dir` is outside it. The pages themselves are not changed, so wiki links keep surviving a move of the linking page. Broken and ambiguous wiki links are copied as written and listed. `dir` must be empty or an earlier export: `.gwiki-export` lists what an export wrote, and the next export removes only those files it no longer writes, so files added beside it, such as a `CNAME`, are kept.
@@ -15,6 +17,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Fro
 ### Fixed
 
 **The browser view showed links in a task's text as markdown**, such as `[[Writing pages#Sections]]`, on the overview and the tasks screen. They now show as the text they display, as in the terminal interface. The text sent when a task is ticked is unchanged, since the server matches it against the page.
+
+**Search results in the browser view showed markdown in their snippets**, such as `## Cache and refresh`, list markers and table pipes. Snippets now drop that syntax, by the rules the terminal interface uses.
 
 ## [0.2.0]
 

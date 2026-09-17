@@ -87,10 +87,20 @@ function inlineText(s) {
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1");
 }
 
+// plainSnippet takes the markdown syntax out of a search snippet, which is page
+// source, keeping the match markers. It follows snippet in internal/tui.
+function plainSnippet(text) {
+  return inlineText(text)
+    .replace(/(^|\s)(?:[-*+]|\d+[.)])\s(?:\[[ xX]\]\s)?/g, "$1")
+    .replace(/(^|\s)#{1,6}\s/g, "$1")
+    .replace(/```\w*|-{3,}|[|`]|\*\*|__/g, " ")
+    .split(/\s+/).filter(Boolean).join(" ");
+}
+
 // snippet turns the search markers into highlighted text, escaping the rest.
 function snippet(text) {
   const out = el("span", { class: "snippet" });
-  for (const part of String(text).split("\u0002")) {
+  for (const part of plainSnippet(text).split("\u0002")) {
     const cut = part.indexOf("\u0003");
     if (cut < 0) { out.append(part); continue; }
     out.append(el("mark", { text: part.slice(0, cut) }), part.slice(cut + 1));

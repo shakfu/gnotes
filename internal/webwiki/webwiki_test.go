@@ -608,3 +608,27 @@ for (const [text, want] of cases) {
 console.log(failed === 0 ? "OK" : "FAILED " + failed);
 `)
 }
+
+// A search snippet is page source; it is shown without markdown syntax, as the
+// terminal interface shows it, keeping the match markers. <m> and </m> stand for
+// the markers here.
+func TestSearchSnippetDropsMarkdown(t *testing.T) {
+	runPageScript(t, `
+const S = String.fromCharCode(2), E = String.fromCharCode(3);
+const mark = (s) => s.split("<m>").join(S).split("</m>").join(E);
+const cases = [
+  ["## Cache and refresh\n\n### Pages are the <m>truth</m>", "Cache and refresh Pages are the <m>truth</m>"],
+  ["- [ ] benchmark the <m>lexer</m> due:2026-10-01\n- [x] done", "benchmark the <m>lexer</m> due:2026-10-01 done"],
+  ["1. a **bold** <m>cache</m> and __under__ 2) b", "a bold <m>cache</m> and under b"],
+  ["| status | means |\n|---|---|\n| `+"`ok`"+` | <m>resolves</m> |", "status means ok <m>resolves</m>"],
+  ["See [[Design sketch#Tokens|the tokens]] and [code](../x.go#L2) ![img](a.png)", "See the tokens and code img"],
+  ["a#b is not a heading; # is one; ---- rule", "a#b is not a heading; is one; rule"],
+];
+let failed = 0;
+for (const [text, want] of cases) {
+  const got = plainSnippet(mark(text));
+  if (got !== mark(want)) { console.log("FAIL", JSON.stringify(text), "->", JSON.stringify(got)); failed++; }
+}
+console.log(failed === 0 ? "OK" : "FAILED " + failed);
+`)
+}
