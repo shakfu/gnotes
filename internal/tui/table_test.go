@@ -43,9 +43,14 @@ func TestTableLayout(t *testing.T) {
 }
 
 func TestSnippetDropsMarkdown(t *testing.T) {
-	in := "## Tokens | lexer | Ada | ```go See [[lexer/grammar|the \x02grammar\x03]] and [code](x.go#L1). - [ ] **bold** - item 1. first"
+	in := "## Tokens | lexer | Ada | ```go See [[lexer/grammar|the \x02grammar\x03]] and [code](x.go#L1).\n- [ ] **bold**\n  - item\n1. first\n2) second\n### Schema version"
 	got := stripANSI(snippet(in, 200))
-	if want := "Tokens lexer Ada See the grammar and code. bold item first"; got != want {
+	if want := "Tokens lexer Ada See the grammar and code. bold item first second Schema version"; got != want {
+		t.Errorf("snippet = %q, want %q", got, want)
+	}
+	// A number, dash or hash inside a line is text, not a marker.
+	in = "...The cache schema went to version 5. See [[Servers]]; a - b and 3) c, issue # 12.\n"
+	if got, want := stripANSI(snippet(in, 200)), "...The cache schema went to version 5. See Servers; a - b and 3) c, issue # 12."; got != want {
 		t.Errorf("snippet = %q, want %q", got, want)
 	}
 }

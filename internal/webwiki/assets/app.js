@@ -91,8 +91,8 @@ function inlineText(s) {
 // source, keeping the match markers. It follows snippet in internal/tui.
 function plainSnippet(text) {
   return inlineText(text)
-    .replace(/(^|\s)(?:[-*+]|\d+[.)])\s(?:\[[ xX]\]\s)?/g, "$1")
-    .replace(/(^|\s)#{1,6}\s/g, "$1")
+    .replace(/^([ \t]*)(?:[-*+]|\d+[.)])[ \t](?:\[[ xX]\][ \t])?/gm, "$1")
+    .replace(/^([ \t]*)#{1,6}[ \t]/gm, "$1")
     .replace(/```\w*|-{3,}|[|`]|\*\*|__/g, " ")
     .split(/\s+/).filter(Boolean).join(" ");
 }

@@ -104,10 +104,12 @@ func (m *WikiModel) viewHits() []string {
 
 // Markdown syntax removed from a snippet, which is page source.
 var (
-	snipWiki    = regexp.MustCompile(`\[\[(?:[^\]|]*\|)?([^\]]*)\]\]`)
-	snipLink    = regexp.MustCompile(`!?\[([^\]]*)\]\([^)]*\)`)
-	snipHeading = regexp.MustCompile(`(^|\s)#{1,6}\s`)
-	snipItem    = regexp.MustCompile(`(^|\s)(?:[-*+]|\d+[.)])\s(?:\[[ xX]\]\s)?`)
+	snipWiki = regexp.MustCompile(`\[\[(?:[^\]|]*\|)?([^\]]*)\]\]`)
+	snipLink = regexp.MustCompile(`!?\[([^\]]*)\]\([^)]*\)`)
+	// Heading and list markers only at the start of a line, or "version 5. See"
+	// loses "5. " and "# is" loses "# ".
+	snipHeading = regexp.MustCompile(`(?m)^([ \t]*)#{1,6}[ \t]`)
+	snipItem    = regexp.MustCompile(`(?m)^([ \t]*)(?:[-*+]|\d+[.)])[ \t](?:\[[ xX]\][ \t])?`)
 	snipRule    = regexp.MustCompile("```\\w*|-{3,}|[|`]|\\*\\*|__")
 )
 

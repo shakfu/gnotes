@@ -20,6 +20,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Fro
 
 **Search results in the browser view showed markdown in their snippets**, such as `## Cache and refresh`, list markers and table pipes. Snippets now drop that syntax, by the rules the terminal interface uses.
 
+**Search snippets lost numbers, dashes and hashes inside a line**, in both the terminal interface and the browser view: "version 5. See" showed as "version See" and "issue # 12" as "issue 12", because list and heading markers were matched after any space. They now match only at the start of a line.
+
 ## [0.2.0]
 
 ### Added

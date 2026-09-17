@@ -619,10 +619,12 @@ const mark = (s) => s.split("<m>").join(S).split("</m>").join(E);
 const cases = [
   ["## Cache and refresh\n\n### Pages are the <m>truth</m>", "Cache and refresh Pages are the <m>truth</m>"],
   ["- [ ] benchmark the <m>lexer</m> due:2026-10-01\n- [x] done", "benchmark the <m>lexer</m> due:2026-10-01 done"],
-  ["1. a **bold** <m>cache</m> and __under__ 2) b", "a bold <m>cache</m> and under b"],
+  ["1. a **bold** <m>cache</m> and __under__\n2) b", "a bold <m>cache</m> and under b"],
+  ["...The cache schema went to version 5. See [[Servers]]; a - b and 3) c.\n", "...The cache schema went to version 5. See Servers; a - b and 3) c."],
+  ["  - nested\n    - [x] deeper", "nested deeper"],
   ["| status | means |\n|---|---|\n| `+"`ok`"+` | <m>resolves</m> |", "status means ok <m>resolves</m>"],
   ["See [[Design sketch#Tokens|the tokens]] and [code](../x.go#L2) ![img](a.png)", "See the tokens and code img"],
-  ["a#b is not a heading; # is one; ---- rule", "a#b is not a heading; is one; rule"],
+  ["a#b is not a heading; nor # this; ---- rule\n  ## but this is", "a#b is not a heading; nor # this; rule but this is"],
 ];
 let failed = 0;
 for (const [text, want] of cases) {
